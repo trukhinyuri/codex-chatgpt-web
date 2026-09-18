@@ -109,6 +109,20 @@ function result(value: Record<string, unknown>, isError = false) {
   };
 }
 
+function errorOf(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * A compensating cleanup that also fails must not discard the original failure's message (e.g. why
+ * a token was rejected): both errors stay available via AggregateError.errors, but the visible
+ * `.message` is the original action's, not a generic "cleanup also failed" string.
+ */
+export function failedActionAfterCleanup(actionError: unknown, cleanupError: unknown): AggregateError {
+  const action = errorOf(actionError);
+  return new AggregateError([action, errorOf(cleanupError)], action.message);
+}
+
 function afterSafeStart(contract: ChatGptMcpContract, description: string): string {
   return contract === "safe"
     ? `For a Zero Risk request connected by codex_turn_start. ${description}`
@@ -475,10 +489,7 @@ export async function runChatGptMcpServer(options: {
       try {
         await settleTurnActivity(turnToken, activityId);
       } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "Codex Native claim failed and its broker activity could not be retired",
-        );
+        throw failedActionAfterCleanup(error, cleanupError);
       }
       throw error;
     }
@@ -574,10 +585,7 @@ export async function runChatGptMcpServer(options: {
           bindingId,
         });
       } catch (releaseError) {
-        throw new AggregateError(
-          [error, releaseError],
-          "Codex Native invocation failed and its abandoned broker binding could not be retired",
-        );
+        throw failedActionAfterCleanup(error, releaseError);
       }
       if (error instanceof TurnBrokerTimeoutError) {
         const toolName = wireName(tool);
