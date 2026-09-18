@@ -128,6 +128,9 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
         if (typeof message.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(message.name)) {
           helperError.name = message.name;
         }
+        if (typeof message.code === "string" && /^[a-z][a-z_]{0,63}(?::[a-z_]{1,40})?$/.test(message.code)) {
+          helperError.code = message.code;
+        }
         finish(helperError);
         return;
       }

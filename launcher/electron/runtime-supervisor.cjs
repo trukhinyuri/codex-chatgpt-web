@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
@@ -25,6 +26,123 @@ const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
 const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
 const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+// tunnel-client starts `codex app-server`, which asks the bridge for /v1/models right away. Starting
+// it before the bridge answers /healthz only produces refused connections; wait for the bridge first,
+// but never block a tunnel start on a bridge that is down for longer than this.
+const TUNNEL_BRIDGE_HEALTH_WAIT_MS = 30_000;
+// A Codex turn may ask for one tunnel restart while it waits for the connector, and only when the
+// tunnel does not answer /readyz. Several waiting turns must not turn that into a restart loop.
+const CONNECTOR_TUNNEL_RECOVERY_INTERVAL_MS = 2 * 60_000;
+// A "not contacted" answer needs a fresh reading of the running tunnel's counters.
+const TUNNEL_CONTACT_OBSERVATION_FRESH_MS = 60_000;
+/**
+ * tunnel-client versions whose /metrics layout was checked against their source
+ * (pkg/dispatcher/internal/metrics.go, processor.go): the command_end_to_end_latency_milliseconds
+ * histogram carries request_method, channel and tunnel_service_status. Only for these versions does a
+ * readable /metrics page without any command series mean that ChatGPT sent nothing.
+ */
+const TUNNEL_CONTACT_METRICS_VERIFIED_VERSIONS = new Set(["0.0.12"]);
+const TUNNEL_CONTACT_METHODS = new Set(["initialize", "tools/list", "tools/call"]);
+
+function parsePrometheusLabels(text) {
+  const labels = {};
+  const pattern = /([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
+  for (const match of text.matchAll(pattern)) {
+    labels[match[1]] = match[2].replace(/\\(["\\n])/g, (_all, escaped) => escaped === "n" ? "\n" : escaped);
+  }
+  return labels;
+}
+
+/**
+ * Reads ChatGPT's contact with this tunnel from tunnel-client's Prometheus page: successful
+ * initialize, tools/list and tools/call commands on the main channel. The harpoon channel is
+ * tunnel-service's own control traffic and does not come from a ChatGPT conversation.
+ */
+function parseTunnelContactMetrics(text) {
+  const result = { contacts: 0, commandSeries: 0, processStartSeconds: null, exposition: false };
+  if (typeof text !== "string") return result;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const processStart = /^process_start_time_seconds\s+([0-9.eE+-]+)$/.exec(line);
+    if (processStart) {
+      const value = Number(processStart[1]);
+      if (Number.isFinite(value) && value > 0) result.processStartSeconds = value;
+      result.exposition = true;
+      continue;
+    }
+    if (/^(go|process|promhttp)_[A-Za-z0-9_]+(\{[^}]*\})?\s+\S+$/.test(line)) {
+      result.exposition = true;
+      continue;
+    }
+    const series = /^command_end_to_end_latency_milliseconds_count\{([^}]*)\}\s+([0-9.eE+-]+)$/.exec(line);
+    if (!series) continue;
+    result.exposition = true;
+    result.commandSeries += 1;
+    const labels = parsePrometheusLabels(series[1]);
+    const value = Number(series[2]);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (!TUNNEL_CONTACT_METHODS.has(labels.request_method)) continue;
+    if (labels.tunnel_service_status !== "200") continue;
+    if (labels.channel !== undefined && labels.channel !== "main") continue;
+    result.contacts += value;
+  }
+  return result;
+}
+
+function tunnelFingerprint(tunnelId) {
+  return createHash("sha256").update(String(tunnelId)).digest("hex");
+}
+
+/**
+ * What a tunnel's contact record says: "observed" once ChatGPT reached this tunnel (kept across
+ * tunnel restarts), "not-observed" only from a fresh, fully understood reading of the running
+ * tunnel with no ChatGPT command at all, and "unknown" otherwise. A missing metric is never
+ * treated as proof that ChatGPT did not connect.
+ */
+function tunnelContactStatus(record, now = Date.now()) {
+  if (!record || typeof record !== "object") return { status: "unknown", at: null };
+  if (typeof record.lastContactAt === "string" && Number.isFinite(Date.parse(record.lastContactAt))) {
+    return { status: "observed", at: record.lastContactAt };
+  }
+  const observedAt = Date.parse(record.observedAt);
+  if (record.metricsReadable === true
+    && record.metricsVerified === true
+    && Number.isFinite(observedAt)
+    && now - observedAt <= TUNNEL_CONTACT_OBSERVATION_FRESH_MS) {
+    const startedAt = Number.isFinite(record.processStartSeconds)
+      ? new Date(record.processStartSeconds * 1_000).toISOString()
+      : null;
+    return { status: "not-observed", at: startedAt };
+  }
+  return { status: "unknown", at: null };
+}
+
+/**
+ * Everything the running tunnel-client and its MCP child were started from. When a setup change
+ * leaves this identical, the tunnel keeps running and only the bridge daemon restarts.
+ */
+function tunnelRuntimeIdentity(config, tunnelClientDigest = null) {
+  if (!config || config.mode !== "full" || !config.tunnel) return null;
+  return JSON.stringify({
+    releaseVersion: config.releaseVersion,
+    runtimeCommand: config.runtimeCommand,
+    brokerSocketPath: config.brokerSocketPath,
+    browserInteractionMode: config.browserInteractionMode ?? "automatic",
+    tunnel: config.tunnel,
+    // Setup may upgrade tunnel-client in place; a new binary needs a new process.
+    tunnelClientDigest,
+  });
+}
+
+function installedTunnelClientDigest(config) {
+  try {
+    const manifest = readJson(path.join(path.dirname(config.tunnel.binaryPath), "tunnel-client-manifest.json"));
+    return typeof manifest?.binarySha256 === "string" ? manifest.binarySha256 : null;
+  } catch {
+    return null;
+  }
+}
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -329,6 +447,7 @@ class RuntimeSupervisor {
     launcherProfile = "production",
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
+    onTunnelStarted,
   }) {
     this.app = app;
     this.logger = logger;
@@ -363,6 +482,12 @@ class RuntimeSupervisor {
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
+    this.onTunnelStarted = typeof onTunnelStarted === "function" ? onTunnelStarted : null;
+    // A tunnel kept running while setup restarts only the daemon, with the identity it was started from.
+    this.preservedTunnel = null;
+    this.lastConnectorTunnelRecoveryAt = 0;
+    this.contactStatePath = path.join(coreHome, "runtime", "tunnel-contact.json");
+    this.contactSample = null;
   }
 
   readConfig() {
@@ -782,6 +907,152 @@ class RuntimeSupervisor {
     }
   }
 
+  /** Read ChatGPT's commands to this tunnel from its local /metrics page; no content, counts only. */
+  async probeTunnelChatGptContact(timeoutMs = 2_000) {
+    if (!this.tunnelHealthBaseUrl) {
+      return { readable: false, contacts: 0, processStartSeconds: null, detail: "local tunnel metrics URL is not known" };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${this.tunnelHealthBaseUrl}/metrics`, { method: "GET", signal: controller.signal });
+      if (!response.ok) {
+        return { readable: false, contacts: 0, processStartSeconds: null, detail: `/metrics returned HTTP ${response.status}` };
+      }
+      const parsed = parseTunnelContactMetrics(await response.text());
+      if (!parsed.exposition) {
+        return { readable: false, contacts: 0, processStartSeconds: null, detail: "/metrics returned no Prometheus metrics" };
+      }
+      return {
+        readable: true,
+        contacts: parsed.contacts,
+        commandSeries: parsed.commandSeries,
+        processStartSeconds: parsed.processStartSeconds,
+        detail: `/metrics reported ${parsed.contacts} ChatGPT command(s)`,
+      };
+    } catch (error) {
+      return {
+        readable: false,
+        contacts: 0,
+        processStartSeconds: null,
+        detail: `/metrics could not be observed: ${errorMessage(error)}`,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  tunnelContactMetricsVerified(config) {
+    try {
+      const manifest = readJson(path.join(path.dirname(config.tunnel.binaryPath), "tunnel-client-manifest.json"));
+      return TUNNEL_CONTACT_METRICS_VERIFIED_VERSIONS.has(manifest?.tunnelClientVersion);
+    } catch {
+      return false;
+    }
+  }
+
+  readTunnelContactRecord(config) {
+    if (config?.mode !== "full" || !config.tunnel) return null;
+    try {
+      const record = readJson(this.contactStatePath);
+      if (record?.version !== 1 || record.tunnel !== tunnelFingerprint(config.tunnel.tunnelId)) return null;
+      return record;
+    } catch {
+      return null;
+    }
+  }
+
+  /** ChatGPT's contact with the configured tunnel: observed / not-observed / unknown, with a time. */
+  tunnelContact(config) {
+    return tunnelContactStatus(this.readTunnelContactRecord(config));
+  }
+
+  /**
+   * Take a fresh contact reading and keep the time ChatGPT last reached this tunnel. tunnel-client
+   * counters restart with its process, so the time is persisted per tunnel and survives restarts.
+   */
+  async observeChatGptContact(config) {
+    if (config?.mode !== "full" || !config.tunnel) return { status: "unknown", at: null };
+    const probe = await this.probeTunnelChatGptContact();
+    const previous = this.readTunnelContactRecord(config);
+    const now = new Date();
+    // Compare with the last reading of the same tunnel process, in memory or persisted by an earlier
+    // launcher run, so an adopted tunnel does not report old commands as new contact.
+    const sample = this.contactSample?.tunnel === config.tunnel.tunnelId
+      ? this.contactSample
+      : previous && Number.isFinite(previous.contacts) ? previous : null;
+    const sameProcess = Boolean(sample)
+      && (sample.processStartSeconds ?? null) === (probe.processStartSeconds ?? null)
+      && probe.contacts >= sample.contacts;
+    const increased = probe.readable && probe.contacts > 0 && (!sameProcess || probe.contacts > sample.contacts);
+    if (probe.readable) {
+      this.contactSample = {
+        tunnel: config.tunnel.tunnelId,
+        processStartSeconds: probe.processStartSeconds,
+        contacts: probe.contacts,
+      };
+    }
+    const record = {
+      version: 1,
+      tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+      lastContactAt: increased ? now.toISOString() : previous?.lastContactAt ?? null,
+      observedAt: now.toISOString(),
+      metricsReadable: probe.readable,
+      metricsVerified: probe.readable && this.tunnelContactMetricsVerified(config),
+      processStartSeconds: Number.isFinite(probe.processStartSeconds) ? probe.processStartSeconds : null,
+      contacts: probe.readable ? probe.contacts : null,
+    };
+    try {
+      writePrivateFileAtomic(this.contactStatePath, `${JSON.stringify(record, null, 2)}\n`);
+    } catch (error) {
+      this.logger.warn("runtime.tunnel_contact_write_failed", { message: errorMessage(error) });
+    }
+    if (increased && !previous?.lastContactAt) {
+      this.logger.info("runtime.tunnel_chatgpt_contact_observed", { contacts: probe.contacts });
+    }
+    return tunnelContactStatus(record, now.getTime());
+  }
+
+  /** Wait for the bridge's /healthz before tunnel-client (and its codex app-server) asks it for models. */
+  async waitForBridgeBeforeTunnel(config, timeoutMs = TUNNEL_BRIDGE_HEALTH_WAIT_MS) {
+    // Only a bridge this launcher runs can be waited for; the DEV harness has none.
+    if (this.launcherProfile === "development" || !this.daemon) return true;
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const daemon = this.daemon;
+      if (!daemon) return false;
+      if (Number.isInteger(daemon.pid) && await this.proxyHealth(config, 2_000, daemon.pid)) return true;
+      await sleep(250);
+    } while (Date.now() < deadline);
+    this.logger.warn("runtime.tunnel_started_without_bridge", { waitedMs: timeoutMs });
+    return false;
+  }
+
+  /**
+   * One tunnel restart on behalf of a Codex turn that is waiting for the connector. The caller
+   * checks that /readyz does not answer and that no turn has a tool call in flight; this only makes
+   * sure the restart goes through the ordinary recovery path and never repeats in a loop.
+   */
+  requestConnectorTunnelRecovery(reason) {
+    if (this.stopping || this.startPromise || this.stopPromise
+      || this.restartTimers.tunnel || this.recoveryTasks.size > 0) {
+      return { requested: false, reason: "busy" };
+    }
+    if (Date.now() - this.lastConnectorTunnelRecoveryAt < CONNECTOR_TUNNEL_RECOVERY_INTERVAL_MS) {
+      return { requested: false, reason: "recently-restarted" };
+    }
+    this.lastConnectorTunnelRecoveryAt = Date.now();
+    const message = `Tunnel restart requested for the ChatGPT connector: ${reason}`;
+    this.lastChildFailure.tunnel = message;
+    this.stopTunnelMonitor();
+    this.tunnel = null;
+    if (!this.tryWriteState("degraded", message)) return { requested: false, reason: "state" };
+    this.logger.warn("runtime.tunnel_connector_recovery_requested", { reason });
+    this.publishOperation?.({ name: "runtime-recovery", status: "running", message });
+    this.scheduleRecovery("tunnel");
+    return { requested: true };
+  }
+
   async discoverTunnelHealthBaseUrl(config) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
@@ -991,6 +1262,7 @@ class RuntimeSupervisor {
         await this.waitForTunnelMcpTransport(config);
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
+        await this.afterTunnelStarted(config, true);
         return;
       }
       this.tunnel = null;
@@ -1003,6 +1275,7 @@ class RuntimeSupervisor {
       }
       if (stopped.code === 0) await this.waitForTunnelStopped(config);
       this.tunnelHealthBaseUrl = null;
+      await this.waitForBridgeBeforeTunnel(config);
       const connected = await this.runTunnelConnectCommand(config);
       if (connected.code !== 0) {
         throw new Error(
@@ -1013,6 +1286,7 @@ class RuntimeSupervisor {
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       await this.waitForTunnelMcpTransport(config);
       this.startTunnelMonitor(config);
+      await this.afterTunnelStarted(config, false);
     } catch (error) {
       let cleanupError;
       try {
@@ -1033,6 +1307,20 @@ class RuntimeSupervisor {
         throw new Error(appendFailure(errorMessage(error), "tunnel startup cleanup failed", cleanupError));
       }
       throw error;
+    }
+  }
+
+  /** Record the new process's contact baseline and tell the launcher, which re-checks the connector. */
+  async afterTunnelStarted(config, adopted) {
+    try {
+      await this.observeChatGptContact(config);
+    } catch (error) {
+      this.logger.warn("runtime.tunnel_contact_probe_failed", { message: errorMessage(error) });
+    }
+    try {
+      this.onTunnelStarted?.({ pid: this.tunnel?.pid ?? null, adopted });
+    } catch (error) {
+      this.logger.warn("runtime.tunnel_started_listener_failed", { message: errorMessage(error) });
     }
   }
 
@@ -1080,7 +1368,7 @@ class RuntimeSupervisor {
         || this.tunnelMonitorInFlight
         || this.restartTimers.tunnel) return;
       this.tunnelMonitorInFlight = true;
-      void this.observeTunnelForMonitor(config).then((health) => {
+      void this.observeTunnelForMonitor(config).then(async (health) => {
         if (this.stopping || generation !== this.tunnelMonitorGeneration) return;
         if (!health.statusKnown) {
           if (!this.tunnelMonitorObservationUnavailable) {
@@ -1107,6 +1395,12 @@ class RuntimeSupervisor {
               managed: true,
             };
             this.tryWriteState("ready");
+          }
+          // The same tick keeps the evidence that ChatGPT reached this tunnel current.
+          try {
+            await this.observeChatGptContact(config);
+          } catch (error) {
+            this.logger.debug?.("runtime.tunnel_contact_probe_failed", { message: errorMessage(error) });
           }
           return;
         }
@@ -1175,12 +1469,38 @@ class RuntimeSupervisor {
     }
   }
 
+  /**
+   * Setup kept the tunnel running while only the daemon restarted. Keep it when the new
+   * configuration would start the very same tunnel; otherwise stop it so it restarts from the new one.
+   */
+  async reconcilePreservedTunnel(config) {
+    const preserved = this.preservedTunnel;
+    this.preservedTunnel = null;
+    if (!preserved) return;
+    const identity = config?.mode === "full" && config.tunnel
+      ? tunnelRuntimeIdentity(config, installedTunnelClientDigest(config))
+      : null;
+    if (identity && identity === preserved.identity && this.tunnel) {
+      this.logger.info("runtime.tunnel_preserved", { pid: this.tunnel.pid ?? null });
+      return;
+    }
+    this.logger.info("runtime.tunnel_restart_required", {
+      reason: identity ? "configuration-changed" : "tunnel-not-configured",
+    });
+    if (this.tunnel) await this.stopTunnelGracefully(preserved.config);
+  }
+
   async startConfigured() {
     let config;
+    let configError;
     try {
       config = this.readConfig();
     } catch (error) {
-      const detail = errorMessage(error);
+      configError = error;
+    }
+    if (this.preservedTunnel) await this.reconcilePreservedTunnel(configError ? null : config);
+    if (configError) {
+      const detail = errorMessage(configError);
       this.logger.warn("runtime.setup_required", { detail });
       return { status: "needs-setup", detail };
     }
@@ -1265,8 +1585,9 @@ class RuntimeSupervisor {
       message: tunnelOnly ? "Starting isolated DEV MCP runtime" : "Starting local runtime",
     });
     try {
-      await this.startTunnel(config, "runtime-start");
+      // The bridge first: tunnel-client's codex app-server asks it for models as soon as it starts.
       if (!tunnelOnly) await this.startDaemon(config);
+      await this.startTunnel(config, "runtime-start");
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
       this.writeState("ready");
@@ -1922,9 +2243,14 @@ class RuntimeSupervisor {
     this[name] = null;
   }
 
-  async stopForSetup() {
+  /**
+   * Stop the owned runtime before a setup transaction. With `preserveTunnel`, a Full-mode tunnel
+   * keeps running and only the daemon stops: the next start keeps the same tunnel when the new
+   * configuration would start an identical one, so ChatGPT's connector never sees it go away.
+   */
+  async stopForSetup({ preserveTunnel = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = this.performStopForSetup();
+    this.stopPromise = this.performStopForSetup({ preserveTunnel: preserveTunnel === true });
     try {
       return await this.stopPromise;
     } finally {
@@ -1932,7 +2258,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async performStopForSetup() {
+  async performStopForSetup({ preserveTunnel = false } = {}) {
     if (this.startPromise) {
       try {
         await this.startPromise;
@@ -1954,6 +2280,8 @@ class RuntimeSupervisor {
     }
     let drained = false;
     let tunnelStopped = false;
+    // A tunnel kept by an earlier daemon-only stop is either kept again or stopped now.
+    this.preservedTunnel = null;
     try {
       const ownershipState = this.readState();
       const healthyRuntime = config && this.launcherProfile !== "development"
@@ -1965,6 +2293,10 @@ class RuntimeSupervisor {
         && (runtimeMayBeLive || !ownershipState)) {
         await this.adoptConfiguredTunnelForStop(config);
       }
+      const keepTunnel = preserveTunnel
+        && this.launcherProfile !== "development"
+        && config?.mode === "full"
+        && Boolean(this.tunnel);
       if (!this.daemon && !this.tunnel) {
         if (!config) {
           if (ownershipState && !runtimeOwnershipPredatesCurrentBoot(ownershipState) && (
@@ -1990,7 +2322,7 @@ class RuntimeSupervisor {
         }
         drained = await this.acquireDrain(config);
       }
-      if (this.tunnel) {
+      if (this.tunnel && !keepTunnel) {
         if (!config) throw new Error("launcher-owned tunnel cannot be stopped without a valid configuration");
         await this.stopTunnelGracefully(config);
         tunnelStopped = true;
@@ -2001,10 +2333,25 @@ class RuntimeSupervisor {
         }
         await this.shutdownDaemon(config);
       }
+      if (keepTunnel) {
+        this.preservedTunnel = {
+          identity: tunnelRuntimeIdentity(config, installedTunnelClientDigest(config)),
+          config,
+        };
+        // The tunnel stays owned by this launcher while setup runs; its marker keeps the process.
+        this.writeState("setup", "daemon stopped for setup; tunnel kept running");
+        this.logger.info("runtime.daemon_stopped_tunnel_kept", { tunnelPid: this.tunnel?.pid ?? null });
+        return { status: "stopped", tunnelPreserved: true };
+      }
       this.clearState();
       return { status: "stopped" };
     } catch (error) {
+      this.preservedTunnel = null;
       const compensationErrors = [];
+      if (!tunnelStopped && this.tunnel && config?.mode === "full") {
+        // Stopping failed before the tunnel was touched: keep supervising the tunnel that still runs.
+        this.startTunnelMonitor(config);
+      }
       if (tunnelStopped && config?.mode === "full" && !this.tunnel) {
         try {
           await this.startTunnel(config);
@@ -2101,13 +2448,18 @@ class RuntimeSupervisor {
 }
 
 module.exports = {
+  CONNECTOR_TUNNEL_RECOVERY_INTERVAL_MS,
   MAX_RESTARTS_PER_WINDOW,
   RESTART_WINDOW_MS,
+  TUNNEL_CONTACT_OBSERVATION_FRESH_MS,
   TUNNEL_HEALTH_POLL_INTERVAL_MS,
   TUNNEL_MONITOR_FAILURE_THRESHOLD,
   TUNNEL_MONITOR_INTERVAL_MS,
   TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
+  parseTunnelContactMetrics,
+  tunnelContactStatus,
+  tunnelRuntimeIdentity,
   validateConfig,
 };

@@ -71,6 +71,10 @@ import {
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
+  requestLauncherConnectorTunnel,
+  type LauncherConnectorTunnelRequest,
+  type LauncherConnectorTunnelStatus,
+  type LauncherTunnelContactStatus,
 } from "../../launcher-browser-host";
 import {
   resolveChatGptWebContextLimits,
@@ -173,7 +177,7 @@ const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
 
-class ChatGptConnectorCatalogStaleError extends Error {
+export class ChatGptConnectorCatalogStaleError extends Error {
   constructor(
     readonly appName: string,
     readonly triggerAttempts: number,
@@ -187,13 +191,130 @@ interface ChatGptConnectorAttemptBudget {
   triggerAttempts: number;
 }
 
-function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(message, {
+/**
+ * Why the configured connector could not be attached. Each kind goes out as
+ * `connector_not_found:<kind>` and its message names exactly one next step.
+ */
+export type ChatGptConnectorFailureKind =
+  | "tunnel_unavailable"
+  | "never_contacted"
+  | "not_listed"
+  | "other_name"
+  | "menu_unavailable"
+  | "personalization_unavailable"
+  | "selection_failed";
+
+export function chatGptConnectorFailureCode(kind: ChatGptConnectorFailureKind): string {
+  return `connector_not_found:${kind}`;
+}
+
+const CHATGPT_CONNECTOR_RECHECK_NEXT_STEP = "Codex Web GPT keeps checking the connector by itself; send the task again when its MCP panel shows the connector as ready";
+/**
+ * The one next step of the kinds whose messages come from browser observations. The other kinds
+ * build their own message around the step that fits them.
+ */
+const CHATGPT_CONNECTOR_DEFAULT_NEXT_STEPS: Partial<Record<ChatGptConnectorFailureKind, string>> = {
+  personalization_unavailable: CHATGPT_CONNECTOR_RECHECK_NEXT_STEP,
+  selection_failed: CHATGPT_CONNECTOR_RECHECK_NEXT_STEP,
+  menu_unavailable: "turn on Developer Mode in ChatGPT Settings → Apps if it is off; Codex Web GPT keeps checking by itself and shows in its MCP panel when the connector is ready",
+};
+
+function normalizedConnectorName(name: string): string {
+  return name.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function chatGptConnectorNearNameListed(appName: string, titles: readonly string[]): boolean {
+  const wanted = normalizedConnectorName(appName);
+  return !titles.includes(appName) && titles.some(title => normalizedConnectorName(title) === wanted);
+}
+
+/** The kind of a missed mention, from the menu rows' titles; the titles themselves are never logged. */
+export function chatGptConnectorMentionKind(appName: string, titles: readonly string[]): ChatGptConnectorFailureKind {
+  if (titles.length === 0) return "menu_unavailable";
+  if (titles.includes(appName)) return "selection_failed";
+  if (appName === CHATGPT_CONNECTOR_NAME && !titles.includes(CHATGPT_CONNECTOR_NAME)
+    && (titles.includes(DEV_CHATGPT_CONNECTOR_NAME)
+      || LEGACY_CHATGPT_CONNECTOR_NAMES.some(name => titles.includes(name)))) {
+    return "other_name";
+  }
+  if (chatGptConnectorNearNameListed(appName, titles)) return "other_name";
+  return "not_listed";
+}
+
+function chatGptConnectorUnavailableError(
+  message: string,
+  kind: ChatGptConnectorFailureKind,
+): ChatGptWebAdapterError {
+  const nextStep = CHATGPT_CONNECTOR_DEFAULT_NEXT_STEPS[kind];
+  return new ChatGptWebAdapterError(nextStep ? `${message}; ${nextStep}` : message, {
     status: 424,
     errorType: "connector_error",
-    code: "connector_not_found",
+    code: chatGptConnectorFailureCode(kind),
     retryable: false,
   });
+}
+
+function chatGptConnectorFailureKind(error: unknown): ChatGptConnectorFailureKind | undefined {
+  if (!(error instanceof ChatGptWebAdapterError) || typeof error.code !== "string") return undefined;
+  const match = /^connector_not_found:([a-z_]+)$/.exec(error.code);
+  return match ? match[1] as ChatGptConnectorFailureKind : undefined;
+}
+
+/**
+ * ChatGPT can take many minutes to list a connector it has already reached. Before the prompt is
+ * sent, a fresh turn waits for it in these steps (about four minutes in total), reloading and
+ * mentioning the connector again after each. Nothing is ever sent to ChatGPT while waiting.
+ */
+export const CHATGPT_CONNECTOR_CATALOG_WAITS_MS = [15_000, 30_000, 60_000, 60_000, 60_000] as const;
+/** When the launcher cannot tell whether ChatGPT reached the tunnel, the wait is shorter. */
+export const CHATGPT_CONNECTOR_UNOBSERVED_CONTACT_WAITS_MS = [15_000, 30_000] as const;
+/** How long a turn waits for a tunnel whose /readyz does not answer. */
+export const CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS = 30_000;
+const CHATGPT_CONNECTOR_TUNNEL_POLL_MS = 2_000;
+
+interface ChatGptConnectorCatalogLadder {
+  /** Wait steps still to come; undefined until the tunnel and ChatGPT's contact were checked. */
+  waits?: number[];
+  total: number;
+  step: number;
+  contact: LauncherTunnelContactStatus;
+  startedAt: number;
+}
+
+function chatGptConnectorTunnelUnavailableError(appName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `The local MCP tunnel that ChatGPT connector ${JSON.stringify(appName)} uses did not become ready`
+    + ` within ${CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS / 1_000} seconds; Codex Web GPT keeps restarting it by itself,`
+    + " so send the task again when its MCP panel shows the tunnel as ready",
+    "tunnel_unavailable",
+  );
+}
+
+function chatGptConnectorNeverContactedError(appName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `ChatGPT has not connected to this computer's MCP tunnel since the tunnel started, and its connector menu`
+    + ` has no ${JSON.stringify(appName)}; if that connector does not exist yet, create it in ChatGPT`
+    + ` (Developer Mode on, named exactly ${JSON.stringify(appName)}, this computer's tunnel, Authentication: None);`
+    + " Codex Web GPT detects it by itself and its MCP panel shows when to send the task again",
+    "never_contacted",
+  );
+}
+
+function chatGptConnectorStillNotListedError(
+  appName: string,
+  elapsedMs: number,
+  contact: LauncherTunnelContactStatus,
+): ChatGptWebAdapterError {
+  const minutes = Math.max(1, Math.round(elapsedMs / 60_000));
+  return chatGptConnectorUnavailableError(
+    contact === "observed"
+      ? `ChatGPT reached this computer's MCP tunnel but still does not list connector ${JSON.stringify(appName)}`
+        + ` after ${minutes} minute(s); Codex Web GPT keeps checking by itself and its MCP panel shows when to send the task again`
+      : `ChatGPT still does not list connector ${JSON.stringify(appName)} after ${minutes} minute(s);`
+        + ` create it in ChatGPT for this computer's tunnel if it does not exist, otherwise Codex Web GPT keeps checking`
+        + " by itself and its MCP panel shows when to send the task again",
+    "not_listed",
+  );
 }
 
 const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
@@ -427,6 +548,7 @@ async function waitForChatGptOwnedPersonalizationMenu(
     if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
     throw chatGptConnectorUnavailableError(
       "ChatGPT personalization control did not expose its owned menu before the readiness deadline",
+      "personalization_unavailable",
     );
   }
   return menu;
@@ -465,6 +587,7 @@ async function readChatGptPersonalizationCheckedIndex(
   if (checked.filter(Boolean).length !== 1) {
     throw chatGptConnectorUnavailableError(
       "ChatGPT personalization menu did not expose one checked state",
+      "personalization_unavailable",
     );
   }
   return checked[0] ? 0 : 1;
@@ -487,12 +610,14 @@ async function openChatGptStructuralPersonalizationState(
     if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
     throw chatGptConnectorUnavailableError(
       "ChatGPT Temporary Chat did not expose a structural personalization control before the readiness deadline",
+      "personalization_unavailable",
     );
   }
   const controlCount = await runChatGptPersonalizationStep(() => controls.count(), deadline, signal);
   if (controlCount !== 1) {
     throw chatGptConnectorUnavailableError(
       `ChatGPT Temporary Chat exposed ${controlCount} structural personalization controls; expected exactly one`,
+      "personalization_unavailable",
     );
   }
   await control.click({
@@ -504,6 +629,7 @@ async function openChatGptStructuralPersonalizationState(
   if (await runChatGptPersonalizationStep(() => choices.count(), deadline, signal) !== 2) {
     throw chatGptConnectorUnavailableError(
       "ChatGPT personalization menu did not expose exactly two checkable states",
+      "personalization_unavailable",
     );
   }
   return {
@@ -578,6 +704,32 @@ async function toggleChatGptPersonalizationChoice(
   }
 }
 
+/**
+ * The structural (language-independent) personalization switch, if ChatGPT renders one. The page
+ * has already hydrated through the connector proof mention, so a short bounded wait is enough; it
+ * never consumes the preflight's whole readiness deadline.
+ */
+const CHATGPT_PERSONALIZATION_CONTROL_PROBE_MS = 1_500;
+
+async function chatGptStructuralPersonalizationControlPresent(
+  page: Page,
+  deadline: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const control = page.locator(CHATGPT_PERSONALIZATION_CONTROL_SELECTOR).filter({ visible: true }).first();
+  try {
+    await control.waitFor({
+      state: "visible",
+      timeout: Math.min(CHATGPT_PERSONALIZATION_CONTROL_PROBE_MS, remainingChatGptPersonalizationMs(deadline, signal)),
+      signal,
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError" && !signal.aborted) return false;
+    throw error;
+  }
+}
+
 async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
   page: Page,
   deadline: number,
@@ -616,11 +768,22 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
         await capture("personalization-control-missing");
         throw chatGptConnectorUnavailableError(
           "ChatGPT Temporary Chat did not expose a verifiable personalization control",
+          "personalization_unavailable",
         );
       }
       if (await proveConnectorAccess()) {
         await capture("personalization-already-enabled");
         return "already-personalized";
+      }
+      // No labeled switch and no connector row. Without the structural switch either, there is
+      // nothing to toggle: the connector is simply not in ChatGPT's catalog. Say so now instead of
+      // waiting out the whole readiness deadline for a control that does not exist.
+      if (!await chatGptStructuralPersonalizationControlPresent(page, deadline, abortSignal)) {
+        await capture("personalization-control-absent");
+        throw chatGptConnectorUnavailableError(
+          "ChatGPT exposes no personalization control and its connector menu has no row for the configured connector",
+          "not_listed",
+        );
       }
       await capture("personalization-unpersonalized");
       const toggleReceipt = await toggleChatGptPersonalizationChoice(page, deadline, abortSignal);
@@ -650,6 +813,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
       }
       throw chatGptConnectorUnavailableError(
         "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
+        "not_listed",
       );
     }
   }
@@ -661,6 +825,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
     throw chatGptConnectorUnavailableError(
       `ChatGPT exposed an invalid Temporary Chat personalization state`
       + ` (personalized=${personalizedCount}, unpersonalized=${unpersonalizedCount})`,
+      "personalization_unavailable",
     );
   }
 
@@ -682,6 +847,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
     if (await runChatGptPersonalizationStep(() => choice.count(), deadline, abortSignal) !== 1) {
       throw chatGptConnectorUnavailableError(
         "ChatGPT personalization menu did not expose one exact Personalized choice",
+        "personalization_unavailable",
       );
     }
     await choice.click({
@@ -710,6 +876,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
     if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
     throw chatGptConnectorUnavailableError(
       "ChatGPT did not confirm Personalized connector access for this Temporary Chat",
+      "personalization_unavailable",
     );
   }
   await capture("personalization-enabled");
@@ -748,7 +915,7 @@ export async function ensureChatGptPersonalizedConnectorAccess(
       || deadlineController.signal.aborted
       || Date.now() >= deadline
     )) {
-      throw chatGptConnectorUnavailableError("ChatGPT personalization preflight exceeded its readiness deadline");
+      throw chatGptConnectorUnavailableError("ChatGPT personalization preflight exceeded its readiness deadline", "personalization_unavailable");
     }
     throw error;
   } finally {
@@ -3305,9 +3472,14 @@ export class ChatGptBrowserWorker {
       const legacyName = LEGACY_CHATGPT_CONNECTOR_NAMES.find(name => titles.includes(name));
       if (legacyName) return legacyChatGptConnectorMigrationMessage(legacyName);
     }
+    if (chatGptConnectorNearNameListed(this.config.appName, titles)) {
+      return `ChatGPT lists a connector whose name differs from ${JSON.stringify(this.config.appName)}`
+        + ` only in letter case or spacing; rename it in ChatGPT to exactly ${JSON.stringify(this.config.appName)}`;
+    }
     return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(this.config.appName)}`
       + ` after ${triggerAttempts} complete mention trigger attempt(s)`
-      + `; create a connector with that exact name before retrying`;
+      + `; create a connector with exactly that name in ChatGPT for this computer's tunnel,`
+      + ` or wait while Codex Web GPT keeps checking and shows in its MCP panel when it is listed`;
   }
 
   private async clearChatGptComposerState(page: Page): Promise<void> {
@@ -3362,64 +3534,79 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    await ensureChatGptPersonalizedConnectorAccess(
-      page,
-      capture,
-      async (personalizationSignal) => {
-        let proofResult: boolean | undefined;
-        let proofError: unknown;
-        try {
-          composer = await this.activeComposer(page, 30_000, personalizationSignal);
-          await composer.fill("", {
-            signal: personalizationSignal,
-            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-          });
-          await composer.focus({
-            signal: personalizationSignal,
-            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-          });
-          await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
-          await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
-            delay: 25,
-            signal: personalizationSignal,
-            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-          });
-          await capture("personalization-proof-mention-triggered");
+    try {
+      await ensureChatGptPersonalizedConnectorAccess(
+        page,
+        capture,
+        async (personalizationSignal) => {
+          let proofResult: boolean | undefined;
+          let proofError: unknown;
           try {
-            await appResult.waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
-            proofResult = true;
-            await capture("personalization-proof-menu-visible");
-          } catch (error) {
-            if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-            proofResult = false;
-            await capture("personalization-proof-menu-missing");
-            const mention = await composer.evaluate(element => ({
-              text: element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
-                ? element.value : element.textContent ?? "",
-              focused: element === document.activeElement,
-            }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
-            if (mention.text !== CHATGPT_CONNECTOR_MENTION_QUERY) {
-              throw new ChatGptPromptAttachmentIntegrityError(
-                `ChatGPT did not preserve the connector mention (expectedChars=${CHATGPT_CONNECTOR_MENTION_QUERY.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
-              );
+            composer = await this.activeComposer(page, 30_000, personalizationSignal);
+            await composer.fill("", {
+              signal: personalizationSignal,
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            });
+            await composer.focus({
+              signal: personalizationSignal,
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            });
+            await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
+            await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
+              delay: 25,
+              signal: personalizationSignal,
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            });
+            await capture("personalization-proof-mention-triggered");
+            try {
+              await appResult.waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
+              proofResult = true;
+              await capture("personalization-proof-menu-visible");
+            } catch (error) {
+              if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+              proofResult = false;
+              await capture("personalization-proof-menu-missing");
+              const mention = await composer.evaluate(element => ({
+                text: element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
+                  ? element.value : element.textContent ?? "",
+                focused: element === document.activeElement,
+              }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
+              if (mention.text !== CHATGPT_CONNECTOR_MENTION_QUERY) {
+                throw new ChatGptPromptAttachmentIntegrityError(
+                  `ChatGPT did not preserve the connector mention (expectedChars=${CHATGPT_CONNECTOR_MENTION_QUERY.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
+                );
+              }
             }
+          } catch (error) {
+            proofError = error;
           }
-        } catch (error) {
-          proofError = error;
-        }
-        try {
-          await this.clearChatGptComposerState(page);
-        } catch (cleanupError) {
-          throw new ChatGptPersistentBrowserStateError(
-            proofError !== undefined ? [proofError, cleanupError] : [cleanupError],
-            "ChatGPT connector proof did not leave a verified empty composer",
-          );
-        }
-        if (proofError !== undefined) throw proofError;
-        return proofResult === true;
-      },
-      abortSignal,
-    );
+          try {
+            await this.clearChatGptComposerState(page);
+          } catch (cleanupError) {
+            throw new ChatGptPersistentBrowserStateError(
+              proofError !== undefined ? [proofError, cleanupError] : [cleanupError],
+              "ChatGPT connector proof did not leave a verified empty composer",
+            );
+          }
+          if (proofError !== undefined) throw proofError;
+          return proofResult === true;
+        },
+        abortSignal,
+      );
+    } catch (error) {
+      // The preflight proved the connector is not in ChatGPT's catalog. A turn that can still wait
+      // hands this to its catalog ladder; anything else fails with the kind and its next step.
+      if (chatGptConnectorFailureKind(error) !== "not_listed") throw error;
+      if (catalogRefreshAvailable) {
+        throw new ChatGptConnectorCatalogStaleError(this.config.appName, attemptBudget.triggerAttempts);
+      }
+      throw chatGptConnectorUnavailableError(
+        `${(error as Error).message}; create a connector named exactly ${JSON.stringify(this.config.appName)}`
+        + ` in ChatGPT for this computer's tunnel, or wait while Codex Web GPT keeps checking`
+        + ` and shows in its MCP panel when it is listed`,
+        "not_listed",
+      );
+    }
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);
       if (await this.connectorIsSelected(composer, abortSignal)) {
@@ -3455,15 +3642,14 @@ export class ChatGptBrowserWorker {
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
           const visibleRows = await this.connectorMentionRowTitles(menuRows, abortSignal);
-          const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
-            && (
-              visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
-              || LEGACY_CHATGPT_CONNECTOR_NAMES.some(name => visibleRows.includes(name))
-            );
-          if (knownIdentityMismatch) {
+          const mentionKind = chatGptConnectorMentionKind(this.config.appName, visibleRows);
+          // A listed legacy, DEV or differently spelled connector will not turn into the right one
+          // by reloading or waiting: say which one to fix now.
+          if (mentionKind === "other_name") {
             await capture("connector-menu-missing");
             throw chatGptConnectorUnavailableError(
               await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
+              "other_name",
             );
           }
           if (
@@ -3481,6 +3667,7 @@ export class ChatGptBrowserWorker {
             await capture("connector-menu-missing");
             throw chatGptConnectorUnavailableError(
               await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
+              mentionKind,
             );
           }
         }
@@ -3493,6 +3680,7 @@ export class ChatGptBrowserWorker {
         throw chatGptConnectorUnavailableError(
           `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
           + ` after ${attemptBudget.triggerAttempts} complete mention trigger attempt(s)`,
+          "selection_failed",
         );
       }
       // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
@@ -3550,6 +3738,131 @@ export class ChatGptBrowserWorker {
       }
       throw error;
     }
+  }
+
+  /**
+   * The launcher's view of the tunnel and of ChatGPT's contact with it. Undefined when there is no
+   * launcher to ask or it did not answer: the ladder then treats contact as unknown.
+   */
+  private async connectorTunnelStatus(
+    traceId: string,
+    request: Omit<LauncherConnectorTunnelRequest, "traceId" | "helperPid">,
+    signal?: AbortSignal,
+  ): Promise<LauncherConnectorTunnelStatus | undefined> {
+    if (this.config.browserHost !== "launcher" || !this.config.browserHostDescriptorPath) return undefined;
+    try {
+      return await requestLauncherConnectorTunnel(
+        this.config.browserHostDescriptorPath,
+        { traceId, helperPid: process.pid, ...request },
+        undefined,
+        signal,
+      );
+    } catch (error) {
+      throwIfPromptAttachmentAborted(signal);
+      console.warn(
+        `[chatgpt-web] browser turn ${traceId} connector tunnel status unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Make sure the tunnel answers before waiting on ChatGPT's catalog. Only a tunnel whose /readyz
+   * does not answer may be restarted, once, and the launcher refuses while any turn has a tool call
+   * in flight; other turns' tool calls are never cut for this one.
+   */
+  private async waitForConnectorTunnel(
+    traceId: string,
+    signal?: AbortSignal,
+  ): Promise<LauncherConnectorTunnelStatus | undefined> {
+    let status = await this.connectorTunnelStatus(traceId, {}, signal);
+    if (!status || status.readyz !== false) return status;
+    console.warn(`[chatgpt-web] browser turn ${traceId} connector tunnel readyz=false; requesting supervised restart`);
+    status = await this.connectorTunnelStatus(traceId, { restart: true }, signal) ?? status;
+    console.info(`[chatgpt-web] browser turn ${traceId} connector tunnel restart=${status.restart}`);
+    const polls = Math.ceil(CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS / CHATGPT_CONNECTOR_TUNNEL_POLL_MS);
+    for (let poll = 0; status.readyz !== true && poll < polls; poll += 1) {
+      await this.connectorLadderSleep(CHATGPT_CONNECTOR_TUNNEL_POLL_MS, signal);
+      const next = await this.connectorTunnelStatus(traceId, {}, signal);
+      // A tunnel in the middle of its restart has no known health URL yet: keep waiting.
+      if (next) status = next;
+    }
+    return status;
+  }
+
+  /** One rung of the connector ladder; throws the classified failure when it has no rung left. */
+  private async climbConnectorCatalogLadder(
+    turn: BrowserTurn,
+    ladder: ChatGptConnectorCatalogLadder,
+    capture: (checkpoint: string) => Promise<void>,
+  ): Promise<void> {
+    const appName = this.config.appName;
+    if (ladder.waits === undefined) {
+      const status = await this.runStage(
+        turn.traceId,
+        "connector_tunnel_check",
+        CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS + 30_000,
+        (stageSignal) => this.waitForConnectorTunnel(
+          turn.traceId,
+          turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+        ),
+      );
+      if (status && status.readyz !== true && (status.readyz === false || status.restart === "requested")) {
+        await capture("connector-tunnel-unavailable");
+        throw chatGptConnectorTunnelUnavailableError(appName);
+      }
+      ladder.contact = status?.contact.status ?? "unknown";
+      console.info(
+        `[chatgpt-web] browser turn ${turn.traceId} connector ladder contact=${ladder.contact} readyz=${String(status?.readyz ?? null)}`,
+      );
+      if (ladder.contact === "not-observed") {
+        await capture("connector-never-contacted");
+        throw chatGptConnectorNeverContactedError(appName);
+      }
+      ladder.waits = [...(ladder.contact === "observed"
+        ? CHATGPT_CONNECTOR_CATALOG_WAITS_MS
+        : CHATGPT_CONNECTOR_UNOBSERVED_CONTACT_WAITS_MS)];
+      ladder.total = ladder.waits.length;
+      // The first rung is the immediate reload and mention that follows.
+      return;
+    }
+    const waitMs = ladder.waits.shift();
+    if (waitMs === undefined) {
+      await capture("connector-catalog-exhausted");
+      throw chatGptConnectorStillNotListedError(appName, Date.now() - ladder.startedAt, ladder.contact);
+    }
+    ladder.step += 1;
+    await capture(`connector-catalog-wait-${ladder.step}`);
+    console.info(
+      `[chatgpt-web] browser turn ${turn.traceId} connector ladder wait step=${ladder.step}/${ladder.total} waitMs=${waitMs} contact=${ladder.contact}`,
+    );
+    await this.runStage(
+      turn.traceId,
+      `connector_catalog_wait_${ladder.step}`,
+      waitMs + 30_000,
+      async (stageSignal) => {
+        const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
+        // Progress for the launcher's MCP panel; a tunnel that stopped answering is recovered on the way.
+        const status = await this.connectorTunnelStatus(turn.traceId, {
+          restart: true,
+          waitStep: ladder.step,
+          waitTotal: ladder.total,
+          waitMs,
+        }, signal);
+        if (status?.contact.status === "observed" && ladder.contact !== "observed") {
+          // ChatGPT reached the tunnel meanwhile: the connector exists, so allow the full wait.
+          ladder.contact = "observed";
+          ladder.waits = CHATGPT_CONNECTOR_CATALOG_WAITS_MS.slice(ladder.step);
+          ladder.total = CHATGPT_CONNECTOR_CATALOG_WAITS_MS.length;
+        }
+        await this.connectorLadderSleep(waitMs, signal);
+      },
+    );
+  }
+
+  /** The ladder's only way to pass time, so every wait honors the turn's abort signal. */
+  private async connectorLadderSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+    await withBrowserTurnAbort(new Promise(resolveWait => setTimeout(resolveWait, milliseconds)), signal);
   }
 
   private async attachPrompt(
@@ -4559,6 +4872,7 @@ export class ChatGptBrowserWorker {
     const reused = lease.reused === true;
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
+    let terminalFailureCode: string | undefined;
     let originalError: unknown;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
@@ -4602,6 +4916,8 @@ export class ChatGptBrowserWorker {
         ? "aborted"
         : "failed";
       terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      // The launcher re-checks the connector by itself after a connector failure.
+      if (chatGptConnectorFailureKind(error)) terminalFailureCode = (error as ChatGptWebAdapterError).code;
       throw error;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -4612,6 +4928,7 @@ export class ChatGptBrowserWorker {
           helperPid: process.pid,
           status: terminal,
           ...(terminalMessage ? { message: terminalMessage } : {}),
+          ...(terminal === "failed" && terminalFailureCode ? { failureCode: terminalFailureCode } : {}),
           ...(terminal === "completed" && turn.retainConversation ? { retain: true } : {}),
           ...(terminal === "completed" && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
             ? { connectorBound: true }
@@ -5005,8 +5322,15 @@ export class ChatGptBrowserWorker {
       }
 
       let submissionBaseline = await this.captureSubmissionBaseline(page);
-      let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
-      const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
+      // A fresh single-message turn can reload its page before anything is sent, so it waits for
+      // ChatGPT to list the connector. A staged or retained conversation cannot be reloaded.
+      const connectorLadder: ChatGptConnectorCatalogLadder | undefined = mode.localTools
+        && !reuseConversation
+        && !prepared.multipart
+        ? { total: 0, step: 0, contact: "unknown", startedAt: Date.now() }
+        : undefined;
+      const catalogRefreshAvailable = connectorLadder !== undefined;
+      let connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       for (;;) {
         try {
           await this.runStage(
@@ -5035,9 +5359,16 @@ export class ChatGptBrowserWorker {
           );
           break;
         } catch (error) {
-          if (!(error instanceof ChatGptConnectorCatalogStaleError) || !catalogRefreshAvailable) throw error;
-          catalogRefreshAvailable = false;
+          if (!(error instanceof ChatGptConnectorCatalogStaleError) || !connectorLadder) throw error;
           await diagnostics.capture(page, "connector-catalog-stale");
+          // Check the tunnel, then wait while ChatGPT has reached it; the last step throws the
+          // classified failure with its one next step.
+          await this.climbConnectorCatalogLadder(
+            turn,
+            connectorLadder,
+            checkpoint => diagnostics.capture(page, checkpoint),
+          );
+          connectorAttemptBudget = { triggerAttempts: 0 };
           await this.runStage(
             turn.traceId,
             "connector_catalog_refresh",

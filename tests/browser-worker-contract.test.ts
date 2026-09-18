@@ -1998,12 +1998,21 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
     name: "ChatGptWebAdapterError",
     status: 424,
     errorType: "connector_error",
-    code: "connector_not_found",
+    code: "connector_not_found:menu_unavailable",
     retryable: false,
   });
   expect(missingMenuError.message).toContain(`after ${MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS}`);
-  await expect(run(["Codex Native"])).rejects.toThrow("Legacy ChatGPT connector");
-  await expect(run([CHATGPT_CONNECTOR_NAME])).rejects.toThrow("exact row was not visible");
+  expect(missingMenuError.message).toContain("Developer Mode");
+  await expect(run(["Codex Native"])).rejects.toMatchObject({
+    code: "connector_not_found:other_name",
+    message: expect.stringContaining("Legacy ChatGPT connector"),
+  });
+  await expect(run([CHATGPT_CONNECTOR_NAME])).rejects.toMatchObject({
+    code: "connector_not_found:selection_failed",
+    message: expect.stringContaining("exact row was not visible"),
+  });
+  // A connector spelled differently only by case or spacing is named, never waited for.
+  await expect(run(["codex  native2"])).rejects.toMatchObject({ code: "connector_not_found:other_name" });
 });
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {

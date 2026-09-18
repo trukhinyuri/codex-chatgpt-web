@@ -96,3 +96,31 @@ test("launcher verification preserves the helper error class and correlation id"
     },
   );
 });
+
+test("launcher verification keeps a structured connector failure code and drops anything else", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-helper-code-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const run = async (code) => {
+    const script = path.join(root, `helper-${Math.random().toString(16).slice(2)}.cjs`);
+    fs.writeFileSync(script, `
+      const input = require("node:readline").createInterface({ input: process.stdin });
+      const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+      send({ type: "ready" });
+      input.on("line", line => {
+        const message = JSON.parse(line);
+        if (message.type === "shutdown") process.exit(0);
+        if (message.type !== "verify") return;
+        send({ type: "error", id: message.id, name: "ChatGptWebAdapterError", message: "not listed", code: ${JSON.stringify(code)} });
+      });
+    `);
+    return await verifyConnectorWithBrowserHelper({
+      helper: { executable: process.execPath, script },
+      descriptorPath: "/runtime/launcher-browser.json",
+      appName: "Codex Native2",
+      logger: { info() {} },
+    }).catch(error => error);
+  };
+  assert.equal((await run("connector_not_found:not_listed")).code, "connector_not_found:not_listed");
+  assert.equal((await run("<script>")).code, undefined);
+  assert.equal((await run("x".repeat(200))).code, undefined);
+});
