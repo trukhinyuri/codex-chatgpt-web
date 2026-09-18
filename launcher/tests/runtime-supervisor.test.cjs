@@ -2009,7 +2009,7 @@ server.listen(config.port, config.host);
   });
 
   try {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       try {
         if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;

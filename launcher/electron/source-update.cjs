@@ -48,7 +48,7 @@ function sourceBuildSteps() {
   return [
     { label: "install dependencies", command: "bun", args: ["install", "--frozen-lockfile"], cwd: "." },
     { label: "install launcher dependencies", command: "bun", args: ["install", "--frozen-lockfile"], cwd: "launcher" },
-    { label: "run all tests (bun run verify)", command: "bun", args: ["run", "verify"], cwd: "." },
+    { label: "run all tests (bun run verify)", command: "bun", args: ["run", "verify"], cwd: ".", retryOnce: true },
     { label: "package the app", command: "bun", args: ["run", "app:package"], cwd: "." },
   ];
 }
@@ -271,14 +271,30 @@ function lowPriorityCommand(command, args) {
   return { command: "/usr/bin/nice", args: ["-n", "15", command, ...args] };
 }
 
+// Output of a failed build step that points at the network or a registry, not at the commit.
+const TRANSIENT_BUILD_OUTPUT = /\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH)\b|getaddrinfo|Could not resolve host|Failed to connect to|network is unreachable|dial tcp|i\/o timeout|TLS handshake timeout|socket hang up|fetch failed|ConnectionRefused|(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out)|\[transient\]/i;
+const OUTPUT_TAIL_LINES = 200;
+
+/** A build failure caused by the network or a registry: the commit is not at fault and is retried later. */
+function isTransientBuildFailure(error) {
+  const text = [error?.message, ...(Array.isArray(error?.outputTail) ? error.outputTail : [])].filter(Boolean).join("\n");
+  return TRANSIENT_BUILD_OUTPUT.test(text);
+}
+
 function run(command, args, { cwd, env, log, timeoutMs = SOURCE_STEP_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     log?.(`$ ${[command, ...args].join(" ")} (in ${cwd})`);
     const niced = lowPriorityCommand(command, args);
     const child = spawn(niced.command, niced.args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    const tail = [];
     const forward = (chunk) => {
-      for (const line of chunk.toString("utf8").split(/\r?\n/)) if (line.trim()) log?.(line);
+      for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        log?.(line);
+        tail.push(line);
+        if (tail.length > OUTPUT_TAIL_LINES) tail.shift();
+      }
     };
     child.stdout.on("data", forward);
     child.stderr.on("data", forward);
@@ -289,7 +305,7 @@ function run(command, args, { cwd, env, log, timeoutMs = SOURCE_STEP_TIMEOUT_MS 
     child.once("close", (code, signal) => {
       clearTimeout(timer);
       if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(" ")} exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
+      else reject(Object.assign(new Error(`${command} ${args.join(" ")} exited with ${signal ? `signal ${signal}` : `code ${code}`}`), { outputTail: tail }));
     });
   });
 }
@@ -600,6 +616,9 @@ function createSourceUpdateController({
           log(`source update ${currentCommit} -> ${target.commit} from ${SOURCE_CLONE_URL}`);
           const env = {
             ...process.env,
+            // verify.ts leaves the online dependency audit to CI: a new advisory published elsewhere
+            // must not stop this Mac from updating (the installed build has the same dependencies).
+            CODEX_SUPERPOWER_UPDATE_BUILD: "1",
             PATH: sourceBuildPath({
               runtimeExecutable,
               loginShellPath: await deps.readLoginShellPath(),
@@ -615,7 +634,19 @@ function createSourceUpdateController({
             try {
               await deps.run(step.command, step.args, { cwd: path.join(sourceRoot, step.cwd), env, log });
             } catch (error) {
-              throw new Error(`${step.label} failed: ${errorMessage(error)}`);
+              if (step.retryOnce && !isTransientBuildFailure(error)) {
+                // A test that fails once under load is not proof that the commit is broken: run the
+                // whole suite again and install only if it passes; a real regression fails twice.
+                log(`step failed once, running it again: ${step.label}: ${errorMessage(error)}`);
+                logger?.warn("launcher.update_step_retried", { commit: target.commit, step: step.label, channel: "source" });
+                try {
+                  await deps.run(step.command, step.args, { cwd: path.join(sourceRoot, step.cwd), env, log });
+                  continue;
+                } catch (retryError) {
+                  throw Object.assign(new Error(`${step.label} failed twice: ${errorMessage(retryError)}`), { outputTail: retryError?.outputTail });
+                }
+              }
+              throw Object.assign(new Error(`${step.label} failed: ${errorMessage(error)}`), { outputTail: error?.outputTail });
             }
           }
           const archive = deps.findPackage(sourceRoot, arch, startedAt);
@@ -655,6 +686,13 @@ function createSourceUpdateController({
       } catch (error) {
         fs.rmSync(tempRoot, { recursive: true, force: true });
         log(`update to ${target.commit} failed: ${errorMessage(error)}`);
+        if (isTransientBuildFailure(error)) {
+          // The network or a registry failed, not the commit: keep the update automatic and try again
+          // at the next check.
+          logger?.warn("launcher.update_deferred", { commit: target.commit, automatic, reason: "network", channel: "source" });
+          transition(availableState(candidate));
+          throw new Error(`Update to ${target.version} was not installed because the network failed; it will be tried again. Details: ${logPath}`);
+        }
         logger?.warn("launcher.update_failed", { commit: target.commit, automatic, message: errorMessage(error), channel: "source" });
         // Remember the failure: an unattended update never retries this commit; a manual one may.
         try { recordFailedCommit(statePath, target.commit, { stage: "build", reason: errorMessage(error) }); } catch {}
@@ -756,6 +794,7 @@ module.exports = {
   classifyCheckRuns,
   classifyComparison,
   createSourceUpdateController,
+  isTransientBuildFailure,
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,

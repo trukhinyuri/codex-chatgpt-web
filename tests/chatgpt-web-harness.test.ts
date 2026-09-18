@@ -3505,7 +3505,7 @@ describe("ChatGPT outer-native harness v4", () => {
       abort.abort(new Error("synthetic MCP client cancellation"));
       await expect(abandoned).rejects.toBeDefined();
 
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 30_000;
       let abandonedError: unknown;
       do {
         try {

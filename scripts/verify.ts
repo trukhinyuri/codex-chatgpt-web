@@ -17,10 +17,18 @@ async function run(args: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(`Verification command failed (${exitCode}): bun ${args.join(" ")}`);
 }
 
+// A launcher updating itself runs every test but leaves the online dependency audit to CI: an advisory
+// published after the commit would otherwise block updates that do not change those dependencies.
+const updateBuild = process.env.CODEX_SUPERPOWER_UPDATE_BUILD === "1";
+
 try {
   await run(["run", "check-version"]);
-  await run(["run", "audit"]);
-  await run(["run", "launcher:audit"]);
+  if (updateBuild) {
+    console.log("verify: dependency audit skipped in a launcher update build (CI runs it)");
+  } else {
+    await run(["run", "audit"]);
+    await run(["run", "launcher:audit"]);
+  }
   await run(["run", "typecheck"]);
   await run(["run", "test"]);
   await run(["run", "launcher:typecheck"]);

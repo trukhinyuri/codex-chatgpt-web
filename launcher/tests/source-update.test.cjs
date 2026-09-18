@@ -18,6 +18,7 @@ const {
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  isTransientBuildFailure,
   readUpdateState,
   recordFailedCommit,
   releaseLock,
@@ -254,6 +255,7 @@ test("a failing test run keeps the installed build and leaves the update availab
     return true;
   });
   assert.ok(!calls.some(call => call[2] === "run app:package"), "a failed verification is never packaged");
+  assert.equal(calls.filter(call => call[2] === "run verify").length, 2, "a failing suite is run a second time before the commit is rejected");
   assert.ok(!calls.some(call => call[0] === "worker"));
   assert.equal(calls.filter(call => call[0] !== "warn").at(-1)[0], "unlock");
   assert.deepEqual(instance.getState(), {
@@ -263,6 +265,54 @@ test("a failing test run keeps the installed build and leaves the update availab
   assert.equal(recorded.failedCommits[MAIN].stage, "build");
   assert.match(recorded.failedCommits[MAIN].reason, /bun run verify/);
   assert.equal(instance.automaticCandidate(), null, "an unattended update never retries a failed commit");
+});
+
+test("a test that fails once under load is run again, and the update installs only if the suite then passes", async () => {
+  let verifyRuns = 0;
+  const { instance, calls, logs } = controller({}, {
+    run: async (command, args) => {
+      calls.push(["run", command, args.join(" ")]);
+      if (args.join(" ") === "run verify" && ++verifyRuns === 1) throw new Error("bun run verify exited with code 1");
+    },
+  });
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  assert.equal(verifyRuns, 2);
+  assert.ok(calls.some(call => call[0] === "warn" && call[1] === "launcher.update_step_retried"));
+  assert.equal(instance.getState().waitingForIdle, true);
+  assert.deepEqual(readUpdateState(path.join(logs, "source-update-state.json")).failedCommits, {});
+  instance.cancelInstall(prepared);
+});
+
+test("a network failure during the build defers the update instead of rejecting the commit", async () => {
+  const { instance, calls, logs } = controller({}, {
+    run: async (command, args) => {
+      calls.push(["run", command, args.join(" ")]);
+      if (args.join(" ") === "install --frozen-lockfile") {
+        throw Object.assign(new Error("bun install --frozen-lockfile exited with code 1"), {
+          outputTail: ["error: GET https://registry.npmjs.org/electron - getaddrinfo ENOTFOUND registry.npmjs.org"],
+        });
+      }
+    },
+  });
+  await instance.checkOnce();
+  await assert.rejects(instance.beginInstall(), /network failed; it will be tried again/);
+  assert.equal(calls.filter(call => call[2] === "install --frozen-lockfile").length, 1, "a network failure is not retried at once");
+  assert.deepEqual(readUpdateState(path.join(logs, "source-update-state.json")).failedCommits, {});
+  assert.deepEqual(instance.getState(), { status: "available", version: "5.0.8+2222222", automatic: true });
+  assert.ok(instance.automaticCandidate(), "the next check installs it by itself");
+  assert.ok(calls.some(call => call[0] === "warn" && call[1] === "launcher.update_deferred"));
+  assert.equal(isTransientBuildFailure(new Error("git fetch failed: fatal: unable to access 'https://github.com/x/': Could not resolve host: github.com")), true);
+  assert.equal(isTransientBuildFailure(Object.assign(new Error("bun run verify exited with code 1"), { outputTail: ["expect(received).toBe(expected)"] })), false);
+});
+
+test("an update build runs every test but leaves the online dependency audit to CI", () => {
+  const verify = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "verify.ts"), "utf8");
+  assert.match(verify, /const updateBuild = process\.env\.CODEX_SUPERPOWER_UPDATE_BUILD === "1";/);
+  assert.match(verify, /if \(updateBuild\) \{[\s\S]*?\} else \{\n\s*await run\(\["run", "audit"\]\);\n\s*await run\(\["run", "launcher:audit"\]\);/);
+  assert.match(verify, /await run\(\["run", "test"\]\);/);
+  const updater = fs.readFileSync(path.join(__dirname, "..", "electron", "source-update.cjs"), "utf8");
+  assert.match(updater, /CODEX_SUPERPOWER_UPDATE_BUILD: "1",/);
 });
 
 test("a package that is not the announced commit is rejected", async () => {

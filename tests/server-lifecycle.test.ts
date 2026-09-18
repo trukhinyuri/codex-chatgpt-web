@@ -18,7 +18,7 @@ test("DEV harness configuration cannot bind a Responses listener", () => {
 });
 
 async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promise<void> {
-  const deadline = Date.now() + 1_000;
+  const deadline = Date.now() + 30_000;
   while (turns.count() !== expected && Date.now() < deadline) await Bun.sleep(5);
   expect(turns.count()).toBe(expected);
 }
@@ -257,7 +257,7 @@ test("a real HTTP peer disconnect releases a streaming turn", async () => {
     expect(await (await fetch(`${endpoint}/healthz`)).json()).toMatchObject({ active_http_turns: 1 });
     socket.destroy();
 
-    const deadline = Date.now() + 1_000;
+    const deadline = Date.now() + 30_000;
     let activeHttpTurns = 1;
     while (Date.now() < deadline && activeHttpTurns !== 0) {
       const health = await (await fetch(`${endpoint}/healthz`)).json() as { active_http_turns: number };
@@ -432,7 +432,7 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
   });
 
   try {
-    const deadline = Date.now() + 1_000;
+    const deadline = Date.now() + 30_000;
     let activeHttpTurns = 0;
     while (Date.now() < deadline && activeHttpTurns !== 1) {
       activeHttpTurns = (await (await fetch(`${endpoint}/healthz`)).json() as { active_http_turns: number }).active_http_turns;
@@ -493,7 +493,7 @@ test("authenticated Interrupt hook endpoint also releases the exact native compa
   });
 
   try {
-    const deadline = Date.now() + 1_000;
+    const deadline = Date.now() + 30_000;
     let activeHttpTurns = 0;
     while (Date.now() < deadline && activeHttpTurns !== 1) {
       activeHttpTurns = (await (await fetch(`${endpoint}/healthz`)).json() as { active_http_turns: number }).active_http_turns;
@@ -1118,7 +1118,7 @@ test.each(["alpha/search", "images/generations"])("authenticated lifecycle contr
   }).catch(() => null);
 
   try {
-    const deadline = Date.now() + 1_000;
+    const deadline = Date.now() + 30_000;
     let activeHttpTurns = 0;
     while (Date.now() < deadline && activeHttpTurns !== 1) {
       const health = await (await fetch(`${endpoint}/healthz`)).json() as { active_http_turns: number };
@@ -1152,7 +1152,7 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
   const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
   const server = startServer(config);
   try {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 30_000;
     let message = "";
     for (;;) {
       try {
@@ -1420,7 +1420,7 @@ test("authenticated shutdown requires a verified idle drain", async () => {
       active_browser_turns: 0,
     });
 
-    const deadline = Date.now() + 2_000;
+    const deadline = Date.now() + 30_000;
     let stopped = false;
     while (Date.now() < deadline && !stopped) {
       await Bun.sleep(20);

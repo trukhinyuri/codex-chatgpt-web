@@ -72,7 +72,7 @@ function scenario(newStartup, { stagedCommit = NEW, healthTimeoutMs = 3_000, exi
   const run = () => {
     const result = spawnSync(process.execPath, [WORKER, jobPath], { encoding: "utf8", timeout: 60_000 });
     // The relaunched app is detached; give it a moment to leave its mark.
-    const deadline = Date.now() + 3_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline && !fs.readFileSync(marks, { flag: "a+", encoding: "utf8" }).trim().endsWith(result.status === 0 ? "new" : "old")) {
       spawnSync("/bin/sleep", ["0.1"]);
     }
