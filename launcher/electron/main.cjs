@@ -1046,7 +1046,7 @@ async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUI
       || (health.active_http_turns === 0 && health.active_browser_turns === 0);
     idleSince = idle ? (idleSince ?? Date.now()) : null;
     if (idleSince !== null && Date.now() - idleSince >= quietMs) {
-      const launch = updateController.launchInstall(prepared);
+      const launch = await updateController.launchInstall(prepared);
       const result = await requestQuit({ preserveActiveTurns: true, quiet: true });
       if (result.ok) return;
       updateController.abortLaunch(launch);

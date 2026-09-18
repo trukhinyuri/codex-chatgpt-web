@@ -28,6 +28,8 @@ const MAX_FAILED_COMMITS = 20;
 // launcher restarted while it waits for an idle window reuses it instead of building it again.
 const STAGING_PREFIX = "codex-web-gpt-update-";
 const VERIFIED_MARKER = "verified.json";
+const WORKER_STARTED_MARKER = "worker.started";
+const WORKER_HANDSHAKE_TIMEOUT_MS = 15_000;
 const USER_AGENT = "codex-web-gpt-launcher-source-updater";
 const MAX_REDIRECTS = 5;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -396,6 +398,7 @@ function defaultDependencies() {
       return spawn(runtimeExecutable, [workerPath, jobPath], { detached: true, stdio: "ignore", windowsHide: true });
     },
     now: () => Date.now(),
+    sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     stagingParent: os.tmpdir(),
   };
 }
@@ -431,6 +434,9 @@ function cleanStagedBuilds({ parent, bundle, currentCommit, keep = null }) {
     const verified = readJsonFile(path.join(dir, VERIFIED_MARKER));
     const ours = job?.target === bundle || verified?.bundle === bundle;
     if (!ours) continue;
+    // A stage that belongs to a running launcher (another instance, or the one a test runs beside)
+    // is never removed: its update may be about to start.
+    if (Number.isInteger(job?.parentPid) && job.parentPid !== process.pid && processAlive(job.parentPid)) continue;
     const stale = verified?.commit === currentCommit || !verified || !/^[0-9a-f]{12}$/.test(name.slice(STAGING_PREFIX.length)) || keep !== null;
     if (stale) fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -667,10 +673,27 @@ function createSourceUpdateController({
   }
 
   /** Start the detached worker that replaces the app after this launcher exits. */
-  function launchInstall(prepared) {
+  /**
+   * Start the worker and wait until it confirms that it read its job and found the staged app. Only
+   * then may the launcher quit; otherwise the worker is stopped and the launcher keeps running.
+   */
+  async function launchInstall(prepared) {
+    for (const file of [prepared.workerPath, prepared.jobPath]) {
+      if (!fs.existsSync(file)) throw new Error(`The staged update is incomplete: ${path.basename(file)} is missing`);
+    }
+    const marker = path.join(prepared.tempRoot, WORKER_STARTED_MARKER);
+    fs.rmSync(marker, { force: true });
     const child = deps.spawnWorker(runtimeExecutable, prepared.workerPath, prepared.jobPath);
     if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update worker did not start");
     child.unref?.();
+    const deadline = deps.now() + WORKER_HANDSHAKE_TIMEOUT_MS;
+    while (!fs.existsSync(marker)) {
+      if (deps.now() >= deadline || (child.exitCode !== undefined && child.exitCode !== null)) {
+        try { child.kill(); } catch {}
+        throw new Error("The update worker did not confirm that it can install the staged build");
+      }
+      await deps.sleep(100);
+    }
     logger?.info("launcher.update_worker_started", { pid: child.pid, version: prepared.version, channel: "source" });
     return { child, prepared };
   }

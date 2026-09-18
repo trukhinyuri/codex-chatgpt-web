@@ -226,6 +226,10 @@ async function main() {
   const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
   if (job?.version !== 1) throw new Error("Unsupported update job");
   job.healthTimeoutMs = Number.isFinite(job.healthTimeoutMs) && job.healthTimeoutMs > 0 ? job.healthTimeoutMs : 6 * 60_000;
+  requireExecutable(executableOf(job, job.source), "Staged launcher executable");
+  // The launcher quits only after this marker appears: a worker that cannot read its job or its
+  // staged app never leaves Codex without a launcher.
+  fs.writeFileSync(path.join(job.tempRoot, "worker.started"), `${process.pid}\n`, { mode: 0o600 });
   appendLog(job, `waiting for launcher PID ${job.parentPid} to exit before installing ${job.displayVersion}`);
   if (!(await waitForExit(job.parentPid, PARENT_EXIT_TIMEOUT_MS))) {
     appendLog(job, "the launcher did not exit; nothing was changed");

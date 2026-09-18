@@ -78,6 +78,8 @@ function controller(overrides = {}, dependencies = {}) {
       readPackagedCommit: () => MAIN,
       spawnWorker: (_runtime, workerPath, jobPath) => {
         calls.push(["worker", path.basename(workerPath), path.basename(jobPath)]);
+        // The real worker confirms that it read its job before the launcher may quit.
+        fs.writeFileSync(path.join(path.dirname(workerPath), "worker.started"), "4242\n");
         return { pid: 4242, unref() {}, kill() { calls.push(["kill"]); } };
       },
       now: () => 0,
@@ -208,7 +210,7 @@ test("an update builds the announced commit, passes all checks, and stages witho
   assert.ok(fs.existsSync(prepared.workerPath) && path.basename(prepared.workerPath) === "source-update-worker.cjs");
   assert.ok(!calls.some(call => call[0] === "worker"), "nothing is replaced before the caller launches the install");
 
-  const launch = instance.launchInstall(prepared);
+  const launch = await instance.launchInstall(prepared);
   assert.equal(launch.child.pid, 4242);
   instance.abortLaunch(launch);
   instance.cancelInstall(prepared);
@@ -551,4 +553,53 @@ test("a start removes only this app's stale staged builds", () => {
   assert.equal(fs.existsSync(unverified), false);
   assert.equal(fs.existsSync(pending), true, "a verified build for a newer commit waits for the next idle window");
   assert.equal(fs.existsSync(otherApp), true, "folders of another app are never touched");
+});
+
+test("the launcher quits for an update only after the worker confirms it can install", async () => {
+  let clock = 0;
+  const silent = controller({}, {
+    now: () => clock,
+    sleep: async () => { clock += 1_000; },
+    spawnWorker: () => ({ pid: 5151, exitCode: null, unref() {}, kill() { silent.calls.push(["killed"]); } }),
+  });
+  await silent.instance.checkOnce();
+  const prepared = await silent.instance.beginInstall();
+  await assert.rejects(silent.instance.launchInstall(prepared), /did not confirm/);
+  assert.ok(silent.calls.some(call => call[0] === "killed"), "a silent worker is stopped");
+
+  const crashed = controller({}, { spawnWorker: () => ({ pid: 5152, exitCode: 1, unref() {}, kill() {} }) });
+  await crashed.instance.checkOnce();
+  const crashedPrepared = await crashed.instance.beginInstall();
+  await assert.rejects(crashed.instance.launchInstall(crashedPrepared), /did not confirm/);
+
+  const incomplete = controller();
+  await incomplete.instance.checkOnce();
+  const gone = await incomplete.instance.beginInstall();
+  fs.rmSync(gone.workerPath);
+  await assert.rejects(incomplete.instance.launchInstall(gone), /staged update is incomplete: source-update-worker\.cjs is missing/);
+  assert.ok(!incomplete.calls.some(call => call[0] === "worker"), "nothing is spawned for an incomplete stage");
+  for (const [instance, staged] of [[silent.instance, prepared], [crashed.instance, crashedPrepared], [incomplete.instance, gone]]) instance.cancelInstall(staged);
+});
+
+test("a stage that belongs to a running launcher is never cleaned, even from another process", () => {
+  const logs = tempDir("cwg-source-live-");
+  const bundle = "/Applications/Codex Web GPT.app";
+  const dir = path.join(logs, "codex-web-gpt-update-Liv3aa");
+  fs.mkdirSync(path.join(dir, "stage"), { recursive: true });
+  // process.ppid is alive and is not this process: exactly the live launcher a test runs beside.
+  fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ target: bundle, commit: MAIN, parentPid: process.ppid }));
+  controller({ logsDirectory: logs, userDataDirectory: logs }, { stagingParent: logs });
+  assert.equal(fs.existsSync(dir), true);
+  fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ target: bundle, commit: MAIN, parentPid: 999_999 }));
+  controller({ logsDirectory: logs, userDataDirectory: logs }, { stagingParent: logs });
+  assert.equal(fs.existsSync(dir), false, "a stage whose launcher is gone is cleaned");
+});
+
+test("every updater test keeps staged builds out of the real temporary folder", () => {
+  for (const file of ["source-update.test.cjs", "problem-report.test.cjs"]) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    const constructions = source.split("createSourceUpdateController(").length - 1;
+    const isolated = (source.match(/stagingParent: logs/g) || []).length;
+    assert.ok(isolated >= Math.min(constructions, 1), `${file} passes stagingParent to its controllers`);
+  }
 });

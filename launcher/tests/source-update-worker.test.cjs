@@ -105,6 +105,7 @@ test("a healthy start keeps the new build and the previous one for rollback", ma
   assert.equal(JSON.parse(fs.readFileSync(path.join(saved, "meta.json"), "utf8")).commit, OLD);
   assert.equal(fs.existsSync(install.tempRoot), false);
   assert.deepEqual(fs.readdirSync(path.dirname(install.target)), ["Codex Web GPT.app"], "no staging copies are left behind");
+  assert.match(install.log(), /waiting for launcher PID/);
 });
 
 test("an unhealthy start restores the previous build and remembers the commit", macOnly, () => {
@@ -155,4 +156,14 @@ test("the rollback store keeps only the two newest builds", macOnly, () => {
   assert.equal(kept.length, 2);
   assert.equal(kept[0], "20260301T000000Z-cccccccccccc");
   assert.ok(kept[1].endsWith(OLD.slice(0, 12)), "the build this update replaced is always kept");
+});
+
+test("a worker whose staged app is missing never confirms and changes nothing", macOnly, () => {
+  const install = scenario(record => record("healthy"));
+  fs.rmSync(install.job.source, { recursive: true, force: true });
+  const result = spawnSync(process.execPath, [WORKER, path.join(install.tempRoot, "job.json")], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 1);
+  assert.equal(fs.existsSync(path.join(install.tempRoot, "worker.started")), false);
+  assert.match(install.installedScript(), /echo old/);
+  assert.deepEqual(install.rollbacks(), []);
 });

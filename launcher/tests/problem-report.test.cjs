@@ -174,10 +174,13 @@ test("the updater reports build failures where they happen and worker outcomes o
     executablePath: "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
     runtimeExecutable: "/runtime/bun", logsDirectory: logs, userDataDirectory: logs, sourceRoot: path.join(logs, "source"),
     onProblem: problem => problems.push(problem),
+    // Never the real temporary folder: a controller cleans staged builds of this app bundle there.
+    dependencies: { stagingParent: logs },
   };
   const failing = createSourceUpdateController({
     ...base,
     dependencies: {
+      stagingParent: logs,
       fetchLatestCommit: async () => COMMIT, fetchComparison: async () => ({ status: "ahead" }), fetchCheckRuns: async () => ({ check_runs: [] }),
       readLoginShellPath: async () => "", acquireLock: lockPath => lockPath, releaseLock: () => {}, appendLog: () => {},
       prepareCheckout: async () => {}, run: async (_command, args) => { if (args.join(" ") === "run verify") throw new Error("exited with code 1"); },
