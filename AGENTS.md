@@ -62,10 +62,15 @@ Run every check and report each as passed or failed.
 
 ## Update
 
-- **In the launcher:** press **Update to v…**. The launcher builds this repository's `main`, runs `bun run verify` and installs only while Codex is idle. A failure keeps the current app and is logged in `~/Library/Application Support/Codex Web GPT/logs/source-update.log`.
-- **From a terminal:** rerun the installer command from **Install**. `WAIT_FOR_IDLE=1` waits until no ChatGPT Web turn is active, then quits and replaces the launcher.
+- **Automatic:** installed launchers update themselves from `main` within an hour (**Settings → Automatic updates**, on by default). An update installs only if it fast-forwards the installed build, its GitHub checks passed or there are none, `bun run verify` passes on this Mac, and the new launcher reports a healthy start; otherwise the previous app stays or is restored. Nothing is replaced until Codex has been idle for five minutes.
+- **In the launcher:** **Update to v…** installs an update that needs a click (for example one that failed before) with the same checks, after 30 idle seconds.
+- **From a terminal:** rerun the installer command from **Install**. `WAIT_FOR_IDLE=1` waits until no ChatGPT Web turn is active, then quits and replaces the launcher; a build that does not start cleanly is rolled back.
 - **Afterwards:** report the `RESULT` line and the doctor result.
-- **Rollback:** the first app the installer replaced is in `~/.cache/ccw-app-official.noindex`; later ones are in the Trash. Quit the launcher and move one back into `/Applications`.
+- **Rollback:** the two builds replaced last are in `~/Library/Application Support/Codex Web GPT/rollback.noindex`. Restore the newest with the command below (`LIST=1` lists them, `ENTRY=<name>` picks one, `NOW=1` skips the idle wait and cancels running turns). It ends with `RESULT rolled-back commit=<sha> from=<sha>`; automatic updates then skip the commit rolled back from.
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/rollback-fork-macos.sh | bash
+  ```
 
 ## Troubleshoot
 
@@ -74,7 +79,7 @@ Evidence lives here:
 | What | Where |
 | --- | --- |
 | Launcher and bridge | `~/Library/Application Support/Codex Web GPT/logs/launcher.jsonl` |
-| In-app updates | `~/Library/Application Support/Codex Web GPT/logs/source-update.log`, `update-worker.log` |
+| Updates | `~/Library/Application Support/Codex Web GPT/logs/source-update.log`; failed commits and the last result in `source-update-state.json`, the last start in `source-update-health.json` (same folder) |
 | MCP and tunnel | `~/Library/Application Support/tunnel-client/logs/codex-chatgpt-web.log` |
 | Codex | `~/.codex/logs_2.sqlite` (table `logs`), `~/.codex/sessions/**/rollout-*.jsonl` |
 | Browser turns (structure only, no page text) | `~/.codex-chatgpt-web/diagnostics/browser-turns/` |
@@ -92,7 +97,7 @@ Evidence lives here:
 ## Develop
 
 - Use Bun 1.4.0 exactly. Install with `bun install --frozen-lockfile` in the repository root and in `launcher/`.
-- `bun run verify` must pass before anything reaches `main`: the launcher's updater builds `main` and refuses a build that fails it. Run tests from a normal folder, not `/tmp`; runtime tests reject non-durable paths.
+- `bun run verify` must pass before anything reaches `main`: installed launchers build `main` within an hour, refuse a build that fails it, and roll back a build that does not start cleanly. A new launcher start path must still call `reportLauncherStartup` with `healthy` or `unhealthy`, or every update of it is rolled back. Run tests from a normal folder, not `/tmp`; runtime tests reject non-durable paths.
 - Branches: a fix meant for upstream starts from `upstream/main` in `fix/<topic>` with a regression test; a fork-only change starts from `main` in `fork/<topic>`. Merge both into `main`, and keep `fork-build` equal to `main` for older installers.
 - Keep the Full-harness contract in `src/adapters/chatgpt-web/prompt.ts` free of the vocabulary that `tests/prompt-contract.test.ts` excludes.
 - Launcher interface text needs all five languages in `launcher/src/i18n.ts`.

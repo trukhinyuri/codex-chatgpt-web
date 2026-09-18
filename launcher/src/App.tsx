@@ -366,6 +366,7 @@ function LauncherShell({
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
+  const updateWaitingForIdle = snapshot.update.status === "installing" && snapshot.update.waitingForIdle === true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
 
   useEffect(() => {
@@ -613,7 +614,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
+                  label={updateWaitingForIdle ? copy.updateReady : updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -1693,6 +1694,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {snapshot.packaged && !devProfile ? <SettingRow body={copy.automaticUpdatesBody} label={copy.automaticUpdates}>
+          <Switch
+            checked={snapshot.state.automaticUpdates}
+            onChange={(checked) => void api!.setPreference("automaticUpdates", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}

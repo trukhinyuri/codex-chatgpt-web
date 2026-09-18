@@ -13,6 +13,7 @@ export interface LauncherState {
   xOpened: boolean;
   autoStart: boolean;
   keepRunningOnClose: boolean;
+  automaticUpdates: boolean;
   showBrowserDuringTurns: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
@@ -91,7 +92,15 @@ export interface OperationState {
 
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
-  | { status: "available" | "downloading" | "installing"; version: string }
+  | {
+    status: "available" | "downloading" | "installing";
+    version: string;
+    /** This update may install by itself (fast-forward of main, CI passed, never failed here). */
+    automatic?: boolean;
+    blocked?: string;
+    /** Built, tested and staged; waiting until Codex has no active turns. */
+    waitingForIdle?: boolean;
+  }
   | { status: "error"; message: string };
 
 export interface LauncherSnapshot {
@@ -166,7 +175,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "automaticUpdates",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

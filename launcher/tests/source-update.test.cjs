@@ -9,14 +9,21 @@ const {
   SOURCE_CLONE_URL,
   SOURCE_COMMIT_API_URL,
   acquireLock,
+  applicationBundle,
+  automaticUpdateBlocker,
+  classifyCheckRuns,
+  classifyComparison,
   createSourceUpdateController,
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  readUpdateState,
+  recordFailedCommit,
   releaseLock,
   sourceBuildPath,
   sourceBuildSteps,
   sourceUpdateVersion,
+  writeStartupHealth,
 } = require("../electron/source-update.cjs");
 
 const INSTALLED = "1".repeat(40);
@@ -39,11 +46,15 @@ function controller(overrides = {}, dependencies = {}) {
     executablePath: "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
     runtimeExecutable: "/runtime/bun-root/runtime/bun",
     logsDirectory: logs,
+    userDataDirectory: logs,
     sourceRoot: path.join(logs, "source"),
     publish: state => published.push(state),
+    logger: { info: () => {}, warn: (event, fields) => calls.push(["warn", event, fields]) },
     ...overrides,
     dependencies: {
       fetchLatestCommit: async () => MAIN,
+      fetchComparison: async () => ({ status: "ahead" }),
+      fetchCheckRuns: async () => ({ total_count: 0, check_runs: [] }),
       readLoginShellPath: async () => "/opt/homebrew/bin:/usr/bin",
       acquireLock: lockPath => { calls.push(["lock", lockPath]); return lockPath; },
       releaseLock: lockPath => calls.push(["unlock", lockPath]),
@@ -113,6 +124,7 @@ test("source updates stay disabled outside a stamped packaged macOS build", asyn
     { currentCommit: undefined },
     { currentCommit: "abc" },
     { runtimeExecutable: null },
+    { userDataDirectory: undefined },
   ]) {
     const { instance } = controller(overrides);
     assert.deepEqual(instance.getState(), { status: "disabled" });
@@ -125,10 +137,12 @@ test("a check announces main only when it differs from the installed build", asy
   assert.deepEqual(await current.instance.checkOnce(), { status: "up-to-date" });
 
   const dirty = controller({ currentSourceState: "dirty" }, { fetchLatestCommit: async () => INSTALLED });
-  assert.deepEqual(await dirty.instance.checkOnce(), { status: "available", version: "5.0.8+1111111" });
+  assert.deepEqual(await dirty.instance.checkOnce(), {
+    status: "available", version: "5.0.8+1111111", automatic: false, blocked: "local-build",
+  });
 
   const newer = controller();
-  assert.deepEqual(await newer.instance.checkOnce(), { status: "available", version: "5.0.8+2222222" });
+  assert.deepEqual(await newer.instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: true });
   assert.deepEqual(newer.published.map(state => state.status), ["checking", "available"]);
 });
 
@@ -142,7 +156,7 @@ test("a failed check reports the error but keeps an update that was already foun
   });
   assert.equal((await instance.checkOnce()).status, "available");
   fail = true;
-  assert.deepEqual(await instance.checkOnce(), { status: "available", version: "5.0.8+2222222" });
+  assert.deepEqual(await instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: true });
 
   const fresh = controller({}, { fetchLatestCommit: async () => { throw new Error("offline"); } });
   assert.deepEqual(await fresh.instance.checkOnce(), { status: "error", message: "offline" });
@@ -156,7 +170,9 @@ test("an update builds the announced commit, passes all checks, and stages witho
   const prepared = await instance.beginInstall();
   assert.equal(prepared.commit, MAIN);
   assert.equal(prepared.version, "5.0.8+2222222");
-  assert.deepEqual(instance.getState(), { status: "installing", version: "5.0.8+2222222" });
+  assert.deepEqual(instance.getState(), {
+    status: "installing", version: "5.0.8+2222222", automatic: false, waitingForIdle: true,
+  });
   assert.deepEqual(calls.map(call => call.slice(0, 3)), [
     ["lock", calls[0][1]],
     ["checkout", MAIN, calls[1][2]],
@@ -168,9 +184,19 @@ test("an update builds the announced commit, passes all checks, and stages witho
   ]);
   assert.ok(calls[1][2].startsWith("/runtime/bun-root/runtime"));
   const job = JSON.parse(fs.readFileSync(prepared.jobPath, "utf8"));
-  assert.equal(job.platform, "darwin");
+  assert.equal(job.version, 1);
+  assert.equal(job.parentPid, process.pid);
   assert.equal(job.target, "/Applications/Codex Web GPT.app");
-  assert.equal(job.version, "5.0.8+2222222");
+  assert.equal(job.executableName, "Codex Web GPT");
+  assert.equal(path.basename(job.source), "Codex Web GPT.app");
+  assert.equal(job.commit, MAIN);
+  assert.equal(job.previousCommit, INSTALLED);
+  assert.equal(job.displayVersion, "5.0.8+2222222");
+  assert.equal(job.rollbackKeep, 2);
+  assert.ok(job.rollbackRoot.endsWith("rollback.noindex"));
+  assert.ok(job.healthPath.endsWith("source-update-health.json"));
+  assert.ok(job.statePath.endsWith("source-update-state.json"));
+  assert.ok(fs.existsSync(prepared.workerPath) && path.basename(prepared.workerPath) === "source-update-worker.cjs");
   assert.ok(!calls.some(call => call[0] === "worker"), "nothing is replaced before the caller launches the install");
 
   const launch = instance.launchInstall(prepared);
@@ -178,7 +204,7 @@ test("an update builds the announced commit, passes all checks, and stages witho
   instance.abortLaunch(launch);
   instance.cancelInstall(prepared);
   assert.equal(fs.existsSync(prepared.tempRoot), false);
-  assert.deepEqual(instance.getState(), { status: "available", version: "5.0.8+2222222" });
+  assert.deepEqual(instance.getState(), { status: "available", version: "5.0.8+2222222", automatic: true });
 });
 
 test("a failing test run keeps the installed build and leaves the update available", async () => {
@@ -196,8 +222,14 @@ test("a failing test run keeps the installed build and leaves the update availab
   });
   assert.ok(!calls.some(call => call[2] === "run app:package"), "a failed verification is never packaged");
   assert.ok(!calls.some(call => call[0] === "worker"));
-  assert.equal(calls.at(-1)[0], "unlock");
-  assert.deepEqual(instance.getState(), { status: "available", version: "5.0.8+2222222" });
+  assert.equal(calls.filter(call => call[0] !== "warn").at(-1)[0], "unlock");
+  assert.deepEqual(instance.getState(), {
+    status: "available", version: "5.0.8+2222222", automatic: false, blocked: "failed-before",
+  });
+  const recorded = readUpdateState(path.join(logs, "source-update-state.json"));
+  assert.equal(recorded.failedCommits[MAIN].stage, "build");
+  assert.match(recorded.failedCommits[MAIN].reason, /bun run verify/);
+  assert.equal(instance.automaticCandidate(), null, "an unattended update never retries a failed commit");
 });
 
 test("a package that is not the announced commit is rejected", async () => {
@@ -216,7 +248,7 @@ test("updates refuse to start without an announced update or while one is runnin
   await slow.instance.checkOnce();
   const first = slow.instance.beginInstall();
   await assert.rejects(slow.instance.beginInstall(), /already being prepared/);
-  assert.deepEqual(await slow.instance.checkOnce(), { status: "downloading", version: "5.0.8+2222222" });
+  assert.deepEqual(await slow.instance.checkOnce(), { status: "downloading", version: "5.0.8+2222222", automatic: false });
   release();
   await first;
 });
@@ -340,4 +372,108 @@ test("the update quit drains without cancelling while an ordinary quit keeps can
   assert.match(main, /const prepared = await updateController\.beginInstall\(\);[\s\S]*?await quitWhenIdleForUpdate\(prepared, logger\);/);
   assert.match(main, /createSourceUpdateController\(\{[\s\S]*?currentCommit: LAUNCHER_MANIFEST\.sourceCommit,/);
   assert.doesNotMatch(main, /createUpdateController\(/, "the fork never offers upstream release packages");
+});
+
+test("CI and history decide whether an update may install by itself", () => {
+  assert.equal(classifyCheckRuns({ check_runs: [] }), "none");
+  assert.equal(classifyCheckRuns({ check_runs: [{ status: "in_progress" }] }), "pending");
+  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "success" }, { status: "completed", conclusion: "skipped" }] }), "success");
+  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "success" }, { status: "completed", conclusion: "failure" }] }), "failure");
+  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "cancelled" }] }), "failure");
+  assert.equal(classifyComparison({ status: "ahead" }), "ahead");
+  assert.equal(classifyComparison({ message: "Not Found" }), "unknown");
+
+  const clean = { sourceState: "clean", relation: "ahead", ci: "success", failedBefore: false };
+  assert.equal(automaticUpdateBlocker(clean), null);
+  assert.equal(automaticUpdateBlocker({ ...clean, ci: "none" }), null, "a repository without CI relies on the local test run");
+  assert.equal(automaticUpdateBlocker({ ...clean, ci: "pending" }), "ci-pending");
+  assert.equal(automaticUpdateBlocker({ ...clean, ci: "failure" }), "ci-failure");
+  assert.equal(automaticUpdateBlocker({ ...clean, ci: "unknown" }), "ci-unknown");
+  assert.equal(automaticUpdateBlocker({ ...clean, relation: "diverged" }), "history-diverged");
+  assert.equal(automaticUpdateBlocker({ ...clean, relation: "unknown" }), "history-unknown");
+  assert.equal(automaticUpdateBlocker({ ...clean, failedBefore: true }), "failed-before");
+  assert.equal(automaticUpdateBlocker({ ...clean, sourceState: "dirty" }), "local-build");
+});
+
+test("a build newer than main is never downgraded, and doubtful updates wait for a click", async () => {
+  const newer = controller({}, { fetchComparison: async () => ({ status: "behind" }) });
+  assert.deepEqual(await newer.instance.checkOnce(), { status: "up-to-date" });
+
+  for (const [dependencies, blocked] of [
+    [{ fetchComparison: async () => ({ status: "diverged" }) }, "history-diverged"],
+    [{ fetchComparison: async () => { throw new Error("HTTP 403"); } }, "history-unknown"],
+    [{ fetchCheckRuns: async () => ({ check_runs: [{ status: "queued" }] }) }, "ci-pending"],
+    [{ fetchCheckRuns: async () => ({ check_runs: [{ status: "completed", conclusion: "failure" }] }) }, "ci-failure"],
+    [{ fetchCheckRuns: async () => { throw new Error("HTTP 403"); } }, "ci-unknown"],
+  ]) {
+    const { instance } = controller({}, dependencies);
+    assert.deepEqual(await instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: false, blocked });
+    assert.equal(instance.automaticCandidate(), null);
+    await assert.rejects(instance.beginInstall({ automatic: true }), /needs a manual install/);
+  }
+
+  const green = controller({}, { fetchCheckRuns: async () => ({ check_runs: [{ status: "completed", conclusion: "success" }] }) });
+  await green.instance.checkOnce();
+  assert.equal(green.instance.automaticCandidate().commit, MAIN);
+});
+
+test("a commit that failed here before is offered only for a manual install", async () => {
+  const { instance, logs } = controller();
+  recordFailedCommit(path.join(logs, "source-update-state.json"), MAIN, { stage: "startup", reason: "no healthy start" });
+  assert.deepEqual(await instance.checkOnce(), {
+    status: "available", version: "5.0.8+2222222", automatic: false, blocked: "failed-before",
+  });
+  const prepared = await instance.beginInstall();
+  assert.equal(prepared.commit, MAIN, "the user can still install it by hand");
+  instance.cancelInstall(prepared);
+});
+
+test("the failed-commit memory is bounded and keeps the newest entries", () => {
+  const file = path.join(tempDir("cwg-source-state-"), "source-update-state.json");
+  for (let index = 0; index < 25; index += 1) {
+    recordFailedCommit(file, index.toString(16).padStart(40, "0"), {
+      stage: "build", reason: "x".repeat(900), at: new Date(Date.UTC(2026, 8, 18, 0, index)).toISOString(),
+    });
+  }
+  const state = readUpdateState(file);
+  assert.equal(Object.keys(state.failedCommits).length, 20);
+  assert.ok(state.failedCommits[(24).toString(16).padStart(40, "0")]);
+  assert.equal(state.failedCommits["0".repeat(40)], undefined);
+  assert.equal(state.lastResult.reason.length, 500);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(readUpdateState(path.join(path.dirname(file), "missing.json")), { version: 1, failedCommits: {}, lastResult: null });
+});
+
+test("a rollback from the previous update is reported when the launcher starts", () => {
+  const logs = tempDir("cwg-source-rollback-note-");
+  fs.writeFileSync(path.join(logs, "source-update-state.json"), JSON.stringify({
+    version: 1, failedCommits: {}, lastResult: { commit: MAIN, result: "rolled-back", stage: "startup", at: "2026-09-18T00:00:00.000Z" },
+  }));
+  const { calls } = controller({ logsDirectory: logs, userDataDirectory: logs });
+  assert.deepEqual(calls.find(call => call[0] === "warn").slice(0, 2), ["warn", "launcher.update_rolled_back"]);
+});
+
+test("startup health is a small private record without free text from the session", () => {
+  const file = path.join(tempDir("cwg-source-health-"), "nested", "source-update-health.json");
+  assert.equal(writeStartupHealth(file, { commit: MAIN, status: "healthy", reason: "runtime-ready", pid: 7, at: new Date(0) }), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+    version: 1, commit: MAIN, pid: 7, status: "healthy", reason: "runtime-ready", at: "1970-01-01T00:00:00.000Z",
+  });
+  assert.equal(applicationBundle("/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT"), "/Applications/Codex Web GPT.app");
+  assert.throws(() => applicationBundle("/usr/local/bin/codex-web-gpt"), /application bundle/);
+});
+
+test("the launcher reports its start, installs unattended updates only after a long idle period, and honours the setting", () => {
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  assert.match(main, /app\.quit\(\);\n\s*return;\n\s*\}\n\s*reportLauncherStartup\("starting"\);/);
+  assert.match(main, /reportLauncherStartup\(\n\s*runtime\.status === "ready" \|\| runtime\.status === "not-configured" \? "healthy" : "unhealthy",/);
+  assert.match(main, /reportLauncherStartup\("unhealthy", "runtime-start-error"\);/);
+  assert.match(main, /reportLauncherStartup\("unhealthy", "launcher-start-error"\);/);
+  assert.match(main, /const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 5 \* 60_000;/);
+  assert.match(main, /stateStore\.read\(\)\.automaticUpdates !== true \|\| !updateController\.automaticCandidate\(\)/);
+  assert.match(main, /beginInstall\(\{ automatic: true \}\);[\s\S]*?quitWhenIdleForUpdate\(prepared, logger, AUTOMATIC_UPDATE_IDLE_QUIET_MS\)/);
+  assert.match(main, /key === "automaticUpdates"/);
+  assert.match(main, /userDataDirectory: app\.getPath\("userData"\),/);
+  const state = fs.readFileSync(path.join(__dirname, "..", "electron", "state.cjs"), "utf8");
+  assert.match(state, /automaticUpdates: true,/);
 });

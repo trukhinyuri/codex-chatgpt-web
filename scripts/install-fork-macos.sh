@@ -13,9 +13,11 @@
 #
 # The script builds with the Bun version pinned in package.json, runs the full verification,
 # packages the app, installs it into /Applications, checks that the launcher adopted the new
-# runtime, and runs doctor. It never touches ~/.codex or ~/.codex-chatgpt-web. The first app it
-# replaces is kept in ~/.cache/ccw-app-official.noindex for rollback; the .noindex suffix keeps
-# that copy out of Spotlight and Launch Services.
+# runtime, and runs doctor. It never touches ~/.codex or ~/.codex-chatgpt-web. The replaced app is
+# kept in ~/Library/Application Support/Codex Web GPT/rollback.noindex (the two newest builds, shared
+# with the launcher's updater); the .noindex suffix keeps those copies out of Spotlight and Launch
+# Services. If the new launcher does not report a healthy start, the previous app is restored.
+# Roll back by hand with scripts/rollback-fork-macos.sh.
 set -euo pipefail
 
 REPO_URL="https://github.com/trukhinyuri/codex-chatgpt-web.git"
@@ -27,7 +29,10 @@ VERIFY="${VERIFY:-1}"
 WAIT_FOR_IDLE="${WAIT_FOR_IDLE:-0}"
 APP="/Applications/Codex Web GPT.app"
 APP_PROC="$APP/Contents/MacOS/Codex Web GPT"
-KEEP="$HOME/.cache/ccw-app-official.noindex"
+USER_DATA="$HOME/Library/Application Support/Codex Web GPT"
+ROLLBACK_ROOT="$USER_DATA/rollback.noindex"
+STARTUP_HEALTH="$USER_DATA/source-update-health.json"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-360}"
 HEALTH_URL="http://127.0.0.1:17841/healthz"
 
 say() { printf '==> %s\n' "$*"; }
@@ -155,18 +160,62 @@ STAGE="$(mktemp -d)"
 ditto -x -k "$ZIP" "$STAGE"
 NEW="$STAGE/Codex Web GPT.app"
 [ -x "$NEW/Contents/MacOS/Codex Web GPT" ] || die "the package is incomplete: $ZIP"
+plist_commit() { plutil -extract CodexWebGptSourceCommit raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
+NEW_STAMP="$(plist_commit "$NEW")"
+SAVED=""
 if [ -d "$APP" ]; then
-  if [ -d "$KEEP/Codex Web GPT.app" ]; then
-    mv "$APP" "$HOME/.Trash/Codex Web GPT $(date +%Y%m%d-%H%M%S).app"
-  else
-    mkdir -p "$KEEP"
-    mv "$APP" "$KEEP/"
-    say "Previous app kept for rollback: $KEEP/Codex Web GPT.app"
-  fi
+  OLD_COMMIT="$(plist_commit "$APP")"
+  SAVED="$ROLLBACK_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${OLD_COMMIT:-unknown}"
+  SAVED="${SAVED:0:$(( ${#ROLLBACK_ROOT} + 30 ))}"
+  mkdir -p "$SAVED"
+  chmod 700 "$USER_DATA" "$ROLLBACK_ROOT" 2>/dev/null || true
+  mv "$APP" "$SAVED/"
+  printf '{"version":1,"commit":"%s","replacedBy":"%s","savedAt":"%s","source":"installer"}\n' \
+    "${OLD_COMMIT:-}" "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SAVED/meta.json"
+  say "Previous app kept for rollback: $SAVED"
 fi
 ditto "$NEW" "$APP"
 say "Installed $APP from ${COMMIT:0:7}"
+rm -f "$STARTUP_HEALTH"
 open -a "$APP"
+
+# Builds that report their start (all builds of this fork since the automatic updater) must report a
+# healthy one; otherwise the previous app goes back into place, exactly as the in-app updater does.
+restore_previous() {
+  say "Restoring the previous app: $1"
+  osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do launcher_running || break; sleep 1; done
+  pkill -f "$APP_PROC" >/dev/null 2>&1 || true
+  if [ -n "$SAVED" ] && [ -d "$SAVED/Codex Web GPT.app" ]; then
+    rm -rf "$APP"
+    mv "$SAVED/Codex Web GPT.app" "$APP"
+    rm -rf "$SAVED"
+    open -a "$APP"
+    die "the new build did not start cleanly ($1); the previous app was restored"
+  fi
+  die "the new build did not start cleanly ($1) and there was no previous app to restore"
+}
+if [ "$NEW_STAMP" = "$COMMIT" ]; then
+  say "Waiting for the launcher to report a healthy start"
+  status=""
+  for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
+    if [ -f "$STARTUP_HEALTH" ] && [ "$(plutil -extract commit raw -o - "$STARTUP_HEALTH" 2>/dev/null)" = "$COMMIT" ]; then
+      status="$(plutil -extract status raw -o - "$STARTUP_HEALTH" 2>/dev/null || true)"
+      [ "$status" = healthy ] || [ "$status" = unhealthy ] && break
+    fi
+    sleep 1
+  done
+  case "$status" in
+    healthy) say "The launcher started healthy" ;;
+    unhealthy) restore_previous "$(plutil -extract reason raw -o - "$STARTUP_HEALTH" 2>/dev/null || echo unknown)" ;;
+    *) restore_previous "no healthy start within ${HEALTH_TIMEOUT} s" ;;
+  esac
+fi
+if [ -d "$ROLLBACK_ROOT" ]; then
+  # Keep the two newest builds, like the in-app updater.
+  find "$ROLLBACK_ROOT" -mindepth 1 -maxdepth 1 -type d -name '????????T??????Z-*' | sort -r | tail -n +3 |
+    while IFS= read -r old; do rm -rf "$old"; done
+fi
 
 # Read back: the launcher must adopt the new runtime, then report its health.
 VERSION="$(defaults read "$APP/Contents/Info" CFBundleShortVersionString)"

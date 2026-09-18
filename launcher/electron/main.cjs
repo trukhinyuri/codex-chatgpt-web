@@ -31,10 +31,18 @@ const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runti
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
-const { SOURCE_CHECK_INTERVAL_MS, createSourceUpdateController } = require("./source-update.cjs");
+const {
+  COMMIT: SOURCE_COMMIT,
+  SOURCE_CHECK_INTERVAL_MS,
+  STARTUP_HEALTH_FILE,
+  createSourceUpdateController,
+  writeStartupHealth,
+} = require("./source-update.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
+// An unattended update waits longer: a short gap between Codex turns is not a finished task.
+const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 5 * 60_000;
 const UPDATE_IDLE_POLL_MS = 5_000;
 const {
   createStateStore,
@@ -102,6 +110,7 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let automaticUpdateRunning = false;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -907,9 +916,11 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "automaticUpdates";
     if (!ordinary) throw new Error("Unknown preference");
-    return stateStore.update({ [key]: value === true });
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "automaticUpdates" && value === true) void installAutomaticUpdate({ logger, stateStore });
+    return state;
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -931,6 +942,8 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
+    // The automatic path is already building or waiting for an idle window for this update.
+    if (automaticUpdateRunning) return true;
     // Build, test and stage while Codex keeps working; replace the app only in an idle window.
     const prepared = await updateController.beginInstall();
     try {
@@ -969,14 +982,14 @@ async function runtimeActivity() {
  * update replace the app. The runtime drains without cancelling work; if a turn arrives during the
  * drain, the worker is stopped and the wait continues. Nothing is interrupted to install an update.
  */
-async function quitWhenIdleForUpdate(prepared, logger) {
+async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUIET_MS) {
   let idleSince = null;
   for (;;) {
     const health = await runtimeActivity();
     const idle = !health
       || (health.active_http_turns === 0 && health.active_browser_turns === 0);
     idleSince = idle ? (idleSince ?? Date.now()) : null;
-    if (idleSince !== null && Date.now() - idleSince >= UPDATE_IDLE_QUIET_MS) {
+    if (idleSince !== null && Date.now() - idleSince >= quietMs) {
       const launch = updateController.launchInstall(prepared);
       const result = await requestQuit({ preserveActiveTurns: true, quiet: true });
       if (result.ok) return;
@@ -985,6 +998,30 @@ async function quitWhenIdleForUpdate(prepared, logger) {
       idleSince = null;
     }
     await new Promise(resolve => setTimeout(resolve, UPDATE_IDLE_POLL_MS));
+  }
+}
+
+/**
+ * Unattended updates: a fast-forward of main whose CI passed (or that has no CI) and that never failed
+ * here is built, fully tested and staged in the background, then installed after Codex has been idle
+ * for five minutes. Anything else waits for the user's click.
+ */
+async function installAutomaticUpdate({ logger, stateStore }) {
+  if (automaticUpdateRunning || !updateController) return;
+  if (stateStore.read().automaticUpdates !== true || !updateController.automaticCandidate()) return;
+  automaticUpdateRunning = true;
+  try {
+    const prepared = await updateController.beginInstall({ automatic: true });
+    try {
+      await quitWhenIdleForUpdate(prepared, logger, AUTOMATIC_UPDATE_IDLE_QUIET_MS);
+    } catch (error) {
+      updateController.cancelInstall(prepared);
+      throw error;
+    }
+  } catch (error) {
+    logger?.warn("launcher.automatic_update_skipped", { message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    automaticUpdateRunning = false;
   }
 }
 
@@ -1022,12 +1059,27 @@ async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) 
   }
 }
 
+/**
+ * After an update the worker waits for this build to report a healthy start and otherwise restores
+ * the previous app. Only packaged builds of this fork report; the reason is a fixed code, never text
+ * from ChatGPT, Codex or the user.
+ */
+function reportLauncherStartup(status, reason = null) {
+  if (!app.isPackaged || IS_DEV_PROFILE || !SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) return;
+  writeStartupHealth(path.join(app.getPath("userData"), STARTUP_HEALTH_FILE), {
+    commit: LAUNCHER_MANIFEST.sourceCommit,
+    status,
+    reason,
+  });
+}
+
 async function start() {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
     app.quit();
     return;
   }
+  reportLauncherStartup("starting");
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => showMainWindow());
 
@@ -1164,6 +1216,7 @@ async function start() {
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
       : null,
     logsDirectory: app.getPath("logs"),
+    userDataDirectory: app.getPath("userData"),
     publish: (state) => send("launcher:update-state", state),
     logger,
   });
@@ -1181,8 +1234,10 @@ async function start() {
   }
   await loadRenderer(mainWindow);
   if (!launcherSmokeTest) {
-    void updateController.checkOnce();
-    setInterval(() => { void updateController.checkOnce(); }, SOURCE_CHECK_INTERVAL_MS).unref?.();
+    const checkForUpdates = () => updateController.checkOnce()
+      .then(() => installAutomaticUpdate({ logger, stateStore }));
+    void checkForUpdates();
+    setInterval(() => { void checkForUpdates(); }, SOURCE_CHECK_INTERVAL_MS).unref?.();
   }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
@@ -1304,6 +1359,11 @@ async function start() {
     const route = await runtimeHost.connectBridgeRoute();
     return { ...runtime, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
+    // "not-configured" is a healthy start: a fresh install has nothing to run yet.
+    reportLauncherStartup(
+      runtime.status === "ready" || runtime.status === "not-configured" ? "healthy" : "unhealthy",
+      `runtime-${runtime.status}`,
+    );
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
@@ -1371,6 +1431,7 @@ async function start() {
       });
     }
   }).catch(async (error) => {
+    reportLauncherStartup("unhealthy", "runtime-start-error");
     const primary = error instanceof Error ? error.message : String(error);
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const message = routeRecovery.error
@@ -1395,6 +1456,7 @@ async function start() {
 
 void start().catch(async (error) => {
   startupFailed = true;
+  reportLauncherStartup("unhealthy", "launcher-start-error");
   const message = error instanceof Error ? error.message : String(error);
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);

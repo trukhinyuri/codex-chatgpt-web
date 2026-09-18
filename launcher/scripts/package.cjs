@@ -48,6 +48,11 @@ if (sourceHead.status === 0 && /^[0-9a-f]{40}$/.test(sourceHead.stdout.trim())) 
   const sourceState = sourceChanges.status === 0 && sourceChanges.stdout.trim() === "" ? "clean" : "dirty";
   builderArgs.push(`--config.extraMetadata.sourceCommit=${sourceHead.stdout.trim()}`);
   builderArgs.push(`--config.extraMetadata.sourceState=${sourceState}`);
+  // Scripts (install, rollback) read the same stamp from Info.plist without unpacking app.asar.
+  if (target === "--mac") {
+    builderArgs.push(`--config.mac.extendInfo.CodexWebGptSourceCommit=${sourceHead.stdout.trim()}`);
+    builderArgs.push(`--config.mac.extendInfo.CodexWebGptSourceState=${sourceState}`);
+  }
 }
 
 const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"));

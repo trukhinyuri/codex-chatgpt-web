@@ -2,7 +2,7 @@
 
 Use the ChatGPT models on your ChatGPT plan, from Instant to Pro, as models inside [Codex](https://developers.openai.com/codex) (app and CLI). Codex keeps its files, tools, approvals and tasks; ChatGPT web answers each turn through a local bridge and the launcher's embedded browser.
 
-This fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) fixes failures seen in daily use, installs from source on macOS, and updates itself from this repository's `main` branch only after the full test suite passes.
+This fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) fixes failures seen in daily use, installs from source on macOS, and keeps itself up to date from this repository's `main` branch: every update must pass the full test suite and start cleanly, or the previous build stays in place.
 
 [Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [What this fork changes](#what-this-fork-changes) · [Updates](#updates-and-rollback) · [Troubleshooting](#troubleshooting)
 
@@ -95,7 +95,7 @@ Browser-only mode stops after step 3 and has no local tools. Zero Risk mode lets
 | Compaction during a rate limit | Fails with "ChatGPT did not complete the context handoff" ([#556](https://github.com/miuuyy/codex-chatgpt-web/issues/556)) | Returns the rate limit with its delay; Codex retries after it |
 | Bigger Context | Context parts go in Instant; only the last part uses the selected mode | Every part uses the selected mode, which is checked again before the last part |
 | A tool call that ChatGPT stops before it runs | The model may blame Codex auto-review or the target service | The model reports that ChatGPT stopped the call and that it never reached Codex |
-| Updates | Offers upstream release packages | Builds this repository's `main`, runs the full test suite, installs only while Codex is idle |
+| Updates | Offers upstream release packages | Installs this repository's `main` automatically after the full test suite passes, only while Codex is idle, and restores the previous build if the new one does not start cleanly |
 | Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
 | AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
 
@@ -103,9 +103,17 @@ Each fix meant for upstream lives in its own `fix/…` branch with a regression 
 
 ## Updates and rollback
 
-- **In the launcher.** It checks `main` at start and every six hours and offers **Update to v5.0.8+‹commit›**. The update builds that exact commit in `~/.codex-chatgpt-web-source`, runs `bun run verify`, packages the app and checks the package's commit. If any step fails, the installed app stays and the details go to `~/Library/Application Support/Codex Web GPT/logs/source-update.log`. The new app replaces the old one only after Codex has had no active ChatGPT Web turn for 30 seconds.
-- **From a terminal.** Rerun the quick-start command with `WAIT_FOR_IDLE=1` before `bash`.
-- **Rollback.** The first app the installer replaces is kept in `~/.cache/ccw-app-official.noindex`; later ones go to the Trash. Quit the launcher and move one back into `/Applications`.
+- **Automatic (default).** The launcher checks `main` every hour. A new commit installs by itself when it only adds commits to the installed build, its GitHub checks passed (or the repository runs none), and it has not failed on this Mac before. The launcher builds it at low CPU priority, runs `bun run verify`, packages it, and swaps the app after Codex has had no active ChatGPT Web turn for five minutes. The new launcher must report a healthy start within six minutes; otherwise the previous app goes back into place and that commit is never installed automatically again. Turn this off in **Settings → Automatic updates**.
+- **Manual.** Any other update, for example one that failed before, appears as **Update to v5.0.8+‹commit›**. The same checks apply; it installs after 30 idle seconds.
+- **From a terminal.** Rerun the quick-start command with `WAIT_FOR_IDLE=1` before `bash`. It keeps the replaced build and restores it if the new one does not start cleanly, like the launcher does.
+- **Rollback.** The two builds replaced last are kept in `~/Library/Application Support/Codex Web GPT/rollback.noindex`. To put the newest one back (after Codex is idle; `LIST=1` lists them, `ENTRY=<name>` picks one):
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/rollback-fork-macos.sh | bash
+  ```
+
+  Automatic updates then skip the commit you rolled back from until `main` moves on.
+- **Logs.** `~/Library/Application Support/Codex Web GPT/logs/source-update.log` records every check, build step, swap and rollback.
 - **Trust.** An update runs this repository's build and tests on your Mac, as the installer does. Only the maintainer can push to `main`.
 
 ## Requirements and limits
@@ -140,7 +148,7 @@ bun run app
 bun run app:package
 ```
 
-`bun run verify` is the gate for `main`: the launcher's updater installs nothing that fails it. Fixes meant for upstream start from `upstream/main` in a `fix/…` branch; fork-only changes start from `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [DEV chat harness](docs/dev-chat.md).
+`bun run verify` is the gate for `main`: installed launchers pick up a new `main` within an hour, and they install nothing that fails it or that does not start cleanly. Fixes meant for upstream start from `upstream/main` in a `fix/…` branch; fork-only changes start from `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [DEV chat harness](docs/dev-chat.md).
 
 The upstream README and its translations are in [docs/upstream](docs/upstream/README.md).
 

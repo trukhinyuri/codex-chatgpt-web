@@ -3,16 +3,24 @@ const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
-const { buildJob } = require("./update.cjs");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 // This fork ships from source: the launcher updates itself from the main branch of the fork's
 // GitHub repository and installs a new build only after the complete verification suite passes.
 const SOURCE_REPOSITORY = "trukhinyuri/codex-chatgpt-web";
 const SOURCE_BRANCH = "main";
 const SOURCE_CLONE_URL = `https://github.com/${SOURCE_REPOSITORY}.git`;
-const SOURCE_COMMIT_API_URL = `https://api.github.com/repos/${SOURCE_REPOSITORY}/commits/${SOURCE_BRANCH}`;
-const SOURCE_CHECK_INTERVAL_MS = 6 * 60 * 60_000;
+const SOURCE_API_ROOT = `https://api.github.com/repos/${SOURCE_REPOSITORY}`;
+const SOURCE_COMMIT_API_URL = `${SOURCE_API_ROOT}/commits/${SOURCE_BRANCH}`;
+const SOURCE_CHECK_INTERVAL_MS = 60 * 60_000;
 const SOURCE_STEP_TIMEOUT_MS = 45 * 60_000;
+// The new launcher must report a healthy start within this window, or the worker restores the previous app.
+const SOURCE_HEALTH_TIMEOUT_MS = 6 * 60_000;
+const ROLLBACK_KEEP = 2;
+const UPDATE_STATE_FILE = "source-update-state.json";
+const STARTUP_HEALTH_FILE = "source-update-health.json";
+const ROLLBACK_DIRECTORY = "rollback.noindex";
+const MAX_FAILED_COMMITS = 20;
 const USER_AGENT = "codex-web-gpt-launcher-source-updater";
 const MAX_REDIRECTS = 5;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -38,6 +46,81 @@ function sourceBuildSteps() {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * GitHub check runs for a commit: "none" when the repository runs no CI for it, "pending" while any run
+ * is unfinished, "failure" when any finished run did not pass, otherwise "success".
+ */
+function classifyCheckRuns(payload) {
+  const runs = Array.isArray(payload?.check_runs) ? payload.check_runs : [];
+  if (runs.length === 0) return "none";
+  if (runs.some(run => run?.status !== "completed")) return "pending";
+  const passed = new Set(["success", "neutral", "skipped"]);
+  return runs.every(run => passed.has(run?.conclusion)) ? "success" : "failure";
+}
+
+/** GitHub compare installed...main: "ahead" means main only adds commits on top of the installed build. */
+function classifyComparison(payload) {
+  const status = payload?.status;
+  return ["ahead", "behind", "diverged", "identical"].includes(status) ? status : "unknown";
+}
+
+/**
+ * Why an available commit must not install by itself, or null. Automatic updates only fast-forward a
+ * clean build of main to a commit that has not failed here before and whose CI (if any) passed.
+ */
+function automaticUpdateBlocker({ sourceState, relation, ci, failedBefore }) {
+  if (sourceState !== "clean") return "local-build";
+  if (relation !== "ahead") return `history-${relation}`;
+  if (failedBefore) return "failed-before";
+  if (ci !== "success" && ci !== "none") return `ci-${ci}`;
+  return null;
+}
+
+function emptyUpdateState() {
+  return { version: 1, failedCommits: {}, lastResult: null };
+}
+
+/** Shared with the update worker and the rollback script: which commits failed here, and the last outcome. */
+function readUpdateState(filePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (parsed?.version === 1 && parsed.failedCommits && typeof parsed.failedCommits === "object") {
+      return { ...emptyUpdateState(), ...parsed };
+    }
+  } catch {}
+  return emptyUpdateState();
+}
+
+function recordFailedCommit(filePath, commit, { stage, reason, at = new Date().toISOString() }) {
+  const state = readUpdateState(filePath);
+  const failure = { at, stage, reason: String(reason || "").slice(0, 500) };
+  const failedCommits = Object.entries({ ...state.failedCommits, [commit]: failure })
+    .sort(([, left], [, right]) => String(right?.at || "").localeCompare(String(left?.at || "")))
+    .slice(0, MAX_FAILED_COMMITS);
+  const next = { ...state, failedCommits: Object.fromEntries(failedCommits), lastResult: { commit, result: "failed", ...failure } };
+  writePrivateFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  return next;
+}
+
+/**
+ * The launcher reports how its start went. After an update the worker waits for "healthy" from the new
+ * commit and restores the previous app on "unhealthy", on a crash during startup, or on silence.
+ */
+function writeStartupHealth(filePath, { commit, status, reason = null, pid = process.pid, at = new Date() }) {
+  try {
+    writePrivateFileAtomic(filePath, `${JSON.stringify({ version: 1, commit, pid, status, reason, at: at.toISOString() })}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applicationBundle(executablePath) {
+  const bundle = path.resolve(executablePath, "..", "..", "..");
+  if (!bundle.endsWith(".app")) throw new Error(`The launcher is not running from an application bundle: ${executablePath}`);
+  return bundle;
 }
 
 function normalizedRemote(url) {
@@ -271,6 +354,8 @@ function findMacApplication(root) {
 function defaultDependencies() {
   return {
     fetchLatestCommit: async () => (await requestJson(SOURCE_COMMIT_API_URL))?.sha,
+    fetchComparison: async (base, head) => requestJson(`${SOURCE_API_ROOT}/compare/${base}...${head}`),
+    fetchCheckRuns: async commit => requestJson(`${SOURCE_API_ROOT}/commits/${commit}/check-runs?per_page=100`),
     readLoginShellPath,
     acquireLock,
     releaseLock,
@@ -304,7 +389,9 @@ function createSourceUpdateController({
   executablePath,
   runtimeExecutable,
   logsDirectory,
+  userDataDirectory,
   sourceRoot = defaultSourceRoot(),
+  healthTimeoutMs = SOURCE_HEALTH_TIMEOUT_MS,
   publish,
   logger,
   dependencies = {},
@@ -314,18 +401,41 @@ function createSourceUpdateController({
     && platform === "darwin"
     && ["arm64", "x64"].includes(arch)
     && COMMIT.test(String(currentCommit || ""))
-    && typeof runtimeExecutable === "string" && path.isAbsolute(runtimeExecutable);
+    && typeof runtimeExecutable === "string" && path.isAbsolute(runtimeExecutable)
+    && typeof userDataDirectory === "string" && path.isAbsolute(userDataDirectory);
   let state = supported ? { status: "idle" } : { status: "disabled" };
   let candidate = null;
   let checking = null;
   let pending = null;
   const logPath = path.join(logsDirectory, "source-update.log");
+  const statePath = supported ? path.join(userDataDirectory, UPDATE_STATE_FILE) : null;
+  const healthPath = supported ? path.join(userDataDirectory, STARTUP_HEALTH_FILE) : null;
+
+  if (supported) {
+    // Surface what the previous update did: a rollback is a problem the maintainer needs to hear about.
+    const last = readUpdateState(statePath).lastResult;
+    if (last?.result === "rolled-back" && last.commit !== currentCommit) {
+      logger?.warn("launcher.update_rolled_back", { commit: last.commit, stage: last.stage, at: last.at, channel: "source" });
+    }
+  }
 
   const transition = (next) => {
     state = next;
     publish?.(state);
     return state;
   };
+
+  const availableState = target => ({
+    status: "available",
+    version: target.version,
+    automatic: target.automatic === true,
+    ...(target.blocked ? { blocked: target.blocked } : {}),
+  });
+
+  /** The candidate an unattended update may install now, or null. */
+  function automaticCandidate() {
+    return state.status === "available" && candidate?.automatic === true && !pending ? candidate : null;
+  }
 
   function checkOnce() {
     if (state.status === "disabled" || pending || state.status === "installing" || state.status === "downloading") {
@@ -341,13 +451,31 @@ function createSourceUpdateController({
           candidate = null;
           return transition({ status: "up-to-date" });
         }
-        candidate = { commit, version: sourceUpdateVersion(currentVersion, commit) };
-        logger?.info("launcher.update_available", { currentCommit, commit, channel: "source" });
-        return transition({ status: "available", version: candidate.version });
+        // A failed lookup blocks automatic installation for now; it never makes a commit look safe.
+        const relation = commit === currentCommit
+          ? "identical"
+          : await deps.fetchComparison(currentCommit, commit).then(classifyComparison, () => "unknown");
+        if (relation === "behind") {
+          // This build already contains main and more (a maintainer's local build): never downgrade it.
+          candidate = null;
+          logger?.info("launcher.update_local_build_newer", { currentCommit, commit, channel: "source" });
+          return transition({ status: "up-to-date" });
+        }
+        const ci = await deps.fetchCheckRuns(commit).then(classifyCheckRuns, () => "unknown");
+        const failedBefore = Boolean(readUpdateState(statePath).failedCommits[commit]);
+        const blocked = automaticUpdateBlocker({ sourceState: currentSourceState, relation, ci, failedBefore });
+        candidate = { commit, version: sourceUpdateVersion(currentVersion, commit), automatic: blocked === null, blocked };
+        logger?.info("launcher.update_available", { currentCommit, commit, relation, ci, blocked, channel: "source" });
+        return transition({
+          status: "available",
+          version: candidate.version,
+          automatic: candidate.automatic,
+          ...(blocked ? { blocked } : {}),
+        });
       } catch (error) {
         const message = errorMessage(error);
         logger?.warn("launcher.update_check_failed", { message, channel: "source" });
-        return transition(candidate ? { status: "available", version: candidate.version } : { status: "error", message });
+        return transition(candidate ? availableState(candidate) : { status: "error", message });
       } finally {
         checking = null;
       }
@@ -359,12 +487,13 @@ function createSourceUpdateController({
    * Build the exact announced commit, run the complete verification, package and stage it. Nothing
    * is replaced here: the caller launches the prepared install only when Codex has no active turns.
    */
-  async function beginInstall() {
+  async function beginInstall({ automatic = false } = {}) {
     if (pending) throw new Error("An update is already being prepared");
     if (state.status !== "available" || !candidate) throw new Error("No launcher update is available");
+    if (automatic && candidate.automatic !== true) throw new Error(`Update to ${candidate.version} needs a manual install`);
     const target = candidate;
     pending = (async () => {
-      transition({ status: "downloading", version: target.version });
+      transition({ status: "downloading", version: target.version, automatic });
       const log = line => deps.appendLog(logPath, line);
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-update-"));
       let lock = null;
@@ -396,28 +525,40 @@ function createSourceUpdateController({
         if (builtCommit !== target.commit) {
           throw new Error(`The package was built from ${builtCommit || "an unknown commit"}, not ${target.commit}`);
         }
-        const workerPath = path.join(tempRoot, "update-worker.cjs");
-        fs.copyFileSync(path.join(__dirname, "update-worker.cjs"), workerPath);
-        const job = buildJob({
-          version: target.version,
-          platform,
-          executablePath,
-          assetPath: archive,
-          stagingRoot,
+        // The worker replaces the app, keeps the previous one for rollback and waits for a healthy start.
+        const workerPath = path.join(tempRoot, "source-update-worker.cjs");
+        fs.copyFileSync(path.join(__dirname, "source-update-worker.cjs"), workerPath);
+        const job = {
+          version: 1,
+          parentPid: process.pid,
+          source: findMacApplication(stagingRoot),
+          target: applicationBundle(executablePath),
+          executableName: path.basename(executablePath),
+          commit: target.commit,
+          previousCommit: currentCommit,
+          displayVersion: target.version,
+          rollbackRoot: path.join(userDataDirectory, ROLLBACK_DIRECTORY),
+          rollbackKeep: ROLLBACK_KEEP,
+          healthPath,
+          healthTimeoutMs,
+          statePath,
+          logPath,
           tempRoot,
-          logPath: path.join(logsDirectory, "update-worker.log"),
-        });
+        };
         const jobPath = path.join(tempRoot, "job.json");
         fs.writeFileSync(jobPath, `${JSON.stringify(job)}\n`, { mode: 0o600 });
         log(`verified and staged ${target.commit}; waiting for Codex to be idle`);
-        logger?.info("launcher.update_prepared", { commit: target.commit, channel: "source" });
-        transition({ status: "installing", version: target.version });
+        logger?.info("launcher.update_prepared", { commit: target.commit, automatic, channel: "source" });
+        transition({ status: "installing", version: target.version, automatic, waitingForIdle: true });
         return { tempRoot, workerPath, jobPath, version: target.version, commit: target.commit };
       } catch (error) {
         fs.rmSync(tempRoot, { recursive: true, force: true });
         log(`update to ${target.commit} failed: ${errorMessage(error)}`);
-        logger?.warn("launcher.update_failed", { commit: target.commit, message: errorMessage(error), channel: "source" });
-        transition({ status: "available", version: target.version });
+        logger?.warn("launcher.update_failed", { commit: target.commit, automatic, message: errorMessage(error), channel: "source" });
+        // Remember the failure: an unattended update never retries this commit; a manual one may.
+        try { recordFailedCommit(statePath, target.commit, { stage: "build", reason: errorMessage(error) }); } catch {}
+        candidate = { ...target, automatic: false, blocked: "failed-before" };
+        transition(availableState(candidate));
         throw new Error(`Update to ${target.version} was not installed: ${errorMessage(error)}. Details: ${logPath}`);
       } finally {
         deps.releaseLock(lock);
@@ -446,12 +587,13 @@ function createSourceUpdateController({
 
   function cancelInstall(prepared) {
     if (prepared?.tempRoot) fs.rmSync(prepared.tempRoot, { recursive: true, force: true });
-    if (candidate) transition({ status: "available", version: candidate.version });
+    if (candidate) transition(availableState(candidate));
   }
 
   return {
     channel: "source",
     getState: () => state,
+    automaticCandidate,
     checkOnce,
     beginInstall,
     launchInstall,
@@ -462,18 +604,31 @@ function createSourceUpdateController({
 
 module.exports = {
   COMMIT,
+  ROLLBACK_DIRECTORY,
+  ROLLBACK_KEEP,
+  SOURCE_API_ROOT,
   SOURCE_BRANCH,
   SOURCE_CHECK_INTERVAL_MS,
   SOURCE_CLONE_URL,
   SOURCE_COMMIT_API_URL,
+  SOURCE_HEALTH_TIMEOUT_MS,
   SOURCE_REPOSITORY,
+  STARTUP_HEALTH_FILE,
+  UPDATE_STATE_FILE,
   acquireLock,
+  applicationBundle,
+  automaticUpdateBlocker,
+  classifyCheckRuns,
+  classifyComparison,
   createSourceUpdateController,
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  readUpdateState,
+  recordFailedCommit,
   releaseLock,
   sourceBuildPath,
   sourceBuildSteps,
   sourceUpdateVersion,
+  writeStartupHealth,
 };
