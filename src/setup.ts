@@ -381,6 +381,16 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
   else delete config.manualTunnel;
 }
 
+/** Stop the previous configuration's tunnel alias if its client is installed; absent is fine. */
+export function stopRunningLauncherTunnel(
+  existing: AppConfig | undefined,
+  stop: (config: AppConfig) => void = stopTunnel,
+): boolean {
+  if (existing?.mode !== "full" || !existing.tunnel || !existsSync(existing.tunnel.binaryPath)) return false;
+  stop(existing);
+  return true;
+}
+
 async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
   let bootstrapError: unknown;
   try {
@@ -575,6 +585,10 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (launcherOwned) {
       if (tunnelService.installed || tunnelService.loaded) await uninstallTunnelService();
       if (needsProfile || refreshTunnelWorker || explicitTunnelChange) {
+        // The launcher keeps its tunnel running through setups that leave the tunnel unchanged.
+        // This one changes it, so the running runtime of the previous configuration stops first
+        // instead of racing the validation runtime for the same alias.
+        stopRunningLauncherTunnel(existing);
         await bootstrapTunnelProfile(config);
       }
     } else {

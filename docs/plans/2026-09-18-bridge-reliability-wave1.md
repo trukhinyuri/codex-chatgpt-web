@@ -1,5 +1,7 @@
 # Bridge reliability, wave 1: work items
 
+**Status: released as R13 (`9c9eb015`), merged into `main` from `fork/reliability-wave1` (pull request #6).** All five items below integrated cleanly by intent (see the pull request description for the handful of real design conflicts between branches and how each was resolved); `bun run verify` is green on macOS and ubuntu-latest. windows-latest fails on 4 pre-existing-in-this-branch tests in `launcher/tests/tunnel-connector.test.cjs` for an unrelated, already-tracked reason (a POSIX broker-socket path in the test fixture, not production code — see [roadmap.md](../roadmap.md) item 6 under "In progress").
+
 The exact specification each wave-1 work item was implemented from (2026-09-18), so that any agent can finish or redo an item from the repository alone. Plan sections refer to [2026-09-18-bridge-reliability.md](2026-09-18-bridge-reliability.md); evidence is in [2026-09-18-bridge-reliability-evidence.json](2026-09-18-bridge-reliability-evidence.json).
 
 Each item: branch from the release base, implement with regression tests, run the full suites with an isolated short HOME/TMPDIR, then three independent reviews (correctness against the plan; behaviour at the boundaries with Codex, ChatGPT and the launcher, including concurrency and restarts; an adversarial tester), fix confirmed findings, and integrate all items into one branch that passes `bun run verify` and the updater's build path.

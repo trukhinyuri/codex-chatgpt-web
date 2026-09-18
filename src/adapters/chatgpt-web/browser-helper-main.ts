@@ -360,6 +360,8 @@ async function verify(message: VerifyMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
+      // The structured kind (connector_not_found:<kind>) lets the launcher's checklist say why.
+      ...(error instanceof ChatGptWebAdapterError && typeof error.code === "string" ? { code: error.code } : {}),
     });
   }
 }

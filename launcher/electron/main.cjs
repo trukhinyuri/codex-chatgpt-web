@@ -45,6 +45,12 @@ const { createProblemReporter } = require("./problem-report.cjs");
 const { aboutPanelOptions } = require("./about.cjs");
 const { keepUserAgentProduct } = require("./user-agent.cjs");
 const { createCliProxyPanel, runCliProxy } = require("./cliproxy-cli.cjs");
+const {
+  connectorFailureKind,
+  createConnectorReadinessMonitor,
+  createConnectorTunnelService,
+  isConnectorFailureCode,
+} = require("./connector-readiness.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
@@ -134,6 +140,10 @@ let updateInstallRequested = false;
 const turnOutcomes = createTurnOutcomeLog();
 let problemReporter = null;
 let launcherStateStore = null;
+// Background proof that ChatGPT lists the connector, and the tunnel view a waiting turn may ask for.
+let connectorMonitor = null;
+let connectorTunnelService = null;
+let updateDeferredForPairingLogged = false;
 
 function launcherLanguage() {
   return launcherStateStore?.read().language || "en";
@@ -187,6 +197,9 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         const result = health?.last_model_catalog_result;
         if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
           || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
+        // A catalog request Codex closed itself (client_aborted, HTTP 499) reached nobody, so it is
+        // not a failure to show. Current bridges never record one; this guards older and foreign ones.
+        if (result.status === 499 || result.failure?.stage === "client_aborted") return;
         const identity = `${health.pid}:${result.request}:${result.at}`;
         if (identity === reportedFailure) return;
         reportedFailure = identity;
@@ -245,6 +258,96 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
     return { restored: false, error: message };
   }
+}
+
+/** Background connector checks run for the automatic Full harness of the normal profile only. */
+function connectorMonitorEnabled(stateStore) {
+  if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) return false;
+  const state = stateStore.read();
+  if (state.browserInteractionMode !== "automatic" || state.coreSetupComplete !== true) return false;
+  try {
+    const config = runtimeSupervisor.readConfig();
+    return config?.mode === "full" && config.browserInteractionMode === "automatic";
+  } catch {
+    return false;
+  }
+}
+
+/** Idle means no Codex turn, no launcher operation, no quit, and nobody looking at the browser. */
+async function connectorCheckIdle() {
+  if (!browserHost || !runtimeHost || shutdownInProgress || quitting || exitCommitted) return false;
+  if (runtimeHost.currentOperation()) return false;
+  if (!browserHost.backgroundCheckAllowed()) return false;
+  const health = await runtimeActivity();
+  return !health || health.active_browser_turns === 0;
+}
+
+async function connectorObservation() {
+  const config = runtimeSupervisor.readConfig();
+  if (!config || config.mode !== "full") return { tunnelReady: null, contact: { status: "unknown", at: null } };
+  const local = await runtimeSupervisor.readLocalTunnelHealth();
+  return {
+    tunnelReady: local.statusKnown ? local.ready === true : null,
+    contact: runtimeSupervisor.tunnelContact(config),
+  };
+}
+
+function createConnectorMonitor({ logger, stateStore }) {
+  return createConnectorReadinessMonitor({
+    logger,
+    isEnabled: () => connectorMonitorEnabled(stateStore),
+    isVerified: () => stateStore.read().mcpSetupComplete === true,
+    isIdle: connectorCheckIdle,
+    verify: () => browserHost.verifyConnectorInBackground(runtimeHost.mcpConnectorName()),
+    observe: connectorObservation,
+    onVerified: (snapshot) => {
+      const state = stateStore.update({
+        mcpSetupComplete: true,
+        connectorVerifiedAt: snapshot.verifiedAt,
+        connectorLastFailureKind: null,
+        ...(snapshot.lastCheckedAt ? { connectorLastCheckedAt: snapshot.lastCheckedAt } : {}),
+      });
+      send("launcher:state-changed", state);
+    },
+    onChange: (snapshot) => {
+      send("launcher:connector-readiness", snapshot);
+      const saved = stateStore.read();
+      if (snapshot.lastCheckedAt
+        && (saved.connectorLastCheckedAt !== snapshot.lastCheckedAt
+          || (saved.connectorLastFailureKind ?? null) !== snapshot.lastFailureKind)) {
+        stateStore.update({
+          connectorLastCheckedAt: snapshot.lastCheckedAt,
+          connectorLastFailureKind: snapshot.lastFailureKind,
+        });
+      }
+    },
+  });
+}
+
+/** A turn that ended on a connector failure re-arms the background check; no action is needed. */
+function handleBrowserTurnEnded({ status, failureCode }, stateStore) {
+  if (!connectorMonitor) return;
+  connectorMonitor.noteTurnEnded();
+  if (status === "failed" && isConnectorFailureCode(failureCode)) {
+    const state = stateStore.update({
+      mcpSetupComplete: false,
+      connectorLastFailureKind: connectorFailureKind(failureCode),
+    });
+    send("launcher:state-changed", state);
+    connectorMonitor.noteTurnFailure(failureCode);
+  } else if (status === "completed") {
+    connectorMonitor.clearResendHint();
+  }
+}
+
+/** Stop background checks and let one in progress finish before the launcher quits. */
+async function pauseConnectorMonitorForQuit() {
+  if (!connectorMonitor) return;
+  connectorMonitor.stop("quit");
+  await Promise.race([
+    connectorMonitor.settled(),
+    new Promise(resolve => setTimeout(resolve, 15_000).unref?.()),
+  ]);
 }
 
 function trayImage() {
@@ -629,6 +732,7 @@ function registerIpc({ logger, stateStore }) {
     version: app.getVersion(),
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
+    connectorReadiness: connectorMonitor?.snapshot() ?? null,
     update: updateController?.getState() ?? { status: "disabled" },
     problemReports: problemReporter?.consent() ?? "unavailable",
   }));
@@ -795,8 +899,9 @@ function registerIpc({ logger, stateStore }) {
     try {
       publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
       await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
-      const state = stateStore.update({ mcpSetupComplete: true });
+      const state = stateStore.update({ mcpSetupComplete: true, connectorVerifiedAt: new Date().toISOString() });
       send("launcher:state-changed", state);
+      connectorMonitor?.noteManualResult(true);
       const successMessage = IS_DEV_PROFILE
         ? "DEV harness and connector verified"
         : "Runtime and connector verified";
@@ -816,6 +921,9 @@ function registerIpc({ logger, stateStore }) {
       const state = stateStore.update({ mcpSetupComplete: false });
       send("launcher:state-changed", state);
       publishOperation({ name: operationName, status: "failed", message });
+      // The same checklist shows why; the background check keeps trying so Verify is never needed again.
+      connectorMonitor?.noteManualResult(false, error);
+      connectorMonitor?.start("manual-verify-failed");
       return {
         ...report,
         ok: false,
@@ -864,6 +972,7 @@ function registerIpc({ logger, stateStore }) {
     });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
+    connectorMonitor?.stop("uninstalled");
     return { cancelled: false, state };
   });
   handle("launcher:setup-core", async () => {
@@ -937,12 +1046,15 @@ function registerIpc({ logger, stateStore }) {
       codexCatalogVerified: IS_DEV_PROFILE,
       mcpRuntimeInstalled: true,
       mcpSetupComplete: false,
+      connectorVerifiedAt: null,
       mcpGuideStep: 2,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
     });
     send("launcher:state-changed", state);
     if (interactionModeChange) send("launcher:browser-state", browserHost.snapshot());
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
+    // The person now creates the connector in ChatGPT; the launcher notices by itself when it is listed.
+    connectorMonitor?.start("setup-mcp");
     return { ok: true, stdout: result.stdout };
   });
   handle("launcher:set-mcp-step", (_event, step) => {
@@ -1011,6 +1123,8 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     send("launcher:browser-state", browserHost.snapshot());
     if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
+    // Zero Risk never runs background checks; the automatic harness resumes them if unverified.
+    connectorMonitor?.start("interaction-mode");
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
@@ -1107,7 +1221,14 @@ async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUI
     for (;;) {
       const running = activeTurnCount(await runtimeActivity());
       updateController.noteInstallProgress({ activeTurns: running, requested: wait.quietMs <= UPDATE_IDLE_QUIET_MS });
-      idleSince = running === 0 ? (idleSince ?? Date.now()) : null;
+      // An unattended update would restart the tunnel while ChatGPT is pairing a new connector;
+      // it waits for that (at most 30 minutes). A requested install does not.
+      const pairing = wait.quietMs > UPDATE_IDLE_QUIET_MS && !wait.now && connectorMonitor?.restartDeferralActive() === true;
+      if (pairing && !updateDeferredForPairingLogged) {
+        updateDeferredForPairingLogged = true;
+        logger?.info("launcher.update_deferred_for_connector_pairing");
+      }
+      idleSince = running === 0 && !pairing ? (idleSince ?? Date.now()) : null;
       const window = updateQuietWindow({ baseQuietMs: wait.quietMs, outcomes: turnOutcomes, waitingSince, now: Date.now() });
       if (window.reason !== windowReason) {
         windowReason = window.reason;
@@ -1212,7 +1333,11 @@ async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) 
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
+  let connectorMonitorPaused = false;
   try {
+    // A background connector check is not the person's work: let it finish instead of refusing to quit.
+    await pauseConnectorMonitorForQuit();
+    connectorMonitorPaused = true;
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Superpower`);
@@ -1238,6 +1363,8 @@ async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) 
     return { ok: false, message };
   } finally {
     shutdownInProgress = false;
+    // The launcher keeps running: resume pairing checks the quit attempt paused.
+    if (connectorMonitorPaused && !exitCommitted) connectorMonitor?.resume("quit-cancelled");
   }
 }
 
@@ -1424,11 +1551,18 @@ async function start() {
     startHidden,
   });
   browserControl = await new BrowserControlServer({
-    onTurnEnded: status => turnOutcomes.record(status),
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
+    connectorTunnel: (request) => {
+      if (!connectorTunnelService) throw new Error("Connector tunnel status is unavailable");
+      return connectorTunnelService(request);
+    },
+    onTurnEnded: (outcome) => {
+      turnOutcomes.record(outcome.status);
+      handleBrowserTurnEnded(outcome, stateStore);
+    },
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -1440,6 +1574,8 @@ async function start() {
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
+    // A new tunnel process may change what ChatGPT sees: re-check an unverified connector quickly.
+    onTunnelStarted: () => connectorMonitor?.noteTunnelRestarted(),
   });
   runtimeHost = new RuntimeHost({
     app,
@@ -1477,6 +1613,12 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  connectorMonitor = createConnectorMonitor({ logger, stateStore });
+  connectorTunnelService = createConnectorTunnelService({
+    supervisor: runtimeSupervisor,
+    monitor: connectorMonitor,
+    logger,
+  });
   const updaterRuntimeRoot = runtimeRootProvider();
   // This fork updates from its own GitHub main branch after the full test suite passes; it never
   // offers upstream release packages, which do not contain the fork's changes.
@@ -1666,6 +1808,8 @@ async function start() {
         send("launcher:state-changed", state);
       }
       startCatalogVerificationMonitor({ logger, stateStore });
+      // An unverified Full harness (a new setup or an upgrade) is proven by itself, without Verify.
+      connectorMonitor?.start("launcher-start");
       return;
     }
     if (runtime.status === "not-configured") {

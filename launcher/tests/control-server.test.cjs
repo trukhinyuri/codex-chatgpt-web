@@ -60,7 +60,7 @@ test("browser control server authenticates and owns turn visibility", async () =
     },
     getBrowserHost: () => host,
     getPreferences: () => ({ showBrowserDuringTurns: true }),
-    onTurnEnded: status => ended.push(status),
+    onTurnEnded: outcome => ended.push(outcome.status),
   }).start();
   const descriptor = server.descriptor();
   try {
@@ -152,6 +152,57 @@ test("browser control server authenticates and owns turn visibility", async () =
     ]);
     assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);
     assert.equal(logs.some(([, event]) => event === "browser.turn_ended"), true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("browser.turn_ended carries the helper's code, stage and abort class, and drops malformed ones", async () => {
+  const logs = [];
+  const ended = [];
+  const server = await new BrowserControlServer({
+    logger: {
+      info: (event, detail) => logs.push([event, detail]),
+      warn: (event, detail) => logs.push([event, detail]),
+    },
+    getBrowserHost: () => ({
+      browserInteractionMode: () => "automatic",
+      endTurn: (...args) => { ended.push(args); return { cancelledByUser: false }; },
+    }),
+    getPreferences: () => ({ showBrowserDuringTurns: false }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const end = (body) => fetch(`${endpoint}/v1/turn/end`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ phase: "end", helperPid: process.pid, ...body }),
+  });
+  try {
+    const aborted = await end({
+      traceId: "abcdef123456",
+      status: "aborted",
+      message: "ChatGPT web turn aborted",
+      code: "aborted",
+      stage: "response",
+      abortClass: "codex_cancelled",
+    });
+    assert.equal(aborted.status, 200);
+    const malformed = await end({
+      traceId: "abcdef654321",
+      status: "failed",
+      code: "stage timed out at /Users/private.user/.codex",
+      stage: 42,
+      abortClass: "x".repeat(200),
+    });
+    // The fields only annotate the log; a malformed one never strands the turn's lease.
+    assert.equal(malformed.status, 200);
+    assert.equal(ended.length, 2);
+    const turnEnded = logs.filter(([event]) => event === "browser.turn_ended").map(([, detail]) => detail);
+    assert.deepEqual(turnEnded, [
+      { traceId: "abcdef123456", status: "aborted", code: "aborted", stage: "response", abortClass: "codex_cancelled" },
+      { traceId: "abcdef654321", status: "failed" },
+    ]);
+    assert.doesNotMatch(JSON.stringify(turnEnded), /ChatGPT web turn aborted|Users/);
   } finally {
     await server.close();
   }
@@ -529,6 +580,111 @@ test("browser control server rejects malformed retained-conversation contracts",
     assert.equal((await post({ conversationKey: "ABC" })).status, 400);
     assert.equal((await post({ requireRetainedConversation: true })).status, 400);
     assert.equal((await post({ connectorIdentity: "Codex Native2" })).status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a waiting turn can read the tunnel state only for its own running trace", async () => {
+  const requests = [];
+  const host = {
+    browserInteractionMode: () => "automatic",
+    assertRunningTurnOwner: (traceId, helperPid) => {
+      if (traceId !== "abcdef123456" || helperPid !== process.pid) throw new Error("not the owner");
+    },
+  };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({}),
+    connectorTunnel: async (request) => {
+      requests.push(request);
+      return { tunnelReady: true, readyz: true, contact: { status: "observed", at: "2026-09-18T08:27:03.000Z" }, restart: "not-needed" };
+    },
+  }).start();
+  const descriptor = server.descriptor();
+  const post = (body, token = descriptor.token) => fetch(`${descriptor.endpoint}/v1/connector/tunnel`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  try {
+    assert.equal((await post({ traceId: "abcdef123456", helperPid: process.pid }, "wrong")).status, 401);
+    assert.equal((await post({ traceId: "other123456", helperPid: process.pid })).status, 400);
+    assert.equal((await post({ traceId: "abcdef123456", helperPid: process.pid, restart: "yes" })).status, 400);
+    assert.equal((await post({ traceId: "abcdef123456", helperPid: process.pid, waitMs: -1 })).status, 400);
+    assert.deepEqual(requests, []);
+    const response = await post({ traceId: "abcdef123456", helperPid: process.pid, restart: true, waitStep: 2, waitTotal: 5, waitMs: 30_000 });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      tunnelReady: true,
+      readyz: true,
+      contact: { status: "observed", at: "2026-09-18T08:27:03.000Z" },
+      restart: "not-needed",
+    });
+    assert.deepEqual(requests, [{ traceId: "abcdef123456", restart: true, waitStep: 2, waitTotal: 5, waitMs: 30_000 }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a turn start during a background connector check is a typed conflict the helper retries", async () => {
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => ({
+      browserInteractionMode: () => "automatic",
+      beginTurn: () => {
+        const busy = new Error("ChatGPT browser is finishing a background connector check");
+        busy.code = "background_check_active";
+        throw busy;
+      },
+    }),
+    getPreferences: () => ({}),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/turn/start`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ traceId: "abcdef123456", helperPid: process.pid }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "ChatGPT browser is finishing a background connector check",
+      code: "background_check_active",
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("a turn's connector failure code reaches the launcher; other text never does", async () => {
+  const ended = [];
+  const host = {
+    browserInteractionMode: () => "automatic",
+    endTurn: () => ({ cancelledByUser: false }),
+  };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({}),
+    onTurnEnded: (outcome) => ended.push(outcome),
+  }).start();
+  const descriptor = server.descriptor();
+  const end = (body) => fetch(`${descriptor.endpoint}/v1/turn/end`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ traceId: "abcdef123456", helperPid: process.pid, status: "failed", ...body }),
+  });
+  try {
+    assert.equal((await end({ failureCode: "connector_not_found:not_listed" })).status, 200);
+    assert.equal((await end({ failureCode: "ChatGPT said something private" })).status, 400);
+    assert.equal((await end({ failureCode: "rate_limit_exceeded" })).status, 400);
+    assert.equal((await end({})).status, 200);
+    assert.deepEqual(ended, [
+      { traceId: "abcdef123456", status: "failed", failureCode: "connector_not_found:not_listed" },
+      { traceId: "abcdef123456", status: "failed", failureCode: null },
+    ]);
   } finally {
     await server.close();
   }

@@ -20,6 +20,7 @@ import type {
   CliProxyAccount,
   CliProxyLoginProvider,
   CliProxyStatus,
+  ConnectorReadiness,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -82,6 +83,9 @@ export function App() {
     const unsubscribeUpdate = api.onUpdateState((update) => {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
+    const unsubscribeConnector = api.onConnectorReadiness((connectorReadiness) => {
+      setSnapshot((current) => current ? { ...current, connectorReadiness } : current);
+    });
     return () => {
       cancelled = true;
       unsubscribeState();
@@ -89,6 +93,7 @@ export function App() {
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
+      unsubscribeConnector();
     };
   }, []);
 
@@ -1457,6 +1462,14 @@ function McpSurface({
                   <span>{copy.connectorName}</span>
                   <code>{snapshot.connectorNames[interactionMode]}</code>
                 </div>
+                {!manualInteraction && !configuringInactiveMode ? (
+                  <ConnectorChecklist
+                    connectorName={snapshot.connectorNames[interactionMode]}
+                    copy={copy}
+                    language={language}
+                    readiness={snapshot.connectorReadiness}
+                  />
+                ) : null}
                 <div className="inline-actions">
                   <SecondaryButton
                     icon="external"
@@ -2125,6 +2138,97 @@ function SectionHeading({ label, meta, spaced = false }: { label: string; meta?:
       <span>{label}</span>
       {meta ? <small>{meta}</small> : null}
     </div>
+  );
+}
+
+function connectorTime(iso: string | null, language: Language): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleTimeString(language, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/**
+ * Live connector checklist: the launcher proves each step by itself, so the person sees what is
+ * done and what ChatGPT is still missing instead of pressing Verify until it works.
+ */
+function ConnectorChecklist({
+  connectorName,
+  copy,
+  language,
+  readiness,
+}: {
+  connectorName: string;
+  copy: Copy;
+  language: Language;
+  readiness: ConnectorReadiness | null;
+}) {
+  if (!readiness || readiness.status === "disabled") return null;
+  if (readiness.status === "idle" && !readiness.lastCheckedAt && !readiness.verifiedAt) return null;
+  const name = (text: string) => text.replace("{name}", () => connectorName);
+  const tunnel = readiness.tunnelReady === true
+    ? { state: "ok", text: copy.connectorTunnelReady }
+    : readiness.tunnelReady === false
+      ? { state: "pending", text: copy.connectorTunnelNotReady }
+      : { state: "unknown", text: copy.connectorTunnelUnknown };
+  const contact = readiness.contact.status === "observed"
+    ? {
+        state: "ok",
+        text: copy.connectorContactObserved.replace("{time}", () => connectorTime(readiness.contact.at, language)),
+      }
+    : readiness.contact.status === "not-observed"
+      ? { state: "pending", text: copy.connectorContactNotObserved }
+      : { state: "unknown", text: copy.connectorContactUnknown };
+  const listed = readiness.status === "verified" || readiness.connectorListed === true
+    ? { state: "ok", text: name(copy.connectorListed) }
+    : readiness.connectorListed === false
+      ? {
+          state: "pending",
+          text: name(readiness.lastFailureKind === "other_name"
+            ? copy.connectorOtherName
+            : readiness.lastFailureKind === "menu_unavailable"
+              ? copy.connectorMenuUnavailable
+              : copy.connectorNotListed),
+        }
+      : { state: "unknown", text: name(copy.connectorListedUnknown) };
+  const rows = [
+    { key: "tunnel", ...tunnel },
+    { key: "contact", ...contact },
+    { key: "listed", ...listed },
+  ];
+  const status = readiness.status === "checking"
+    ? copy.connectorCheckingNow
+    : readiness.status === "paused"
+      ? copy.connectorPaused
+      : readiness.status === "waiting" && readiness.nextCheckAt
+        ? copy.connectorNextCheck.replace("{time}", () => connectorTime(readiness.nextCheckAt, language))
+        : null;
+  return (
+    <section aria-live="polite" className="connector-checklist">
+      <header>
+        <strong>{copy.connectorChecklistTitle}</strong>
+        <small>{copy.connectorChecklistAutomatic}</small>
+      </header>
+      <ul>
+        {rows.map(row => (
+          <li className={`is-${row.state}`} key={row.key}>
+            <Icon name={row.state === "ok" ? "check" : row.state === "pending" ? "alert" : "info"} />
+            <span>{row.text}</span>
+          </li>
+        ))}
+      </ul>
+      {readiness.waitingTurn ? (
+        <p className="connector-checklist-status">
+          {copy.connectorWaitingTurn
+            .replace("{step}", () => String(readiness.waitingTurn!.step))
+            .replace("{total}", () => String(readiness.waitingTurn!.total))}
+        </p>
+      ) : null}
+      {status && readiness.status !== "verified" ? <p className="connector-checklist-status">{status}</p> : null}
+      {readiness.status === "verified" && readiness.resendHint ? (
+        <NoticeRow icon="check" tone="success">{copy.connectorResendHint}</NoticeRow>
+      ) : null}
+    </section>
   );
 }
 

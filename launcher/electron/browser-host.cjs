@@ -36,6 +36,7 @@ const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
+const BACKGROUND_CONNECTOR_CHECK_OPERATION = "connector check";
 const LOGIN_SUPERSEDED_MESSAGE = "ChatGPT sign-in was superseded by passkey sign-in";
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
@@ -461,7 +462,10 @@ class BrowserHost {
   }
 
   currentOperation() {
-    return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null);
+    // A background connector check is not an operation anyone waits on: callers that need the
+    // surface wait for it (withManualOperation), so it never blocks a setting or a quit.
+    const manual = this.manualOperation === BACKGROUND_CONNECTOR_CHECK_OPERATION ? null : this.manualOperation;
+    return manual || (this.loginOperation ? "ChatGPT login" : null);
   }
 
   assertTurnTabsCanResetForInteractionModeChange() {
@@ -474,6 +478,7 @@ class BrowserHost {
     if (mode !== "automatic" && mode !== "manual") {
       throw new Error("Browser interaction mode must be automatic or manual");
     }
+    if (this.backgroundCheckInProgress?.()) await this.backgroundCheck;
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
@@ -1311,6 +1316,17 @@ class BrowserHost {
       surfaceActive: this.surfaceActive,
     };
     this.publishState?.(this.snapshot());
+  }
+
+  /** The running turn tab owned by this helper; throws for any other trace or owner. */
+  assertRunningTurnOwner(traceId, helperPid) {
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
+    if (!tab) throw new Error(`Browser turn ownership mismatch: no browser tab owns ${traceId}`);
+    if (tab.helperPid !== helperPid) {
+      throw new Error(`Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`);
+    }
+    if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
+    return tab;
   }
 
   heartbeatTurn(traceId, helperPid, refreshViewport = false) {
@@ -2266,6 +2282,12 @@ class BrowserHost {
     connectorIdentity,
     requireRetainedConversation = false,
   ) {
+    if (this.backgroundCheckInProgress?.()) {
+      // The check ends within seconds and clears what it typed; the helper retries its start.
+      const busy = new Error("ChatGPT browser is finishing a background connector check");
+      busy.code = "background_check_active";
+      throw busy;
+    }
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
@@ -2884,10 +2906,75 @@ class BrowserHost {
     return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
   }
 
-  async runConnectorVerification(appName) {
+  /**
+   * Whether the launcher may run a background check now: no Codex turn, sign-in or other browser
+   * operation, and the person is not looking at the embedded browser, whose page a check reloads.
+   */
+  backgroundCheckAllowed() {
+    if (this.activeTraceId || this.currentOperation() || this.authView) return false;
+    // Signed out, a check can only fail; sign-in comes first.
+    if (this.state?.authenticated === false) return false;
+    // The check reloads the home surface: only when it shows the launcher's own idle page or
+    // Temporary Chat, never a ChatGPT page the person opened there.
+    const homeUrl = this.view?.webContents?.getURL?.();
+    if (homeUrl && homeUrl !== IDLE_BROWSER_URL && !isTemporaryChatUrl(homeUrl)) return false;
+    const windowVisible = Boolean(this.window)
+      && !(typeof this.window.isDestroyed === "function" && this.window.isDestroyed())
+      && this.window.isVisible()
+      && !this.window.isMinimized();
+    return !(windowVisible && this.visible && this.surfaceActive);
+  }
+
+  /**
+   * The background connector check: the same verification as the Verify button, but it never
+   * interrupts the person, never shows an error banner for an expected "not listed yet", and puts
+   * the launcher's surface back the way it found it.
+   */
+  async verifyConnectorInBackground(appName) {
+    requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
+    if (!this.backgroundCheckAllowed()) {
+      const busy = new Error("ChatGPT browser is in use");
+      busy.code = "launcher_busy";
+      throw busy;
+    }
+    const previousTabId = this.selectedTabId;
+    const startedIdle = this.view?.webContents?.getURL?.() === IDLE_BROWSER_URL;
+    const check = this.withManualOperation(BACKGROUND_CONNECTOR_CHECK_OPERATION, async () => {
+      try {
+        return await this.runConnectorVerification(appName, { background: true });
+      } finally {
+        if (startedIdle) {
+          await this.returnToIdle().catch((error) => {
+            this.logger.warn("connector.background_check_idle_failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }
+        if (previousTabId !== "home" && this.turnTabs.has(previousTabId)) {
+          this.selectedTabId = previousTabId;
+          this.syncViewVisibility();
+          this.publishState?.(this.snapshot());
+        }
+      }
+    }, { reportErrors: false });
+    // Anything the person or Codex starts meanwhile waits for this short check instead of failing.
+    this.backgroundCheck = check.catch(() => {});
+    try {
+      return await check;
+    } finally {
+      this.backgroundCheck = null;
+    }
+  }
+
+  /** A turn start or user operation that arrives during a background check waits for it. */
+  backgroundCheckInProgress() {
+    return this.manualOperation === BACKGROUND_CONNECTOR_CHECK_OPERATION && Boolean(this.backgroundCheck);
+  }
+
+  async runConnectorVerification(appName, { background = false } = {}) {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
-    this.setState({ status: "testing", message: "Checking ChatGPT connector" });
+    if (!background) this.setState({ status: "testing", message: "Checking ChatGPT connector" });
     await this.refreshChatGptHomeDocument();
     try {
       const result = await this.verifyConnectorWithBrowserHelper({
@@ -2896,16 +2983,21 @@ class BrowserHost {
         appName: connectorName,
         logger: this.logger,
       });
-      this.logger.info("connector.verified", { appName: connectorName });
+      this.logger.info("connector.verified", { appName: connectorName, background });
       this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
       return result;
     } catch (error) {
-      this.logger.error("connector.verification_failed", {
-        appName: connectorName,
-        ...(error && typeof error.operationId === "string" ? { traceId: error.operationId } : {}),
-        errorName: error instanceof Error ? error.name : "Error",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // A background check that finds the connector not listed yet is expected while it is paired.
+      this.logger[background ? "info" : "error"](
+        background ? "connector.background_check_failed" : "connector.verification_failed",
+        {
+          appName: connectorName,
+          ...(error && typeof error.operationId === "string" ? { traceId: error.operationId } : {}),
+          ...(error && typeof error.code === "string" ? { code: error.code } : {}),
+          errorName: error instanceof Error ? error.name : "Error",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      );
       throw error;
     }
   }
@@ -2947,10 +3039,16 @@ class BrowserHost {
     return inspected;
   }
 
-  async withManualOperation(name, action) {
+  async withManualOperation(name, action, { reportErrors = true } = {}) {
     await this.ready();
     if (this.activeTraceId) {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
+    }
+    if (name !== BACKGROUND_CONNECTOR_CHECK_OPERATION && this.backgroundCheckInProgress?.()) {
+      await this.backgroundCheck;
+      if (this.activeTraceId) {
+        throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
+      }
     }
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
@@ -2964,7 +3062,7 @@ class BrowserHost {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The superseding sign-in publishes its own state; an error banner here would be wrong.
-      if (message !== LOGIN_SUPERSEDED_MESSAGE) this.setState({ status: "error", message });
+      if (reportErrors && message !== LOGIN_SUPERSEDED_MESSAGE) this.setState({ status: "error", message });
       throw error;
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);

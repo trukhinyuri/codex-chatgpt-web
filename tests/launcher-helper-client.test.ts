@@ -25,7 +25,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
       const prepared = await turn.prepare();
       if (prepared.skillFiles?.[0]?.text !== "<skill>\\n<name>ipc</name>\\n<path>/skills/ipc/SKILL.md</path>\\ncheck IPC\\n</skill>") throw new Error("Skill file lost in IPC");
       if (prepared.multipart.parts.length !== 3) throw new Error("Multipart context was lost");
+      // Each staged part crosses the Send activation boundary before the final prompt does.
+      await turn.onSendActivated();
       await turn.onMultipartStageAcknowledged?.(1);
+      await turn.onSendActivated();
       await turn.onMultipartStageAcknowledged?.(2);
       await turn.onSendActivated();
       turn.onSubmitted();
@@ -82,7 +85,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
   const acknowledgedStages: number[] = [];
-  let sendActivated = false;
+  let sendActivations = 0;
   let submitted = false;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
@@ -101,7 +104,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
         release: () => { released = true; },
       }),
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
-      onSendActivated: () => { sendActivated = true; },
+      onSendActivated: () => { sendActivations += 1; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
@@ -114,7 +117,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       { text: " files", continuation: true },
     ]);
     expect(deltas).toEqual(["done"]);
-    expect(sendActivated).toBe(true);
+    expect(sendActivations).toBe(3);
     expect(submitted).toBe(true);
     expect(acknowledgedStages).toEqual([1, 2]);
     expect(checkpoints).toEqual([{

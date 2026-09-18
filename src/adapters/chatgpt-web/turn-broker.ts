@@ -635,6 +635,17 @@ export class TurnBroker implements TurnBrokerOwner {
     return [...this.channels.values()].filter(channel => channel.externalOwner).length;
   }
 
+  /**
+   * MCP requests that ChatGPT has in flight through the tunnel right now, across all turns. A tunnel
+   * restart would cut every one of them, so it is allowed only while this is zero.
+   */
+  activeToolCallCount(): number {
+    this.prune();
+    let count = 0;
+    for (const channel of this.channels.values()) count += channel.activities.size;
+    return count;
+  }
+
   revokeExternalOwners(): number {
     const tokens = [...this.channels]
       .filter(([, channel]) => channel.externalOwner)

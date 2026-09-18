@@ -46,7 +46,7 @@ test("a missing personalization control fails closed before connector selection"
     async checkpoint => { diagnostics.push(checkpoint); },
   )).rejects.toMatchObject({
     status: 424,
-    code: "connector_not_found",
+    code: "connector_not_found:personalization_unavailable",
     retryable: false,
   });
   expect(diagnostics).toEqual(["personalization-control-missing"]);
@@ -481,7 +481,7 @@ test("a missing owned personalization menu closes the opened control and returns
     controller.signal,
   )).rejects.toMatchObject({
     status: 424,
-    code: "connector_not_found",
+    code: "connector_not_found:personalization_unavailable",
   });
   expect(escapePresses).toBe(1);
 });
@@ -545,7 +545,7 @@ test("personalization menu cleanup completes before the preflight error is retur
   expect(escapePresses).toBe(0);
   releaseEscape();
   const { error } = await outcome;
-  expect(error).toMatchObject({ status: 424, code: "connector_not_found" });
+  expect(error).toMatchObject({ status: 424, code: "connector_not_found:personalization_unavailable" });
   expect(settled).toBeTrue();
   expect(escapePresses).toBe(1);
   await new Promise(resolve => setTimeout(resolve, 20));
@@ -598,8 +598,9 @@ test("the absolute personalization deadline always returns the connector deadlin
     await expect(ensureChatGptPersonalizedConnectorAccess({ getByRole: () => absent } as any))
       .rejects.toMatchObject({
         status: 424,
-        code: "connector_not_found",
-        message: "ChatGPT personalization preflight exceeded its readiness deadline",
+        code: "connector_not_found:personalization_unavailable",
+        message: "ChatGPT personalization preflight exceeded its readiness deadline; Codex Superpower keeps"
+          + " checking the connector by itself; send the task again when its MCP panel shows the connector as ready",
       });
   } finally {
     Date.now = originalNow;
@@ -684,7 +685,90 @@ test("ambiguous personalization controls fail before connector selection", async
 
   await expect(ensureChatGptPersonalizedConnectorAccess(page)).rejects.toMatchObject({
     status: 424,
-    code: "connector_not_found",
+    code: "connector_not_found:personalization_unavailable",
     retryable: false,
   });
+});
+
+test("no personalization switch and no connector row means the connector is not listed, in under 5 seconds", async () => {
+  const diagnostics: string[] = [];
+  const absent = visibleLocator(() => 0);
+  let controlClicks = 0;
+  let probeTimeout = 0;
+  const control = {
+    // A real locator waits for the whole timeout before it reports that nothing appeared.
+    waitFor: async ({ timeout, signal }: { timeout: number; signal?: AbortSignal }) => {
+      expect(signal).toBeDefined();
+      probeTimeout = timeout;
+      await new Promise(resolve => setTimeout(resolve, timeout));
+      const error = new Error(`locator.waitFor: Timeout ${timeout}ms exceeded`);
+      error.name = "TimeoutError";
+      throw error;
+    },
+    click: async () => { controlClicks += 1; },
+  };
+  const controls = { filter: () => controls, first: () => control, count: async () => 0 };
+  const page = {
+    getByRole: () => absent,
+    locator: (selector: string) => {
+      expect(selector).toContain('[aria-haspopup="menu"]');
+      return controls;
+    },
+  } as any;
+
+  const startedAt = performance.now();
+  const error = await ensureChatGptPersonalizedConnectorAccess(
+    page,
+    async checkpoint => { diagnostics.push(checkpoint); },
+    async () => false,
+  ).catch(caught => caught);
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(error).toMatchObject({ status: 424, code: "connector_not_found:not_listed", retryable: false });
+  expect(elapsedMs).toBeLessThan(5_000);
+  expect(probeTimeout).toBeGreaterThan(0);
+  expect(probeTimeout).toBeLessThanOrEqual(1_500);
+  expect(controlClicks).toBe(0);
+  expect(diagnostics).toEqual(["personalization-control-absent"]);
+});
+
+test("a turn that can still wait hands an unlisted connector to its catalog ladder", async () => {
+  const absent = visibleLocator(() => 0);
+  const control = {
+    waitFor: async () => {
+      const error = new Error("timeout");
+      error.name = "TimeoutError";
+      throw error;
+    },
+  };
+  const controls = { filter: () => controls, first: () => control };
+  const page = {
+    getByRole: () => absent,
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("aria-haspopup")
+      ? controls
+      : { filter: () => ({ waitFor: async () => { throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); } }) },
+  } as any;
+  const composer = {
+    fill: async () => {},
+    focus: async () => {},
+    pressSequentially: async () => {},
+    evaluate: async () => ({ text: "@codex", focused: true }),
+  };
+  const { ChatGptBrowserWorker } = await import("../src/adapters/chatgpt-web/browser-worker");
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown, capture?: unknown, refresh?: boolean): Promise<unknown>;
+  }).selectConnector;
+  const fixture = {
+    config: { appName: "Codex Native2" },
+    activeComposer: async () => composer,
+    clearChatGptComposerState: async () => {},
+  };
+  await expect(selectConnector.call(fixture, page, undefined, true)).rejects.toMatchObject({
+    name: "ChatGptConnectorCatalogStaleError",
+  });
+  const final = await selectConnector.call(fixture, page, undefined, false)
+    .then(() => new Error("expected a connector failure"), (error: Error) => error);
+  expect(final).toMatchObject({ status: 424, code: "connector_not_found:not_listed" });
+  expect(final.message).toContain('create a connector named exactly "Codex Native2"');
 });

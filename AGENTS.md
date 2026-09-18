@@ -43,7 +43,7 @@ Open **Codex Superpower** (`/Applications/Codex Web GPT.app`). The human perform
 1. **Onboarding.** Choose the language and **With Automation** (the default) unless the human asks for Zero Risk.
 2. **Sign in.** Ask the human to sign in to ChatGPT in the launcher's embedded browser. Then press **Run browser smoke test** and wait for success.
 3. **Models.** Press **Install models**. When it finishes, ask the human to quit and reopen Codex, then wait until the launcher reports that Codex loaded the model catalog.
-4. **Tools (Full harness).** Open **MCP**. The human creates a Tunnel at <https://platform.openai.com/settings/organization/tunnels> and an API key at <https://platform.openai.com/settings/organization/api-keys> and pastes both. Press **Connect harness**. The human enables ChatGPT Developer Mode ([help article](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)) and creates a Tunnel connector named exactly `Codex Native2` with **Authentication: None** and **Allow all actions**. Press **Verify runtime** and wait for success.
+4. **Tools (Full harness).** Open **MCP**. The human creates a Tunnel at <https://platform.openai.com/settings/organization/tunnels> and an API key at <https://platform.openai.com/settings/organization/api-keys> and pastes both. Press **Connect harness**. The human enables ChatGPT Developer Mode ([help article](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)) and creates a Tunnel connector named exactly `Codex Native2` with **Authentication: None** and **Allow all actions**. The launcher then checks the connector by itself (every 15 seconds at first) and its **MCP** checklist turns green when ChatGPT lists it; ChatGPT can take several minutes. **Verify runtime** remains available but is not required.
 5. **Long tasks (optional).** In **Settings**, turn on **Bigger Context**, then ask the human to restart Codex.
 
 ## Connect CLIProxyAPI (optional)
@@ -66,7 +66,7 @@ Run every check and report each as passed or failed.
    "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" doctor
    ```
 
-   Expect `Doctor result: ready` (browser-only) or `Doctor result: ready for local checks; unproven from this machine: connector` (Full harness) — the connector line names exactly what local checks cannot prove; **Verify runtime** covers it.
+   Expect `Doctor result: ready` (browser-only, or Full harness once ChatGPT has reached the tunnel: the connector line then reads `ChatGPT reached this tunnel at <time>`) or `Doctor result: ready for local checks; unproven from this machine: connector` (Full harness before ChatGPT has connected, or when the tunnel's counters cannot be read) — the connector line names exactly what local checks cannot prove; the launcher's MCP checklist covers it.
 2. **Bridge.** `curl -s http://127.0.0.1:17841/healthz` returns `"status":"ok"`.
 3. **Test turn.** Pick a ChatGPT Web model the account offers (`chatgpt-web/high` on most paid plans) and run it from a scratch folder:
 
@@ -112,6 +112,7 @@ Evidence lives here:
 | `exceeds the measured … ChatGPT browser message boundary` | The context does not fit one message | Turn on Bigger Context, or run `/compact` |
 | `missing cwd in trusted Codex environment context` | Not expected in this fork, including skills outside Git and multi-folder projects | Collect the turn's rollout and the matching `trusted environment unavailable (…)` line from `launcher.jsonl`, then open an issue in this repository |
 | `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Superpower |
+| `connector_not_found:<kind>` (for example `ChatGPT still does not list connector "Codex Native2"`) | Before sending, the task waited for ChatGPT to list the connector (up to about 4 minutes once ChatGPT had reached the tunnel) | Do what the message names; the launcher re-checks by itself and its MCP checklist shows when to send the task again. Do not restart the launcher |
 
 ## Develop
 

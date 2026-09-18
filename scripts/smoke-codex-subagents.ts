@@ -278,7 +278,7 @@ const server = Bun.serve({
       }
       return new Response(bridgeToResponsesSSE(
         responseFor(role, step, body),
-        "chatgpt-web/pro",
+        "chatgpt-web/extra-high",
         collaborationMap,
       ), {
         headers: {
@@ -294,7 +294,7 @@ const server = Bun.serve({
 });
 
 writeFileSync(join(codexHome, "config.toml"), [
-  'model = "chatgpt-web/pro"',
+  'model = "chatgpt-web/extra-high"',
   'model_provider = "lifecycle"',
   `model_catalog_json = ${JSON.stringify(join(root, "models.json"))}`,
   "",
@@ -329,7 +329,7 @@ try {
     "--json",
     "--dangerously-bypass-approvals-and-sandbox",
     "--model",
-    "chatgpt-web/pro",
+    "chatgpt-web/extra-high",
     "ROOT_LIFECYCLE: complete the nested subagent lifecycle and the follow-up.",
   ], {
     cwd: root,

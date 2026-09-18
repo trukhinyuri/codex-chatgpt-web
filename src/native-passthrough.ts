@@ -56,6 +56,13 @@ export function codexClientVersionFromUserAgent(userAgent: string | null): strin
   return version ? `${version[1]}.${version[2]}.${version[3]}` : undefined;
 }
 
+/** The `client_version` a native /models request is sent upstream with. */
+export function nativeModelsClientVersion(request: Request): string | undefined {
+  const explicit = new URL(request.url).searchParams.get("client_version");
+  if (explicit !== null) return explicit;
+  return codexClientVersionFromUserAgent(request.headers.get("user-agent"));
+}
+
 function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -218,7 +225,7 @@ export async function forwardNativeCodexRequest(
 
   const incomingUrl = new URL(request.url);
   if (endpoint === "models" && !incomingUrl.searchParams.has("client_version")) {
-    const clientVersion = codexClientVersionFromUserAgent(request.headers.get("user-agent"));
+    const clientVersion = nativeModelsClientVersion(request);
     if (clientVersion) incomingUrl.searchParams.set("client_version", clientVersion);
   }
   const headers = endToEndHeaders(request.headers);
@@ -270,6 +277,10 @@ export async function forwardNativeCodexRequest(
   const responseHeaders = endToEndHeaders(upstream.headers);
   // fetch exposes decompressed image JSON; retaining gzip/br would make Codex decode it twice.
   if (imageRequest) responseHeaders.delete("content-encoding");
+  // The bridge serves its own catalog with its own ETag. Codex compares X-Models-Etag on every
+  // Responses stream with that ETag and refreshes /models inside the turn whenever they differ,
+  // which the upstream value always does; the catalog TTL refreshes it instead.
+  responseHeaders.delete("x-models-etag");
   const isEventStream = (upstream.headers.get("content-type") ?? "")
     .toLowerCase()
     .includes("text/event-stream");

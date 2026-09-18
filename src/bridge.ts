@@ -1,5 +1,11 @@
 import type { AdapterEvent, CodexMessagePhase, CodexProviderContinuationState, CodexUsage } from "./types";
-import { adapterFailureFromMessage, classifyError, type CodexErrorPayload } from "./lib/errors";
+import {
+  adapterFailureFromMessage,
+  classifyError,
+  codexStreamError,
+  type CodexErrorPayload,
+  type CodexStreamError,
+} from "./lib/errors";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "./responses/reasoning-envelope";
 import { resolveStallTimeoutSec } from "./stall-timeout";
@@ -56,6 +62,53 @@ function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>
 }
 
 export { adapterFailureFromMessage } from "./lib/errors";
+
+const LOGGED_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+const LOGGED_MODEL = /^[A-Za-z0-9_./-]{1,96}$/;
+
+function loggedCode(code: string | null | undefined): string | null {
+  if (code === null || code === undefined) return null;
+  return LOGGED_CODE.test(code) ? code : "other";
+}
+
+/**
+ * Journal the code Codex received next to the bridge's own classification. Structural fields only:
+ * never the message, which can carry prompt text or local paths.
+ */
+function logStreamFailure(
+  modelId: string,
+  responseId: string,
+  httpStatus: number,
+  wire: CodexStreamError,
+  retryable: boolean | undefined,
+): void {
+  try {
+    console.warn(`[bridge] response_failed ${JSON.stringify({
+      model: LOGGED_MODEL.test(modelId) ? modelId : "other",
+      response: responseId,
+      status: httpStatus,
+      code: loggedCode(wire.code),
+      ...(wire.bridge_code !== undefined ? { bridge_code: loggedCode(wire.bridge_code) } : {}),
+      ...(retryable !== undefined ? { retryable } : {}),
+    })}`);
+  } catch {
+    /* Logging must never replace the response. */
+  }
+}
+
+/**
+ * Terminal failure of one streamed response as Codex must receive it: the bridge's classification
+ * mapped onto a code Codex 0.154 acts on correctly (see codexStreamError), journaled with both codes.
+ */
+export function responsesStreamFailure(
+  failure: { httpStatus: number; error: CodexErrorPayload },
+  retryable: boolean | undefined,
+  log?: { modelId: string; responseId: string },
+): CodexStreamError {
+  const wire = codexStreamError(failure.error, { httpStatus: failure.httpStatus, retryable });
+  if (log) logStreamFailure(log.modelId, log.responseId, failure.httpStatus, wire, retryable);
+  return wire;
+}
 
 interface OutputItem {
   type: string;
@@ -655,15 +708,19 @@ export function bridgeToResponsesSSE(
               if (currentRawReasoning) closeCurrentRawReasoning();
               flushHiddenRawReasoning();
               if (currentToolCall) closeCurrentToolCall();
-              const failure = adapterFailureFromEvent(event);
+              // Codex ignores `retryable`; the code alone decides whether and when it retries.
+              const error = responsesStreamFailure(adapterFailureFromEvent(event), event.retryable, {
+                modelId,
+                responseId,
+              });
               emit("response.failed", {
                 response: {
                   ...responseSnapshot("failed", finishedItems),
                   // Partial consumption from a mid-stream upstream failure: surfaced so the request
                   // log can record real tokens instead of usageStatus "unreported" with 0.
                   ...(event.usage ? { usage: responsesUsage(event.usage) } : {}),
-                  error: failure.error,
-                  last_error: failure.error,
+                  error,
+                  last_error: error,
                   ...(event.retryable !== undefined ? { retryable: event.retryable } : {}),
                 },
               });
@@ -682,11 +739,16 @@ export function bridgeToResponsesSSE(
       } catch (err) {
         if (!terminated) {
           flushHiddenRawReasoning();
+          const error = responsesStreamFailure(
+            { httpStatus: 500, error: responseError(500, "proxy_error", err instanceof Error ? err.message : String(err)) },
+            undefined,
+            { modelId, responseId },
+          );
           emit("response.failed", {
             response: {
               ...responseSnapshot("failed", finishedItems),
-              error: responseError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
-              last_error: responseError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
+              error,
+              last_error: error,
             },
           });
           reportTerminal("failed");

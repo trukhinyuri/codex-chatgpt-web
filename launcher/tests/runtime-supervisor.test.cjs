@@ -11,9 +11,59 @@ const { linuxDesktopEntry, requireAutostartState } = require("../electron/autost
 const {
   MAX_RESTARTS_PER_WINDOW,
   RuntimeSupervisor,
+  childOutputLevel,
   managedTunnelConnectArgs,
   validateConfig,
 } = require("../electron/runtime-supervisor.cjs");
+
+test("bridge lines marked as debug are logged at debug level; everything else keeps its stream level", () => {
+  assert.equal(childOutputLevel("stdout", "[codex-chatgpt-web] debug model_catalog_client_aborted {\"request\":7}"), "debug");
+  assert.equal(childOutputLevel("stdout", "[codex-chatgpt-web] model_catalog_retry_recovered {\"request\":7}"), "info");
+  assert.equal(childOutputLevel("stdout", "[chatgpt-web-helper] [chatgpt-web] debug text from a page"), "info");
+  assert.equal(childOutputLevel("stderr", "[codex-chatgpt-web] debug model_catalog_client_aborted {}"), "warn");
+  assert.equal(childOutputLevel("stderr", "[codex-chatgpt-web] model_catalog_failed {}"), "warn");
+});
+
+test("a daemon's debug-marked line is logged at debug level and never becomes its exit detail", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-child-levels-"));
+  const records = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: {
+      debug: (event, detail) => records.push(["debug", event, detail?.line]),
+      info: (event, detail) => records.push(["info", event, detail?.line]),
+      warn: (event, detail) => records.push(["warn", event, detail?.line]),
+      error: (event) => records.push(["error", event]),
+    },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  try {
+    const child = supervisor.spawnChild("daemon", {
+      executable: process.execPath,
+      args: ["-e", [
+        "console.log('[codex-chatgpt-web] model_catalog_retry_recovered {\"request\":1}');",
+        "console.log('[codex-chatgpt-web] debug model_catalog_client_aborted {\"request\":2}');",
+        "console.error('[codex-chatgpt-web] model_catalog_failed {\"request\":3}');",
+      ].join("")],
+      cwd: root,
+    });
+    await new Promise((resolve) => child.once("close", resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    // stdout and stderr arrive on separate pipes, so only their contents are compared, not order.
+    const byLine = (left, right) => left[2].localeCompare(right[2]);
+    const lines = records.filter(([, event]) => event.startsWith("runtime.daemon_std")).sort(byLine);
+    assert.deepEqual(lines, [
+      ["info", "runtime.daemon_stdout", "[codex-chatgpt-web] model_catalog_retry_recovered {\"request\":1}"],
+      ["debug", "runtime.daemon_stdout", "[codex-chatgpt-web] debug model_catalog_client_aborted {\"request\":2}"],
+      ["warn", "runtime.daemon_stderr", "[codex-chatgpt-web] model_catalog_failed {\"request\":3}"],
+    ].sort(byLine));
+    assert.doesNotMatch(String(supervisor.lastChildOutput.daemon), /debug model_catalog_client_aborted/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 async function freePort() {
   return await new Promise((resolve, reject) => {

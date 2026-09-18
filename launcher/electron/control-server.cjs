@@ -27,6 +27,22 @@ async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   return JSON.parse(text);
 }
 
+const TURN_END_DIAGNOSTIC_FIELD = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/**
+ * The structural fields a helper reports with a turn end (code, browser stage, abort class). They
+ * only annotate the log: an absent or malformed value is dropped, never a reason to refuse the end
+ * and strand the lease.
+ */
+function turnEndDiagnostics(body) {
+  const fields = {};
+  for (const key of ["code", "stage", "abortClass"]) {
+    const value = body?.[key];
+    if (typeof value === "string" && TURN_END_DIAGNOSTIC_FIELD.test(value)) fields[key] = value;
+  }
+  return fields;
+}
+
 function writeJson(response, status, body) {
   const encoded = Buffer.from(`${JSON.stringify(body)}\n`);
   response.writeHead(status, {
@@ -37,13 +53,18 @@ function writeJson(response, status, body) {
   response.end(encoded);
 }
 
+const CONNECTOR_FAILURE_CODE = /^connector_not_found(?::[a-z_]{1,40})?$/;
+
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, onTurnEnded = () => {} }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, connectorTunnel, onTurnEnded = () => {} }) {
     this.logger = logger;
-    this.onTurnEnded = onTurnEnded;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
+    // Tunnel readiness and ChatGPT's contact with it for a turn that waits on the connector.
+    this.connectorTunnel = connectorTunnel;
+    // Structured outcome of every automatic turn, so the launcher can react to connector failures.
+    this.onTurnEnded = onTurnEnded;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -101,6 +122,7 @@ class BrowserControlServer {
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
+    const isConnectorTunnel = request.url === "/v1/connector/tunnel";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
       ["/v1/manual/wait-sent", "wait-sent"],
@@ -109,7 +131,8 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST"
+      || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isConnectorTunnel && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -160,6 +183,31 @@ class BrowserControlServer {
       }
       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
         throw new Error("browser helper pid is invalid");
+      }
+      if (isConnectorTunnel) {
+        if (body.restart !== undefined && typeof body.restart !== "boolean") throw new Error("restart is invalid");
+        for (const [key, max] of [["waitStep", 20], ["waitTotal", 20], ["waitMs", 600_000]]) {
+          if (body[key] !== undefined && (!Number.isInteger(body[key]) || body[key] < 0 || body[key] > max)) {
+            throw new Error(`${key} is invalid`);
+          }
+        }
+        // Only the helper that owns this running turn may ask; the answer carries no page content.
+        host.assertRunningTurnOwner(body.traceId, body.helperPid);
+        if (typeof this.connectorTunnel !== "function") throw new Error("Connector tunnel status is unavailable");
+        const status = await this.connectorTunnel({
+          traceId: body.traceId,
+          restart: body.restart === true,
+          ...(body.waitStep !== undefined ? { waitStep: body.waitStep } : {}),
+          ...(body.waitTotal !== undefined ? { waitTotal: body.waitTotal } : {}),
+          ...(body.waitMs !== undefined ? { waitMs: body.waitMs } : {}),
+        });
+        writeJson(response, 200, status);
+        return;
+      }
+      if (body.failureCode !== undefined
+        && (request.url !== "/v1/turn/end" || typeof body.failureCode !== "string"
+          || !CONNECTOR_FAILURE_CODE.test(body.failureCode))) {
+        throw new Error("failureCode is invalid");
       }
       if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) {
         throw new Error("conversationKey is invalid");
@@ -323,8 +371,19 @@ class BrowserControlServer {
           body.retain === true,
           body.connectorBound === true,
         );
-        this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
-        try { this.onTurnEnded(body.status); } catch {}
+        this.logger.info("browser.turn_ended", {
+          traceId: body.traceId,
+          status: body.status,
+          ...turnEndDiagnostics(body),
+          ...(body.failureCode ? { failureCode: body.failureCode } : {}),
+        });
+        try {
+          this.onTurnEnded?.({ traceId: body.traceId, status: body.status, failureCode: body.failureCode ?? null });
+        } catch (error) {
+          this.logger.warn("browser.turn_end_listener_failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         writeJson(response, 200, { ok: true, ...release });
         return;
       }
@@ -336,9 +395,10 @@ class BrowserControlServer {
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
+      const backgroundCheck = error?.code === "background_check_active";
       writeJson(
         response,
-        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost
+        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost || backgroundCheck
           ? 409
           : manualTimedOut ? 408 : 400,
         {
@@ -348,6 +408,7 @@ class BrowserControlServer {
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),
+        ...(backgroundCheck ? { code: "background_check_active" } : {}),
         },
       );
     }
