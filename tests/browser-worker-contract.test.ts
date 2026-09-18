@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, CHATGPT_SEND_ACTION_TIMEOUT_MS, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -167,6 +167,71 @@ test("assistant tracking rebinds only one proven replacement after React detache
     "conversation-turn-2",
     ["conversation-turn-1", "conversation-turn-3", "conversation-turn-4"],
   )).toThrow("2 new conversation turns");
+});
+
+test("assistant tracking accepts a replacement turn during proven MCP continuation", async () => {
+  type Baseline = {
+    initialTurnIdentities: string[];
+    domCache: Record<string, unknown>;
+  };
+  type Binding = {
+    identity: string;
+    locator: { count(): Promise<number> };
+    acceptedTurnIdentities: string[];
+  };
+  const replacementLocator = { id: "assistant-replacement" };
+  const page = {
+    locator: () => replacementLocator,
+  } as unknown as Page;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    submissionDomState: async () => ({
+      userTurnCount: 2,
+      assistantTurnCount: 2,
+      visibleStopButtonCount: 0,
+      userIdentities: ["conversation-turn-user-1", "conversation-turn-user-2"],
+      responseIdentities: ["conversation-turn-assistant-1", "conversation-turn-assistant-3"],
+      turnIdentities: [
+        "conversation-turn-user-1",
+        "conversation-turn-assistant-1",
+        "conversation-turn-user-2",
+        "conversation-turn-assistant-3",
+      ],
+    }),
+  }) as unknown as {
+    reconcileAssistantTurnBinding(
+      page: Page,
+      baseline: Baseline,
+      binding: Binding,
+      signal?: AbortSignal,
+      allowMcpContinuationUserTurn?: boolean,
+    ): Promise<{ identity: string; locator: unknown; acceptedTurnIdentities: readonly string[] }>;
+  };
+
+  const rebound = await worker.reconcileAssistantTurnBinding(
+    page,
+    {
+      initialTurnIdentities: ["conversation-turn-user-1", "conversation-turn-assistant-1"],
+      domCache: {},
+    },
+    {
+      identity: "conversation-turn-assistant-2",
+      locator: { count: async () => 0 },
+      acceptedTurnIdentities: ["conversation-turn-user-1", "conversation-turn-assistant-2"],
+    },
+    undefined,
+    true,
+  );
+
+  expect(rebound).toEqual({
+    identity: "conversation-turn-assistant-3",
+    locator: replacementLocator,
+    acceptedTurnIdentities: [
+      "conversation-turn-user-1",
+      "conversation-turn-assistant-1",
+      "conversation-turn-user-2",
+      "conversation-turn-assistant-3",
+    ],
+  });
 });
 
 test("response caching rechecks CSS visibility without requiring a DOM mutation", async () => {
@@ -739,7 +804,9 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
       options?: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number },
     ) => {
       pressOptions = options;
-      if (options?.timeout !== 0) throw new Error("nested locator timeout replaced the outer stage budget");
+      if (options?.timeout !== CHATGPT_SEND_ACTION_TIMEOUT_MS) {
+        throw new Error("send action must use its own bounded browser-action timeout");
+      }
     },
   };
   worker.activeComposer = async () => ({
@@ -753,8 +820,100 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     1_000,
     stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal),
   )).resolves.toBe("user_turn");
-  expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
+  expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: CHATGPT_SEND_ACTION_TIMEOUT_MS });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("aborting a send stops a still-running ChatGPT generation", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://send-abort-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  let stopPresses = 0;
+  const stopButton = {
+    last() { return this; },
+    isVisible: async () => true,
+    press: async () => { stopPresses += 1; },
+  };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("stop-button") ? stopButton : hiddenLocator,
+  } as unknown as Page;
+  const controller = new AbortController();
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async (_key: string, options?: { signal?: AbortSignal }) => await new Promise<never>((_resolve, reject) => {
+      options?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }),
+  };
+  worker.activeComposer = async () => ({
+    locator: () => ({ getByTestId: () => sendButton }),
+  });
+
+  setTimeout(() => controller.abort(), 350);
+  await expect(worker.sendAttachedPrompt(page, {}, undefined, controller.signal))
+    .rejects.toMatchObject({ name: "AbortError" });
+  expect(stopPresses).toBe(1);
+});
+
+test("a failed send stops a generation even when the outer stage has not aborted", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://send-failure-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  let stopPresses = 0;
+  const stopButton = {
+    last() { return this; },
+    isVisible: async () => true,
+    press: async () => { stopPresses += 1; },
+  };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("stop-button") ? stopButton : hiddenLocator,
+  } as unknown as Page;
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async () => { throw new DOMException("renderer timed out", "TimeoutError"); },
+  };
+  worker.activeComposer = async () => ({
+    locator: () => ({ getByTestId: () => sendButton }),
+  });
+
+  await expect(worker.sendAttachedPrompt(page, {}, undefined, new AbortController().signal))
+    .rejects.toMatchObject({ name: "TimeoutError" });
+  expect(stopPresses).toBe(1);
 });
 
 test("submission observation recovery resumes with rebound locators and is strictly bounded", async () => {
@@ -2762,6 +2921,22 @@ test("the Japanese ChatGPT rate-limit dialog is acknowledged and returns a struc
   expect(fixture.pressed).toEqual(["Enter"]);
 });
 
+test("the Korean ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
+  const fixture = dialogPage(
+    "요청을 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.",
+    "알겠습니다",
+  );
+
+  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+  });
+  expect(fixture.pressed).toEqual(["Enter"]);
+});
+
 test("unrelated ChatGPT dialogs are left untouched", async () => {
   const fixture = dialogPage("Confirm another action");
 
@@ -2779,6 +2954,21 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
     status: 502,
     errorType: "server_error",
     code: "upstream_server_error",
+    retryable: true,
+  });
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("the unusual-activity ChatGPT error returns a structured retryable 429", async () => {
+  const fixture = dialogPage(
+    "Unusual activity has been detected from your device. Try again later. (b2d7fe20-47dd-41a9-b862-15d14e17368d)",
+  );
+
+  await expect(throwIfChatGptUnusualActivityAlert(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "unusual_activity_detected",
     retryable: true,
   });
   expect(fixture.pressed).toEqual([]);

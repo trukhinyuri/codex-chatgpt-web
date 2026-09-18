@@ -300,6 +300,34 @@ test("an unbounded broker call fails when the broker closes without answering", 
   }
 }, 10_000);
 
+test("a bounded broker call proactively half-closes its write side once the response frame arrives", async () => {
+  let clientEnded = false;
+  let serverSocket: Socket | undefined;
+  const broker = unansweredBrokerEndpoint("cgw-broker-halfclose-", socket => {
+    serverSocket = socket;
+    socket.on("data", chunk => {
+      const request = JSON.parse(chunk.toString().trim()) as { id: string };
+      socket.once("end", () => { clientEnded = true; });
+      socket.write(`${JSON.stringify({ id: request.id, result: { ok: true } })}\n`);
+    });
+  });
+  await broker.listen();
+  const call = callTurnBroker<{ ok: boolean }>(broker.socketPath, { method: "claim", token: "turn_halfclose" });
+  call.catch(() => {}); // observed explicitly below; suppress an unhandled rejection if the assertion throws first
+  try {
+    // The server deliberately withholds its own close here: only the client's own half-close (not
+    // the server's) can produce this "end" event, so observing it before the server acts proves the
+    // client closed its writable side proactively instead of merely waiting for the socket to close.
+    await Bun.sleep(50);
+    expect(clientEnded).toBe(true);
+    serverSocket?.end();
+    await expect(call).resolves.toEqual({ ok: true });
+  } finally {
+    serverSocket?.end();
+    await broker.close();
+  }
+}, 10_000);
+
 test("an unbounded broker call outlives the bounded default timeout", async () => {
   const accepted: Socket[] = [];
   const broker = unansweredBrokerEndpoint("cgw-broker-slow-", socket => { accepted.push(socket); });

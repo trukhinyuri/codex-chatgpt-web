@@ -136,6 +136,11 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
+/**
+ * Sending is a bounded browser action, not the open-ended stage that owns it. A stalled renderer
+ * must fail this one action instead of leaving the composer looking frozen for the whole budget.
+ */
+export const CHATGPT_SEND_ACTION_TIMEOUT_MS = 15_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -730,8 +735,8 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
 }
 
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
-  .filter({ hasText: /Too many requests|太多要求|太多请求|リクエストが多すぎます/i })
-  .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます/i })
+  .filter({ hasText: /Too many requests|太多要求|太多请求|リクエストが多すぎます|요청이 너무 많습니다|요청을 너무 빠르게|너무 많은 요청/i })
+  .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます|요청을 너무 빠르게|요청이 너무 많습니다|너무 많은 요청/i })
   .last();
 
 // ChatGPT answers a burst with a "Too many requests" dialog and asks to wait a few minutes. Codex
@@ -839,7 +844,7 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   if (!await dialog.isVisible().catch(() => false)) return;
 
   const baseDelaySeconds = CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS / 1_000;
-  const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解)$/ }).last();
+  const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解|알겠습니다|확인)$/ }).last();
   if (await acknowledge.isVisible().catch(() => false)) {
     try {
       await acknowledge.press("Enter");
@@ -913,6 +918,22 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   throw new ChatGptWebAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+  );
+}
+
+// ChatGPT can end a turn with "Unusual activity has been detected from your device. Try again
+// later." instead of the generic terminal-error alert or a normal completion. Left unclassified,
+// the turn stalls on whatever generic timeout owns the wait loop instead of surfacing a fast,
+// retryable rate limit the way the other terminal alerts above do.
+const chatGptUnusualActivityAlert = (scope: ChatGptTextScope): Locator => scope
+  .getByText(/Unusual activity has been detected from your device\.[\s\S]*Try again later\.(?:\s*\([^)]+\))?/i)
+  .last();
+
+export async function throwIfChatGptUnusualActivityAlert(scope: ChatGptTextScope): Promise<void> {
+  if (!await chatGptUnusualActivityAlert(scope).isVisible().catch(() => false)) return;
+  throw new ChatGptWebAdapterError(
+    "ChatGPT temporarily blocked the turn after detecting unusual activity from this device. Retry later.",
+    { status: 429, errorType: "rate_limit_error", code: "unusual_activity_detected", retryable: true },
   );
 }
 
@@ -3040,6 +3061,7 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     binding: ChatGptAssistantTurnBinding,
     signal?: AbortSignal,
+    allowMcpContinuationUserTurn = false,
   ): Promise<ChatGptAssistantTurnBinding> {
     const boundCount = await withChatGptBrowserObservationTimeout(
       withBrowserTurnAbort(binding.locator.count(), signal),
@@ -3050,19 +3072,30 @@ export class ChatGptBrowserWorker {
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedTurns = new Set(binding.acceptedTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedTurns.has(identity))) {
+    const hasNewUserTurn = state.userIdentities.some(identity => !acceptedTurns.has(identity));
+    // A new user turn while an MCP tool call was already proven in flight is the ChatGPT-Native
+    // continuation protocol working as designed, not an out-of-band interruption: only waive the
+    // check when that external progress was observed before this reconcile started.
+    if (hasNewUserTurn && !allowMcpContinuationUserTurn) {
       throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
     }
+    const acceptedTurnIdentities = hasNewUserTurn
+      ? state.turnIdentities
+      : binding.acceptedTurnIdentities;
     const identity = chatGptReboundTurnIdentity(
       baseline.initialTurnIdentities,
       binding.identity,
       state.responseIdentities,
     );
-    if (!identity || identity === binding.identity) return binding;
+    if (!identity || identity === binding.identity) {
+      return acceptedTurnIdentities === binding.acceptedTurnIdentities
+        ? binding
+        : { ...binding, acceptedTurnIdentities };
+    }
     return {
       identity,
       locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
-      acceptedTurnIdentities: state.turnIdentities,
+      acceptedTurnIdentities,
     };
   }
 
@@ -3549,26 +3582,33 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
-    await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
-    const evidence = await this.waitForSubmissionAcceptedWithRecovery(
-      page,
-      baseline,
-      abortSignal,
-      externalProgress,
-      initialToolBatchRevision,
-      completionTracker,
-      recoverObservation,
-    );
-    submissionLifecycle?.onSubmitted?.();
-    return evidence;
+    try {
+      await submissionLifecycle?.onSendActivated?.();
+      await sendButton.press("Enter", {
+        noWaitAfter: true,
+        signal: abortSignal,
+        // runStage still owns the 180-second Bigger Context budget; this only bounds the browser
+        // action itself so a stalled renderer cannot make the whole stage look frozen forever.
+        timeout: CHATGPT_SEND_ACTION_TIMEOUT_MS,
+      });
+      const evidence = await this.waitForSubmissionAcceptedWithRecovery(
+        page,
+        baseline,
+        abortSignal,
+        externalProgress,
+        initialToolBatchRevision,
+        completionTracker,
+        recoverObservation,
+      );
+      submissionLifecycle?.onSubmitted?.();
+      return evidence;
+    } catch (error) {
+      // Neither an aborted send nor a failed one has any local consumer left for a remote
+      // generation ChatGPT may still be running; stop it instead of leaving it to burn quota.
+      const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+      if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+      throw error;
+    }
   }
 
   private async waitForMultipartAcknowledgement(
@@ -3602,13 +3642,16 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+      await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
+        const progressBeforeReconcile = externalProgress?.snapshot();
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
           submissionBaseline,
           responseTurn,
           abortSignal,
+          chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
         );
         if (rebound.identity !== responseTurn.identity) {
           responseTurn = rebound;
@@ -5011,6 +5054,7 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
@@ -5028,12 +5072,14 @@ export class ChatGptBrowserWorker {
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent) {
           try {
+            const progressBeforeReconcile = turn.externalProgress?.snapshot();
             const rebound = await withChatGptBrowserObservationTimeout(
               this.reconcileAssistantTurnBinding(
                 page,
                 submissionBaseline,
                 responseTurn,
                 turn.abortSignal,
+                chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
               ),
             );
             if (rebound.identity !== responseTurn.identity) {
