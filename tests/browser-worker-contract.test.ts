@@ -2582,16 +2582,61 @@ test("an active rate-limit cooldown refuses new browser turns locally with the r
   expect(() => cooldown.assertReady()).not.toThrow();
 });
 
-test("an accepted submission clears the rate-limit cooldown and its escalation", () => {
-  const now = 1_000_000;
+test("only a completed response ends the escalation, and an announced pause still runs out", () => {
+  let now = 1_000_000;
   const cooldown = new ChatGptRateLimitCooldown(() => now);
   cooldown.record();
-  cooldown.record();
+  expect(cooldown.record()).toBe(120);
 
-  cooldown.reset();
+  cooldown.recordResponse();
 
+  expect(() => cooldown.assertReady()).toThrow("Please try again in 120s.");
+  now += 120_000;
   expect(() => cooldown.assertReady()).not.toThrow();
   expect(cooldown.record()).toBe(60);
+});
+
+test("an accepted submission does not end the rate-limit escalation", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "src", "adapters", "chatgpt-web", "browser-worker.ts"), "utf8");
+  const accepted = source.indexOf("submission accepted evidence=${finalSubmissionEvidence}");
+  const completed = source.indexOf("browser turn ${turn.traceId} completed`");
+  const response = source.indexOf("this.rateLimitCooldown.recordResponse();");
+  expect(accepted).toBeGreaterThan(0);
+  expect(source.slice(accepted, accepted + 400)).not.toContain("rateLimitCooldown");
+  expect(response).toBeGreaterThan(accepted);
+  expect(response).toBeLessThan(completed);
+});
+
+function somethingWentWrong(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
+    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+  );
+}
+
+test("'Something went wrong' shortly after a rate limit is the same limit and asks Codex to wait", () => {
+  let now = 1_000_000;
+  const cooldown = new ChatGptRateLimitCooldown(() => now);
+  const standalone = somethingWentWrong();
+  expect(cooldown.escalate(standalone)).toBe(standalone);
+
+  cooldown.escalate(rateLimitError(60));
+  now += 79_000;
+  const throttled = cooldown.escalate(somethingWentWrong());
+  expect(throttled).toMatchObject({ status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true });
+  expect((throttled as Error).message).toBe(
+    "ChatGPT rate limit: ChatGPT reported an error while this account was still throttled after \"Too many requests\". Please try again in 120s.",
+  );
+  expect((throttled as Error).cause).toBeInstanceOf(ChatGptWebAdapterError);
+
+  now += 10 * 60_000 + 1;
+  const later = somethingWentWrong();
+  expect(cooldown.escalate(later)).toBe(later);
+
+  cooldown.escalate(rateLimitError(60));
+  cooldown.recordResponse();
+  const served = somethingWentWrong();
+  expect(cooldown.escalate(served)).toBe(served);
 });
 
 test("escalation rewrites only ChatGPT rate-limit errors, keeping their retry contract", () => {
