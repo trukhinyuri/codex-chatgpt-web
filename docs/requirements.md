@@ -56,6 +56,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. `bun run verify` passes in a clean clone, and the updater's own build path (private home, full suite, packaging) is exercised before a release.
 3. Problems known from upstream projects (codex-chatgpt-web, CLIProxyAPI) and their forks are fixed here too, not carried over.
 4. Everything that is decided or learned is written into this repository (requirements, process, roadmap, plans), so any agent can continue without the conversation in which it happened.
+5. Performance: every path is built for the highest throughput and the lowest latency the providers allow (no avoidable waits, polling, serialization or repeated work on the hot path), but never at the cost of correctness or stability; latency and throughput of the main paths are measured and regressions are caught.
 
 ## R9. Many ChatGPT accounts scale horizontally
 
