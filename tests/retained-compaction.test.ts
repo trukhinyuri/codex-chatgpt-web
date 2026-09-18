@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
-import { ChatGptCompactionHandoffAccepted, chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptRateLimitCause, chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
 import {
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   cancelAllStructuredCompactions,
@@ -1563,4 +1563,85 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a rate-limited compaction handoff keeps the rate-limit code and retry delay for Codex", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-rate-limited-compact-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://rate-limited-compact-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const rateLimit = new ChatGptWebAdapterError(
+    "ChatGPT rate limit: too many requests. Please try again in 60s.",
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+  let browserStarts = 0;
+  // No retained source exists, so every attempt takes the fresh fallback and meets the rate limit.
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+    browserStarts += 1;
+    throw rateLimit;
+  };
+  const attempt = async (): Promise<AdapterEvent | undefined> => {
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(provider).runTurn!(
+      request(true),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    return events.at(-1);
+  };
+  try {
+    for (let retry = 1; retry <= 3; retry += 1) {
+      expect(await attempt()).toMatchObject({
+        type: "error",
+        message: "ChatGPT rate limit: too many requests. Please try again in 60s.",
+        status: 429,
+        errorType: "rate_limit_error",
+        code: "rate_limit_exceeded",
+        retryable: true,
+      });
+      expect(browserStarts).toBe(retry);
+    }
+    // The shared retry budget turns the fourth consecutive limit into a final answer, and a later
+    // replay is refused before it can open another browser turn.
+    for (const expectedStarts of [4, 4]) {
+      expect(await attempt()).toMatchObject({
+        type: "error",
+        message: "ChatGPT rate limit: too many requests. Please try again in 60s. ChatGPT remained unavailable after several attempts.",
+        code: "rate_limit_exceeded",
+        retryable: false,
+      });
+      expect(browserStarts).toBe(expectedStarts);
+    }
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rate-limit detection looks through wrapped compaction failures only", () => {
+  const rateLimit = new ChatGptWebAdapterError(
+    "ChatGPT rate limit: too many requests. Please try again in 60s.",
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+  expect(chatGptRateLimitCause(rateLimit)).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new Error("handoff failed", { cause: rateLimit }))).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new AggregateError([new Error("retire failed"), rateLimit], "both"))).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new ChatGptWebAdapterError("ChatGPT failed", {
+    status: 502, errorType: "server_error", code: "chatgpt_error", retryable: true,
+  }))).toBeUndefined();
+  expect(chatGptRateLimitCause(new Error("timeout"))).toBeUndefined();
+  expect(chatGptRateLimitCause("rate_limit_exceeded")).toBeUndefined();
 });
