@@ -1076,8 +1076,30 @@ export function buildResponseJSON(
   };
 }
 
+/** Bound an outgoing error message so a pathological upstream body cannot balloon the response. */
+const ERROR_MESSAGE_MAX_LENGTH = 4_000;
+
+/**
+ * `message` here can originate from an upstream/native error whose own text is attacker- or
+ * service-controlled (a dumped response body, for example), so it is never safe to place directly
+ * into a client-facing JSON payload. Strip the C0 control characters that could otherwise carry raw
+ * escape sequences into a terminal or log that renders this response, collapse the whitespace they
+ * leave behind (including real newlines) onto one line, and cap the length. This keeps every part
+ * of a real error message, just joined and bounded, instead of discarding everything past its first
+ * line the way a naive truncation would.
+ */
+function sanitizeErrorMessage(message: string): string {
+  const safe = typeof message === "string" ? message : String(message);
+  // C0 controls other than tab/newline/carriage-return; those three are collapsed as whitespace next.
+  const cleaned = safe.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").replace(/\s+/g, " ").trim();
+  if (cleaned.length === 0) return "An error occurred";
+  return cleaned.length > ERROR_MESSAGE_MAX_LENGTH
+    ? `${cleaned.slice(0, ERROR_MESSAGE_MAX_LENGTH)}…`
+    : cleaned;
+}
+
 export function formatErrorResponse(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ error: classifyError(status, type, message) }), {
+  return new Response(JSON.stringify({ error: classifyError(status, type, sanitizeErrorMessage(message)) }), {
     status, headers: { "Content-Type": "application/json" },
   });
 }

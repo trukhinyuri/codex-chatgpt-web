@@ -15,6 +15,14 @@ this project uses only its stdio transport. The lockfile explicitly resolves tha
 adapter to patched 2.0.12. `bun audit`, the MCP protocol test, and the compiled-binary smoke test are
 release gates; remove the override when the stable SDK itself moves to the patched major.
 
-Once the GitHub repository is public, use its private Security Advisory reporting flow. Until that
-is enabled, do not publish a proof of concept that exposes credentials or arbitrary local tool
-execution; contact the maintainer privately through the GitHub account listed by the repository.
+## Reporting a vulnerability
+
+Report vulnerabilities privately, never in a public issue, pull request or discussion:
+
+- GitHub private advisory: <https://github.com/trukhinyuri/codex-superpower/security/advisories/new>
+- E-mail: Yuri Trukhin, <yuri@trukhin.com>
+
+The e-mail address always works; use it if GitHub does not offer the advisory form. Describe the
+affected version (**Codex Superpower → About**) and the steps to reproduce, and leave out real
+credentials, cookies, tunnel IDs and prompts. Do not publish a proof of concept that exposes
+credentials or arbitrary local tool execution before a fix is released.

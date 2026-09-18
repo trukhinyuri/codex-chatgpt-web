@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, resolve, toNamespacedPath } from "node:path";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/compaction-continuation";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -35,7 +35,7 @@ const externalProfileXml = `<permission_profile type="external"><file_system typ
 function currentWire(
   options: {
     workspace?: string; sandbox?: string; includeIds?: boolean; environmentXml?: string;
-    threadId?: string; parentThreadId?: string;
+    threadId?: string; parentThreadId?: string; includeWorkspaces?: boolean;
   } = {},
 ): CodexParsedRequest {
   const workspace = options.workspace ?? root;
@@ -47,7 +47,7 @@ function currentWire(
     ...(options.parentThreadId ? { parent_thread_id: options.parentThreadId } : {}),
     turn_id: "turn_current",
     sandbox,
-    workspaces: { [workspace]: { has_changes: true } },
+    ...(options.includeWorkspaces === false ? {} : { workspaces: { [workspace]: { has_changes: true } } }),
   };
   return {
     modelId: "gpt-5.6-sol",
@@ -400,6 +400,172 @@ describe("trusted current Codex environment envelope", () => {
     expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
   });
 
+  // Codex sends canonical `workspaces` metadata only for Git repositories, so a skill invocation in
+  // a plain folder has no metadata roots to bind. Recovery must then rest on the same per-item
+  // native provenance that an ordinary turn already requires, and nothing weaker.
+  function nonGitSkillWire(
+    options: {
+      environmentTurnId?: string; skillTurnId?: string; stampTurns?: boolean;
+      trailingItems?: Array<Record<string, unknown>>; sandbox?: string;
+    } = {},
+  ): CodexParsedRequest {
+    const request = currentWire({ includeWorkspaces: false, ...(options.sandbox ? { sandbox: options.sandbox } : {}) });
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    if (options.stampTurns !== false) {
+      for (const item of body.input) {
+        item.internal_chat_message_metadata_passthrough = { turn_id: "turn_current" };
+      }
+      body.input[0]!.internal_chat_message_metadata_passthrough = { turn_id: options.environmentTurnId ?? "turn_current" };
+    }
+    body.input.push(...(options.trailingItems ?? [{
+      type: "message",
+      id: "msg_skill",
+      role: "user",
+      content: [{ type: "input_text", text: "<skill>\n<name>repository-review</name>\n<path>/skills/repository-review/SKILL.md</path>\nUse this skill.\n</skill>" }],
+      ...(options.stampTurns === false ? {} : {
+        internal_chat_message_metadata_passthrough: { turn_id: options.skillTurnId ?? "turn_current" },
+      }),
+    }]));
+    return request;
+  }
+
+  test("recovers a same-turn skill invocation in a folder without Git workspace metadata", () => {
+    expect(extractChatGptTurnEnvironment(nonGitSkillWire())).toMatchObject({
+      cwd: root,
+      roots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+  });
+
+  test("recovers a non-Git turn that invokes several skills", () => {
+    const skill = (name: string) => ({
+      type: "message",
+      id: `msg_skill_${name}`,
+      role: "user",
+      content: [{ type: "input_text", text: `<skill>\n<name>${name}</name>\nUse this skill.\n</skill>` }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+    });
+    expect(extractChatGptTurnEnvironment(nonGitSkillWire({ trailingItems: [skill("first"), skill("second")] })))
+      .toMatchObject({ cwd: root, roots: [root] });
+  });
+
+  test("does not recover a non-Git skill turn without per-item native turn provenance", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ stampTurns: false }))).toThrow("missing cwd");
+  });
+
+  test("does not reuse an environment stamped with an earlier turn for a non-Git skill turn", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ environmentTurnId: "turn_previous" })))
+      .toThrow("missing cwd");
+  });
+
+  test("does not skip a skill-shaped item that belongs to another turn", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ skillTurnId: "turn_previous" })))
+      .toThrow("missing cwd");
+  });
+
+  test("only same-turn skill injections may follow the instruction in non-Git recovery", () => {
+    const followUp = {
+      type: "message",
+      id: "msg_follow_up",
+      role: "user",
+      content: [{ type: "input_text", text: "Also check the tests" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+    };
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ trailingItems: [followUp] }))).toThrow("missing cwd");
+  });
+
+  test("non-Git skill recovery still requires the envelope to match canonical sandbox metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ sandbox: "read-only" }))).toThrow("missing cwd");
+  });
+
+  test("labelled non-Git skill recovery rejects an environment part a user could have typed", () => {
+    const request = nonGitSkillWire();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    body.input[0]!.internal_chat_message_metadata_passthrough = {
+      turn_id: "turn_current", content_item_kinds: ["app.context", "user.text"],
+    };
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+  });
+
+  // Codex binds `workspaces` metadata only to the Git repository that contains the cwd. A project
+  // with several folders therefore declares more roots than metadata can bind, and a skill turn may
+  // carry them only when Codex itself labelled the environment part and every skill item.
+  const siblingRoot = resolve(root, "..", "sibling-project");
+  function multiRootSkillWire(
+    options: {
+      environmentKinds?: string[]; skillKinds?: string[]; labels?: boolean; cwd?: string; sandbox?: string;
+      instruction?: string;
+    } = {},
+  ): CodexParsedRequest {
+    const environment = `<environment_context>
+  <cwd>${options.cwd ?? root}</cwd>
+  <filesystem><workspace_roots><root>${root}</root><root>${siblingRoot}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    const request = currentWire({ environmentXml: environment, ...(options.sandbox ? { sandbox: options.sandbox } : {}) });
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const labels = options.labels !== false;
+    const label = (kinds: string[]) => labels ? { content_item_kinds: kinds } : {};
+    body.input[0]!.internal_chat_message_metadata_passthrough = {
+      turn_id: "turn_current", ...label(options.environmentKinds ?? ["app.context", "environments.environment_context"]),
+    };
+    body.input[1]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_current", ...label(["user.text"]) };
+    if (options.instruction) {
+      (body.input[1]!.content as Array<{ text: string }>)[0]!.text = options.instruction;
+    }
+    body.input.push({
+      type: "message",
+      id: "msg_skill",
+      role: "user",
+      content: [{ type: "input_text", text: "<skill>\n<name>spider</name>\nUse this skill.\n</skill>" }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: "turn_current", ...label(options.skillKinds ?? ["skills.selected_skill_instructions"]),
+      },
+    });
+    return request;
+  }
+
+  test("recovers a skill turn in a multi-folder project whose extra roots Codex labelled", () => {
+    expect(extractChatGptTurnEnvironment(multiRootSkillWire())).toMatchObject({
+      cwd: root,
+      roots: [root, siblingRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+    // Codex Desktop prefixes the instruction with ambient in-app browser state; it is still user text.
+    const ambient = "\n<in-app-browser-context source=\"ambient-ui-state\">\nAmbient UI state.\n</in-app-browser-context>\n\nReview the blockers";
+    expect(extractChatGptTurnEnvironment(multiRootSkillWire({ instruction: ambient }))).toMatchObject({
+      cwd: root,
+      roots: [root, siblingRoot],
+    });
+  });
+
+  test("multi-folder skill recovery keeps the metadata-bound rule without Codex labels", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ labels: false }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery rejects an environment part a user could have typed", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ environmentKinds: ["app.context", "user.text"] })))
+      .toThrow("missing cwd");
+    // Labels must align with content parts; a shifted or truncated list authenticates nothing.
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ environmentKinds: ["environments.environment_context"] })))
+      .toThrow("missing cwd");
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({
+      environmentKinds: ["environments.environment_context", "app.context"],
+    }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery requires Codex's label on every skill item", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ skillKinds: ["user.text"] }))).toThrow("missing cwd");
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ skillKinds: [] }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery keeps the cwd inside canonical Git metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ cwd: siblingRoot }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery still requires the envelope to match canonical sandbox metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ sandbox: "read-only" }))).toThrow("missing cwd");
+  });
+
   test("accepts Codex auxiliary roots that are intentionally absent from git workspace metadata", () => {
     const auxiliary = resolve(root, "auxiliary-output");
     const projectEnvironment = `<environment_context>
@@ -616,6 +782,52 @@ describe("trusted Codex task environment continuity", () => {
     const invalidUpdate = currentWire({ sandbox: "read-only" });
     invalidUpdate.context.systemPrompt = [`<environment_context><cwd>${root}</cwd></environment_context>`];
     expect(() => store.resolve(invalidUpdate)).toThrow("missing cwd");
+  });
+
+  // Upstream PR #567 / issue #557: a follow-up turn whose only <environment_context> text belongs
+  // to an earlier turn (not the current one) used to fail closed even when the same thread already
+  // has verified cached authority — e.g. a bridge running on a different host than Codex, unable to
+  // read the native rollout to re-derive authority. History must not become authority on its own,
+  // and it must not unlock cross-thread inheritance either.
+  test("reuses same-thread authority when envelopes belong only to earlier turns", () => {
+    const followUp = (threadId: string, tagged: boolean): CodexParsedRequest => {
+      const request = currentWire({ threadId });
+      request._rawBody = {
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: "turn_next" }),
+        },
+        input: [
+          {
+            type: "message",
+            role: "user",
+            ...(tagged ? { internal_chat_message_metadata_passthrough: { turn_id: "turn_current" } } : {}),
+            content: [{ type: "input_text", text: environmentXml }],
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Now add type hints" }] },
+        ],
+      };
+      return request;
+    };
+    const cached = {
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    };
+
+    for (const tagged of [true, false]) {
+      const store = new ChatGptThreadEnvironmentStore();
+      // No cached authority yet for this thread: a historical-only envelope must still fail closed.
+      expect(() => store.resolve(followUp("thread_current", tagged))).toThrow("missing cwd");
+      store.resolve(currentWire());
+      expect(store.resolve(followUp("thread_current", tagged))).toEqual(cached);
+      // History never unlocks cross-thread inheritance: an unrelated thread with no cached
+      // authority of its own must still fail closed even though its envelope is also historical.
+      expect(() => store.resolve(followUp("thread_unrelated", tagged))).toThrow("missing cwd");
+    }
   });
 
   test("inherits authority only through canonical Codex thread-spawn lineage", () => {
@@ -1361,8 +1573,13 @@ describe("trusted Codex task environment continuity", () => {
     ].join("\n") + "\n");
     createRolloutState(join(codexHome, "state_5.sqlite"), outsidePath);
 
+    // The index pointing outside sessions/ is treated as an ordinary archival and triggers a
+    // fallback scan of sessions/ (see the dedicated archival-recovery test below), never a silent
+    // read of the outside path itself. With sessions/ empty here, that fallback also finds nothing,
+    // so the request still fails closed -- with a message that no longer leaks the internal
+    // path-escape mechanism.
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(environmentlessChild()))
-      .toThrow("Codex rollout path escapes the sessions directory");
+      .toThrow("Codex has no canonical rollout for the requested subagent thread");
 
     const validPath = join(
       codexHome,
@@ -1391,5 +1608,23 @@ describe("trusted Codex task environment continuity", () => {
     });
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(malformed))
       .toThrow("missing cwd");
+  });
+
+  test("rollout recovery treats an indexed archival as recoverable and scans sessions/ for the canonical file", () => {
+    // Codex can move a session's rollout into archived_sessions/ (or elsewhere outside sessions/)
+    // without updating the SQLite state index, which still points at the pre-archival path. That
+    // must not fail the turn or read the archived copy as authority: it must fall back to an
+    // unindexed scan of sessions/, exactly as when the index has no row at all.
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const archivedPath = join(codexHome, "archived_sessions", basename(rolloutPath));
+    mkdirSync(dirname(archivedPath), { recursive: true });
+    writeFileSync(archivedPath, readFileSync(rolloutPath));
+    const databasePath = join(codexHome, "state_5.sqlite");
+    createRolloutState(databasePath, archivedPath);
+    const database = new Database(databasePath);
+    database.exec("DELETE FROM thread_spawn_edges");
+    database.query("UPDATE threads SET agent_path = NULL WHERE id = ?").run(rolloutThreadId);
+    database.close();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
   });
 });

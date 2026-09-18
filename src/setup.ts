@@ -434,7 +434,7 @@ function prepareSetup(options: SetupOptions): PreparedSetup {
   if (!launcherOwned && process.platform !== "darwin") {
     throw new Error(
       "Terminal-only managed Chrome setup currently requires macOS. "
-      + "Use the Codex Web GPT launcher on Windows or Linux.",
+      + "Use the Codex Superpower launcher on Windows or Linux.",
     );
   }
   return { existing, config, launcherOwned };

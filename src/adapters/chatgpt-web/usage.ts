@@ -93,12 +93,10 @@ export function resolveBiggerContextMultipartParts(
 
   const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
     const messages = compiledChatGptWebMessages(compiled);
-    // Inert stages may use any explicitly available staging effort; execution keeps the chosen
-    // effort. These are the widest stage modes used by the browser's existing selector.
-    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
+    // Inert stages run in the selected mode as well, so every message must fit its limits.
+    const effort = mode.effort;
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
-      const effort = final ? mode.effort : stagingEffort;
       const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
       if (browserComposerCharLimit !== undefined && text.length > browserComposerCharLimit) return false;
       const budget = resolveChatGptWebMessageTokenBudget(

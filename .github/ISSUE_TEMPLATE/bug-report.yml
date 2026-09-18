@@ -1,5 +1,5 @@
 name: Bug report
-description: Report one reproducible Codex Web GPT failure with fresh privacy-safe diagnostics.
+description: Report one reproducible Codex Superpower failure with fresh privacy-safe diagnostics.
 title: "[Bug] "
 labels:
   - bug
@@ -7,15 +7,15 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please read [Troubleshooting](https://github.com/miuuyy/codex-chatgpt-web/blob/main/TROUBLESHOOTING.md), update to the latest release, and reproduce the failure once before filing.
+        Please read [Troubleshooting](https://github.com/trukhinyuri/codex-superpower/blob/main/TROUBLESHOOTING.md), update to the latest build of `main`, and reproduce the failure once before filing.
         Never upload cookies, browser storage, API keys, Tunnel IDs, raw launcher logs, or unredacted Codex prompts/tool output.
 
   - type: input
     id: launcher-version
     attributes:
-      label: Codex Web GPT version
-      description: Use the version shown by the launcher or release installer, not "latest".
-      placeholder: x.y.z
+      label: Codex Superpower version
+      description: Copy it from **Codex Superpower → About** in the menu bar, with the build in parentheses, not "latest".
+      placeholder: 5.0.8 (abc1234)
     validations:
       required: true
 
@@ -133,7 +133,7 @@ body:
     attributes:
       label: Preflight checklist
       options:
-        - label: I tested the latest release and, for catalog or turn failures, fully restarted Codex including its background process.
+        - label: I tested the latest build of `main` and, for catalog or turn failures, fully restarted Codex including its background process.
           required: true
         - label: I stated whether the failure also occurs in a fresh Codex task, or explained why that does not apply.
           required: true

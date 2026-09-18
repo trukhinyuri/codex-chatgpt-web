@@ -51,8 +51,21 @@ jobs:
       - name: Prepare owned AppImage toolset
         if: runner.os == 'Linux'
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
+      # The pinned Go toolchain, Go modules and the upstream Antigravity client that CLIProxyAPI's
+      # build fetches (scripts/cliproxyapi-build.cjs).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/codex-superpower-cache
+          key: cliproxyapi-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/cliproxyapi-build.json', 'cliproxyapi/go.sum') }}
       - run: bun run verify
+        env:
+          CODEX_SUPERPOWER_CACHE: ${{ runner.temp }}/codex-superpower-cache
       - run: bun run app:package
+        env:
+          CODEX_SUPERPOWER_CACHE: ${{ runner.temp }}/codex-superpower-cache
+          # electron-builder skips signing in pull requests; the build is ad-hoc signed and CI holds
+          # no signing secrets, so sign here too and let package.cjs verify the signature.
+          CSC_FOR_PULL_REQUEST: "true"
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
         run: |

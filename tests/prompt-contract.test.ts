@@ -44,6 +44,21 @@ test("history handle cleanup works on decoded text and preserves native call ide
   expect(cleaned.literal).toBe(context.literal);
 });
 
+test("history handle cleanup decodes a nested JSON-encoded tool result before scrubbing", () => {
+  // A replayed tool result can itself be a JSON-serialized blob carried as one string value (for
+  // example a previous tool call's own output). Its escaped newlines must not hide a handle from
+  // the scrub the way an un-decoded top-level escape already used to.
+  const nested = {
+    note: ["turn", "request", "binding"].map(kind => `first line\n${kind}_${"B".repeat(32)}\tlast line`),
+  };
+  const context = { role: "tool", content: JSON.stringify(nested) };
+  const cleaned = JSON.parse(withoutRetiredTurnHandles(JSON.stringify(context)));
+  const cleanedNested = JSON.parse(cleaned.content);
+  expect(cleanedNested.note).toEqual(
+    ["turn", "request", "binding"].map(kind => `first line\n[retired ${kind} handle]\tlast line`),
+  );
+});
+
 test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("max");
@@ -77,6 +92,11 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex\.control\.turn_complete/);
   expect(transportOnly).not.toMatch(/expired|invalid|revoked|blocked|safety|security layer|permission gate/i);
+  // A call ChatGPT stops before execution never reaches Codex; the model must not blame Codex or the
+  // target service for it, and the contract stays free of the vocabulary checked above.
+  expect(transportOnly).toContain("If ChatGPT stops a Codex Native call before it runs, that call never reached Codex: nothing ran and there is no result.");
+  expect(transportOnly).toContain("Do not attribute it to Codex approvals, auto-review, the sandbox, or the target service, and do not conclude that a service, account, or connector is unavailable without an actual result from it.");
+  expect(transportOnly).toContain("Do not repeat an identical call that ChatGPT stopped.");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
   expect(compiled.text).not.toContain("internally compacts this response");
 });
@@ -204,7 +224,8 @@ test("browser-only Medium directs users to the full harness", () => {
   const warning = chatGptReadOnlyContextWarning(request("medium"), capabilities);
   expect(warning).toStartWith("> **Local tools unavailable**");
   expect(warning).toContain("`MCP`");
-  expect(warning).toContain("`Codex Web GPT`");
+  expect(warning).toContain("`Codex Superpower`");
+  expect(warning).not.toContain("Codex Web GPT");
   expect(warning).toContain("`Full`");
   expect(warning).toContain("selected ChatGPT Web model");
   expect(warning).not.toContain("tool-capable ChatGPT Web model first");

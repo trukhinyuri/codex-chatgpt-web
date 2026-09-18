@@ -19,7 +19,8 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
-const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { getAutostart, openedAtLoginOnMac, setAutostart } = require("./autostart.cjs");
+const { createTurnOutcomeLog, updateQuietWindow } = require("./update-idle-policy.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -31,7 +32,26 @@ const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runti
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
-const { createUpdateController } = require("./update.cjs");
+const {
+  COMMIT: SOURCE_COMMIT,
+  SOURCE_CHECK_INTERVAL_MS,
+  STARTUP_HEALTH_FILE,
+  createSourceUpdateController,
+  readLoginShellPath,
+  sourceUpdateVersion,
+  writeStartupHealth,
+} = require("./source-update.cjs");
+const { createProblemReporter } = require("./problem-report.cjs");
+const { aboutPanelOptions } = require("./about.cjs");
+const { keepUserAgentProduct } = require("./user-agent.cjs");
+const { createCliProxyPanel, runCliProxy } = require("./cliproxy-cli.cjs");
+// Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
+const LAUNCHER_MANIFEST = require("../package.json");
+const UPDATE_IDLE_QUIET_MS = 30_000;
+// An unattended update waits longer: a short gap between Codex turns is not a finished task, and
+// while Codex runs a long tool for an OpenAI or CLIProxyAPI model no request reaches the bridge.
+const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 10 * 60_000;
+const UPDATE_IDLE_POLL_MS = 5_000;
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -52,14 +72,15 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
-const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
-const X_URL = "https://x.com/miu21590";
+const GITHUB_URL = "https://github.com/trukhinyuri/codex-superpower";
+const X_URL = "https://x.com/trukhinyuri";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+const TRAY_ICON_PATH = path.join(__dirname, "..", "assets", "trayTemplate.png");
 
 const launchEnvironment = {
   CODEX_CHATGPT_WEB_HOME: process.env.CODEX_CHATGPT_WEB_HOME,
@@ -68,6 +89,12 @@ const launchEnvironment = {
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
 app.setName(LAUNCHER_PROFILE.displayName);
+// The embedded ChatGPT browser keeps the User-Agent it sent before the rename; only the app's
+// product token differs, and Cloudflare would challenge a new one again (user-agent.cjs).
+app.userAgentFallback = keepUserAgentProduct(app.userAgentFallback, {
+  appName: LAUNCHER_PROFILE.displayName,
+  userAgentName: LAUNCHER_PROFILE.userAgentName,
+});
 if (process.platform === "win32") {
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");
 }
@@ -98,6 +125,19 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let automaticUpdateRunning = false;
+let manualUpdateRunning = false;
+// The prepared update waiting for an idle Codex; a click on the update button shortens its wait.
+let updateIdleWait = null;
+let updateInstallRequested = false;
+// Outcomes of recent ChatGPT Web turns: a build whose turns only fail has no work to protect.
+const turnOutcomes = createTurnOutcomeLog();
+let problemReporter = null;
+let launcherStateStore = null;
+
+function launcherLanguage() {
+  return launcherStateStore?.read().language || "en";
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -211,87 +251,160 @@ function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+  // nativeImage only decodes PNG/JPEG data, never SVG (Electron's documented image support), so an
+  // inline SVG data URL silently produces an empty image and a blank tray icon. Load the
+  // pre-rendered PNG asset instead; Electron/macOS pick up the sibling trayTemplate@2x.png
+  // automatically for Retina displays because it shares the same base filename.
+  const image = nativeImage.createFromPath(TRAY_ICON_PATH);
   image.setTemplateImage(true);
   return image;
 }
 
 const NATIVE_COPY = Object.freeze({
   "en": Object.freeze({
-    openLauncher: "Open Codex Web GPT",
+    openLauncher: "Open Codex Superpower",
     quit: "Quit",
     exportDiagnostics: "Export privacy-safe diagnostics",
     cancel: "Cancel",
     remove: "Remove",
-    removeTitle: "Remove Codex Web GPT",
+    removeTitle: "Remove Codex Superpower",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
     retry: "Retry",
-    startupTitle: "Codex Web GPT could not start",
+    startupTitle: "Codex Superpower could not start",
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
     startupCleanupFailed: "Startup cleanup failed",
     catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
+    reportTitle: "Report this problem?",
+    reportDetail: "Codex Superpower can open a public issue in github.com/trukhinyuri/codex-superpower through your GitHub CLI (gh) login, so the maintainer can fix it. The issue appears under your GitHub account. Exactly the text below is sent, nothing else: no prompts, session content, file paths or error text.",
+    reportAlways: "Always report automatically",
+    reportOnce: "Report this one",
+    reportNotNow: "Not now",
+    reportNever: "Never",
+    quitRunningTitle: "Codex is running {count} task(s) through Codex Superpower",
+    quitRunningDetail: "Quitting stops them now. Keep the launcher running to let them finish.",
+    quitKeepRunning: "Keep running",
+    quitAnyway: "Quit and stop them",
+    updateRunningTitle: "Codex is running {count} task(s)",
+    updateRunningDetail: "The update installs 30 seconds after they finish. Installing now stops them.",
+    updateWhenIdle: "Install when they finish",
+    updateNow: "Install now and stop them",
   }),
   "zh-CN": Object.freeze({
-    openLauncher: "打开 Codex Web GPT",
+    openLauncher: "打开 Codex Superpower",
     quit: "退出",
     exportDiagnostics: "导出隐私安全诊断",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Codex Superpower",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
     retry: "重试",
-    startupTitle: "Codex Web GPT 无法启动",
+    startupTitle: "Codex Superpower 无法启动",
     startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
     startupCleanupFailed: "启动清理失败",
     catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
+    reportTitle: "报告此问题？",
+    reportDetail: "Codex Superpower 可以通过你的 GitHub CLI（gh）登录在 github.com/trukhinyuri/codex-superpower 中创建公开 issue，方便维护者修复。该 issue 会显示在你的 GitHub 账户名下。只会发送下面的内容：不包含提示词、会话内容、文件路径或错误文本。",
+    reportAlways: "始终自动报告",
+    reportOnce: "报告这一次",
+    reportNotNow: "以后再说",
+    reportNever: "从不",
+    quitRunningTitle: "Codex 正通过 Codex Superpower 运行 {count} 个任务",
+    quitRunningDetail: "现在退出会停止这些任务。保持启动器运行可以让它们完成。",
+    quitKeepRunning: "保持运行",
+    quitAnyway: "退出并停止",
+    updateRunningTitle: "Codex 正在运行 {count} 个任务",
+    updateRunningDetail: "更新将在任务完成 30 秒后安装。立即安装会停止这些任务。",
+    updateWhenIdle: "任务完成后安装",
+    updateNow: "立即安装并停止任务",
   }),
   "zh-TW": Object.freeze({
-    openLauncher: "開啟 Codex Web GPT",
+    openLauncher: "開啟 Codex Superpower",
     quit: "結束",
     exportDiagnostics: "匯出隱私安全診斷",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Codex Superpower",
     removeMessage: "從 Codex 中移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入設定檔會保留。Codex 需要重新啟動一次。",
     retry: "重試",
-    startupTitle: "Codex Web GPT 無法啟動",
+    startupTitle: "Codex Superpower 無法啟動",
     startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
     startupCleanupFailed: "啟動清理失敗",
     catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
+    reportTitle: "回報此問題？",
+    reportDetail: "Codex Superpower 可以透過你的 GitHub CLI（gh）登入在 github.com/trukhinyuri/codex-superpower 建立公開 issue，方便維護者修正。該 issue 會顯示在你的 GitHub 帳號名下。只會傳送下方內容：不包含提示詞、工作階段內容、檔案路徑或錯誤文字。",
+    reportAlways: "一律自動回報",
+    reportOnce: "回報這一次",
+    reportNotNow: "稍後再說",
+    reportNever: "永不",
+    quitRunningTitle: "Codex 正透過 Codex Superpower 執行 {count} 個工作",
+    quitRunningDetail: "現在結束會停止這些工作。讓啟動器保持執行即可讓它們完成。",
+    quitKeepRunning: "保持執行",
+    quitAnyway: "結束並停止",
+    updateRunningTitle: "Codex 正在執行 {count} 個工作",
+    updateRunningDetail: "更新會在工作完成 30 秒後安裝。立即安裝會停止這些工作。",
+    updateWhenIdle: "工作完成後安裝",
+    updateNow: "立即安裝並停止工作",
   }),
   "ja": Object.freeze({
-    openLauncher: "Codex Web GPT を開く",
+    openLauncher: "Codex Superpower を開く",
     quit: "終了",
     exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
     cancel: "キャンセル",
     remove: "削除",
-    removeTitle: "Codex Web GPT を削除",
+    removeTitle: "Codex Superpower を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
     retry: "再試行",
-    startupTitle: "Codex Web GPT を起動できませんでした",
+    startupTitle: "Codex Superpower を起動できませんでした",
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
     startupCleanupFailed: "起動後のクリーンアップに失敗しました",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
+    reportTitle: "この問題を報告しますか？",
+    reportDetail: "Codex Superpower は GitHub CLI（gh）のログインを使って github.com/trukhinyuri/codex-superpower に公開 issue を作成し、メンテナーが修正できるようにします。issue はあなたの GitHub アカウント名で表示されます。送信されるのは下の内容だけで、プロンプト、セッション内容、ファイルパス、エラーテキストは含まれません。",
+    reportAlways: "常に自動で報告",
+    reportOnce: "今回だけ報告",
+    reportNotNow: "後で",
+    reportNever: "報告しない",
+    quitRunningTitle: "Codex は Codex Superpower 経由で {count} 件のタスクを実行中です",
+    quitRunningDetail: "今終了するとタスクは停止します。完了させるにはランチャーを起動したままにしてください。",
+    quitKeepRunning: "起動したままにする",
+    quitAnyway: "終了して停止",
+    updateRunningTitle: "Codex は {count} 件のタスクを実行中です",
+    updateRunningDetail: "アップデートはタスク完了の 30 秒後にインストールされます。今すぐインストールするとタスクは停止します。",
+    updateWhenIdle: "完了後にインストール",
+    updateNow: "今すぐインストールして停止",
   }),
   "ko": Object.freeze({
-    openLauncher: "Codex Web GPT 열기",
+    openLauncher: "Codex Superpower 열기",
     quit: "종료",
     exportDiagnostics: "개인정보가 보호된 진단 정보 내보내기",
     cancel: "취소",
     remove: "제거",
-    removeTitle: "Codex Web GPT 제거",
+    removeTitle: "Codex Superpower 제거",
     removeMessage: "Codex에서 ChatGPT Web 모델을 제거하고 이전 모델 경로를 복원할까요?",
     removeDetail: "런처의 ChatGPT 로그인 프로필은 유지됩니다. Codex를 한 번 다시 시작해야 합니다.",
     retry: "다시 시도",
-    startupTitle: "Codex Web GPT를 시작할 수 없습니다",
+    startupTitle: "Codex Superpower를 시작할 수 없습니다",
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
+    reportTitle: "이 문제를 보고할까요?",
+    reportDetail: "Codex Superpower는 GitHub CLI(gh) 로그인으로 github.com/trukhinyuri/codex-superpower에 공개 이슈를 만들어 관리자가 문제를 고칠 수 있게 합니다. 이슈는 사용자의 GitHub 계정 이름으로 표시됩니다. 아래 내용만 전송되며 프롬프트, 세션 내용, 파일 경로, 오류 텍스트는 포함되지 않습니다.",
+    reportAlways: "항상 자동으로 보고",
+    reportOnce: "이번만 보고",
+    reportNotNow: "나중에",
+    reportNever: "보고하지 않음",
+    quitRunningTitle: "Codex가 Codex Superpower로 작업 {count}개를 실행 중입니다",
+    quitRunningDetail: "지금 종료하면 작업이 중지됩니다. 작업을 끝내려면 런처를 계속 실행하세요.",
+    quitKeepRunning: "계속 실행",
+    quitAnyway: "종료하고 중지",
+    updateRunningTitle: "Codex가 작업 {count}개를 실행 중입니다",
+    updateRunningDetail: "업데이트는 작업이 끝나고 30초 뒤에 설치됩니다. 지금 설치하면 작업이 중지됩니다.",
+    updateWhenIdle: "작업이 끝나면 설치",
+    updateNow: "지금 설치하고 중지",
   }),
 });
 
@@ -305,7 +418,7 @@ function updateTrayMenu(language) {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: copy.openLauncher, click: () => showMainWindow() },
     { type: "separator" },
-    { label: copy.quit, click: () => { void requestQuit(); } },
+    { label: copy.quit, click: () => { void quitAfterConfirmation(); } },
   ]));
 }
 
@@ -517,7 +630,27 @@ function registerIpc({ logger, stateStore }) {
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
+    problemReports: problemReporter?.consent() ?? "unavailable",
   }));
+  const cliproxy = createCliProxyPanel({
+    invocationFor: args => runtimeSupervisor.runtimeCommand(args),
+    env: { ...process.env, CODEX_CHATGPT_WEB_HOME: CORE_HOME },
+    openExternal: url => shell.openExternal(url),
+  });
+  handle("launcher:cliproxy", (_event, action, payload) => {
+    if (action === "status") return cliproxy.status();
+    if (action === "connect") return cliproxy.connect(payload ?? {});
+    if (action === "disconnect") return cliproxy.disconnect();
+    if (action === "management-key") return cliproxy.setManagementKey(payload);
+    if (action === "accounts") return cliproxy.accounts();
+    if (action === "login") return cliproxy.login(payload);
+    if (action === "remove") return cliproxy.remove(payload);
+    throw new Error("Unknown CLIProxyAPI action");
+  });
+  handle("launcher:problem-reports", (_event, enabled) => {
+    if (!problemReporter) throw new Error("Problem reports are available in installed builds of Codex Superpower");
+    return problemReporter.setConsent(enabled === true ? "auto" : "never");
+  });
 
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });
@@ -903,9 +1036,11 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "automaticUpdates";
     if (!ordinary) throw new Error("Unknown preference");
-    return stateStore.update({ [key]: value === true });
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "automaticUpdates" && value === true) void installAutomaticUpdate({ logger, stateStore });
+    return state;
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -914,7 +1049,7 @@ function registerIpc({ logger, stateStore }) {
     const copy = nativeCopyFor(stateStore.read().language);
     const result = await dialog.showSaveDialog(mainWindow, {
       title: copy.exportDiagnostics,
-      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
+      defaultPath: path.join(app.getPath("documents"), `codex-superpower-diagnostics-${date}.jsonl`),
       filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
     });
     if (result.canceled || !result.filePath) return null;
@@ -927,11 +1062,21 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    const launch = await updateController.beginInstall();
-    const result = await requestQuit();
-    if (!result.ok) {
-      updateController.cancelInstall(launch);
-      throw new Error(result.message);
+    // An update is already building or waiting for an idle window: install that one sooner.
+    if (automaticUpdateRunning || manualUpdateRunning) return installPendingUpdateSooner();
+    // Build, test and stage while Codex keeps working; replace the app only in an idle window.
+    manualUpdateRunning = true;
+    updateInstallRequested = true;
+    try {
+      const prepared = await updateController.beginInstall();
+      try {
+        await quitWhenIdleForUpdate(prepared, logger);
+      } catch (error) {
+        updateController.cancelInstall(prepared);
+        throw error;
+      }
+    } finally {
+      manualUpdateRunning = false;
     }
     return true;
   });
@@ -948,7 +1093,143 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+function activeTurnCount(health) {
+  return (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0);
+}
+
+async function showNativeDialog(options) {
+  return mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+}
+
+async function runtimeActivity() {
+  try {
+    const config = runtimeSupervisor?.readConfig();
+    if (!config) return null;
+    return await runtimeSupervisor.proxyHealthPayload(config);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait until Codex has had no active HTTP or browser turn for a quiet period, then let the prepared
+ * update replace the app. The runtime drains without cancelling work; if a turn arrives during the
+ * drain, the worker is stopped and the wait continues. Nothing is interrupted to install an update
+ * unless the user chose "install now" in the dialog of installPendingUpdateSooner.
+ */
+async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUIET_MS) {
+  const wait = { quietMs: updateInstallRequested ? Math.min(quietMs, UPDATE_IDLE_QUIET_MS) : quietMs, now: false };
+  updateIdleWait = wait;
+  const waitingSince = Date.now();
+  let idleSince = null;
+  let windowReason = null;
+  try {
+    for (;;) {
+      const running = activeTurnCount(await runtimeActivity());
+      updateController.noteInstallProgress({ activeTurns: running, requested: wait.quietMs <= UPDATE_IDLE_QUIET_MS });
+      idleSince = running === 0 ? (idleSince ?? Date.now()) : null;
+      const window = updateQuietWindow({ baseQuietMs: wait.quietMs, outcomes: turnOutcomes, waitingSince, now: Date.now() });
+      if (window.reason !== windowReason) {
+        windowReason = window.reason;
+        logger?.info("launcher.update_quiet_window", { reason: window.reason, quietMs: window.quietMs });
+      }
+      if (wait.now || (idleSince !== null && Date.now() - idleSince >= window.quietMs)) {
+        const launch = await updateController.launchInstall(prepared);
+        const result = await requestQuit({ preserveActiveTurns: !wait.now, quiet: true });
+        if (result.ok) return;
+        updateController.abortLaunch(launch);
+        logger?.info("launcher.update_waiting_for_idle", { reason: result.message });
+        wait.now = false;
+        idleSince = null;
+      }
+      await new Promise(resolve => setTimeout(resolve, UPDATE_IDLE_POLL_MS));
+    }
+  } finally {
+    if (updateIdleWait === wait) updateIdleWait = null;
+    updateInstallRequested = false;
+  }
+}
+
+/**
+ * The update button while an update builds or waits for an idle Codex: install it 30 seconds after
+ * Codex's tasks finish instead of after the unattended ten-minute window. With tasks running, a
+ * dialog says so and offers to install now, which stops them; keeping them is the default.
+ */
+async function installPendingUpdateSooner() {
+  updateInstallRequested = true;
+  updateController.noteInstallProgress({ requested: true });
+  const wait = updateIdleWait;
+  // Still building: the wait that follows uses the short window.
+  if (!wait) return true;
+  wait.quietMs = Math.min(wait.quietMs, UPDATE_IDLE_QUIET_MS);
+  const running = activeTurnCount(await runtimeActivity());
+  updateController.noteInstallProgress({ activeTurns: running, requested: true });
+  if (running === 0) return true;
+  const copy = nativeCopyFor(launcherLanguage());
+  const answer = await showNativeDialog({
+    type: "question",
+    message: copy.updateRunningTitle.replace("{count}", String(running)),
+    detail: copy.updateRunningDetail,
+    buttons: [copy.updateWhenIdle, copy.updateNow],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (answer.response === 1 && updateIdleWait === wait) wait.now = true;
+  return true;
+}
+
+/**
+ * Unattended updates: a fast-forward of main whose CI passed (or that has no CI) and that never failed
+ * here is built, fully tested and staged in the background, then installed after Codex has been idle
+ * for ten minutes. Anything else waits for the user's click.
+ */
+async function installAutomaticUpdate({ logger, stateStore }) {
+  if (automaticUpdateRunning || !updateController) return;
+  if (stateStore.read().automaticUpdates !== true || !updateController.automaticCandidate()) return;
+  automaticUpdateRunning = true;
+  try {
+    const prepared = await updateController.beginInstall({ automatic: true });
+    try {
+      await quitWhenIdleForUpdate(prepared, logger, AUTOMATIC_UPDATE_IDLE_QUIET_MS);
+    } catch (error) {
+      updateController.cancelInstall(prepared);
+      throw error;
+    }
+  } catch (error) {
+    logger?.warn("launcher.automatic_update_skipped", { message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    automaticUpdateRunning = false;
+  }
+}
+
+/**
+ * A quit from the menu, the tray, macOS (Quit & Reopen after a privacy change) or an agent clicking
+ * around asks first while Codex has turns in flight: quitting cancels them. SIGINT/SIGTERM and the
+ * installer, which waits for an idle Codex, quit without asking.
+ */
+async function quitAfterConfirmation() {
+  if (exitCommitted || shutdownInProgress) return;
+  const running = activeTurnCount(await runtimeActivity());
+  if (running > 0) {
+    const copy = nativeCopyFor(launcherLanguage());
+    const answer = await showNativeDialog({
+      type: "warning",
+      message: copy.quitRunningTitle.replace("{count}", String(running)),
+      detail: copy.quitRunningDetail,
+      buttons: [copy.quitKeepRunning, copy.quitAnyway],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (answer.response !== 1) return;
+  }
+  await requestQuit();
+}
+
+async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -956,9 +1237,11 @@ async function requestQuit() {
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Superpower`);
     }
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    // An update drains the runtime and fails instead of cancelling turns that started meanwhile.
+    if (preserveActiveTurns) await runtimeSupervisor?.shutdown();
+    else await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
@@ -970,12 +1253,97 @@ async function requestQuit() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     quitting = false;
-    showMainWindow();
-    publishOperation({ name: "launcher-quit", status: "failed", message });
+    if (!quiet) {
+      showMainWindow();
+      publishOperation({ name: "launcher-quit", status: "failed", message });
+    }
     return { ok: false, message };
   } finally {
     shutdownInProgress = false;
   }
+}
+
+/**
+ * After an update the worker waits for this build to report a healthy start and otherwise restores
+ * the previous app. Only packaged builds of this fork report; the reason is a fixed code, never text
+ * from ChatGPT, Codex or the user.
+ */
+function reportLauncherStartup(status, reason = null) {
+  if (!app.isPackaged || IS_DEV_PROFILE || !SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) return;
+  writeStartupHealth(path.join(app.getPath("userData"), STARTUP_HEALTH_FILE), {
+    commit: LAUNCHER_MANIFEST.sourceCommit,
+    status,
+    reason,
+  });
+}
+
+/**
+ * Bring a CLIProxyAPI service this app manages to the proxy binary it carries. Runs before the bridge
+ * starts, so no Codex turn goes through the proxy while it restarts. A managed proxy that does not
+ * come back makes this start unhealthy, and the update worker restores the previous app (and with
+ * it the previous proxy binary).
+ */
+async function syncCliProxyService(logger) {
+  if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "darwin") return { status: "off" };
+  // Only a proxy this app manages (`cliproxy service adopt`) has a record; without one there is
+  // nothing to sync, and a start must not depend on running the runtime for it.
+  if (!fs.existsSync(path.join(CORE_HOME, "cliproxyapi", "service.json"))) return { status: "off" };
+  try {
+    const result = await runCliProxy(
+      runtimeSupervisor.runtimeCommand(["cliproxy", "service", "sync", "--bundle", path.join(process.resourcesPath, "cliproxyapi")]),
+      { env: { ...process.env, CODEX_CHATGPT_WEB_HOME: CORE_HOME }, timeoutMs: 90_000 },
+    );
+    if (result?.status !== "off") {
+      logger.info("cliproxy.service_synced", { status: result?.status, binaryChanged: result?.binaryChanged === true, proxyVersion: result?.proxyVersion ?? null });
+    }
+    return result ?? { status: "off" };
+  } catch (error) {
+    logger.warn("cliproxy.service_sync_failed", { message: error instanceof Error ? error.message : String(error) });
+    return { status: "unhealthy" };
+  }
+}
+
+/** The version string reports use: the app version and this build's commit. */
+function reportedVersion() {
+  const commit = String(LAUNCHER_MANIFEST.sourceCommit || "");
+  return SOURCE_COMMIT.test(commit) ? sourceUpdateVersion(app.getVersion(), commit) : app.getVersion();
+}
+
+async function findGhExecutable() {
+  const loginPath = await readLoginShellPath();
+  for (const directory of [...loginPath.split(path.delimiter), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) {
+    const candidate = directory ? path.join(directory, "gh") : "";
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** One-time consent for problem reports; the dialog shows exactly what would be sent. */
+async function askProblemReportConsent(report, stateStore) {
+  const copy = nativeCopyFor(stateStore.read().language);
+  const options = {
+    type: "question",
+    title: copy.reportTitle,
+    message: report.title,
+    detail: `${copy.reportDetail}\n\n${report.body}`,
+    buttons: [copy.reportAlways, copy.reportOnce, copy.reportNotNow, copy.reportNever],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  return ["auto", "once", "skip", "never"][result.response] ?? "skip";
+}
+
+function reportProblem(problem) {
+  if (!problemReporter) return;
+  void problemReporter.report({
+    version: reportedVersion(),
+    commit: LAUNCHER_MANIFEST.sourceCommit,
+    ...problem,
+  });
 }
 
 async function start() {
@@ -984,6 +1352,7 @@ async function start() {
     app.quit();
     return;
   }
+  reportLauncherStartup("starting");
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => showMainWindow());
 
@@ -1015,6 +1384,7 @@ async function start() {
   await app.whenReady();
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  launcherStateStore = stateStore;
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -1044,7 +1414,30 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  // The About panel names this fork, its author and the original project; without these options
+  // macOS builds it from Info.plist alone.
+  try {
+    app.setAboutPanelOptions(aboutPanelOptions({
+      displayName: LAUNCHER_PROFILE.displayName,
+      version: app.getVersion(),
+      commit: LAUNCHER_MANIFEST.sourceCommit,
+    }));
+  } catch (error) {
+    logger.warn("launcher.about_panel_unavailable", { message: error instanceof Error ? error.message : String(error) });
+  }
+  // Packaged builds of this fork report problems as GitHub issues, with the user's consent.
+  if (app.isPackaged && !IS_DEV_PROFILE && SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) {
+    problemReporter = createProblemReporter({
+      userDataDirectory: app.getPath("userData"),
+      findGh: findGhExecutable,
+      askConsent: report => askProblemReportConsent(report, stateStore),
+      logger,
+    });
+  }
+  // On macOS, a real login-item launch never carries "--hidden" in argv (setLoginItemSettings's
+  // `args` is Windows-only); openedAtLoginOnMac reads the OS's own record of that launch instead.
+  const startHidden = (process.argv.includes("--hidden") || openedAtLoginOnMac(app))
+    && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
     logger,
@@ -1053,6 +1446,7 @@ async function start() {
     startHidden,
   });
   browserControl = await new BrowserControlServer({
+    onTurnEnded: status => turnOutcomes.record(status),
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
@@ -1106,8 +1500,12 @@ async function start() {
   });
   await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
-  updateController = createUpdateController({
+  // This fork updates from its own GitHub main branch after the full test suite passes; it never
+  // offers upstream release packages, which do not contain the fork's changes.
+  updateController = createSourceUpdateController({
     currentVersion: app.getVersion(),
+    currentCommit: LAUNCHER_MANIFEST.sourceCommit,
+    currentSourceState: LAUNCHER_MANIFEST.sourceState,
     platform: process.platform,
     arch: process.arch,
     packaged: app.isPackaged && !IS_DEV_PROFILE,
@@ -1116,7 +1514,9 @@ async function start() {
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
       : null,
     logsDirectory: app.getPath("logs"),
+    userDataDirectory: app.getPath("userData"),
     publish: (state) => send("launcher:update-state", state),
+    onProblem: reportProblem,
     logger,
   });
   registerIpc({ logger, stateStore });
@@ -1132,7 +1532,12 @@ async function start() {
     });
   }
   await loadRenderer(mainWindow);
-  if (!launcherSmokeTest) void updateController.checkOnce();
+  if (!launcherSmokeTest) {
+    const checkForUpdates = () => updateController.checkOnce()
+      .then(() => installAutomaticUpdate({ logger, stateStore }));
+    void checkForUpdates();
+    setInterval(() => { void checkForUpdates(); }, SOURCE_CHECK_INTERVAL_MS).unref?.();
+  }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {
@@ -1248,11 +1653,23 @@ async function start() {
         send("launcher:state-changed", state);
       }
     }
+    const cliproxy = await syncCliProxyService(logger);
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return runtime;
+    if (runtime.status !== "ready") return { ...runtime, cliproxy: cliproxy.status };
     const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    return { ...runtime, cliproxy: cliproxy.status, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
+    // "not-configured" is a healthy start: a fresh install has nothing to run yet.
+    const runtimeHealthy = runtime.status === "ready" || runtime.status === "not-configured";
+    const proxyHealthy = runtime.cliproxy !== "unhealthy";
+    reportLauncherStartup(
+      runtimeHealthy && proxyHealthy ? "healthy" : "unhealthy",
+      proxyHealthy ? `runtime-${runtime.status}` : "cliproxy-unhealthy",
+    );
+    if (!proxyHealthy) reportProblem({ kind: "runtime-start-failed", code: "cliproxy-unhealthy", stage: "startup" });
+    if (runtime.status !== "ready" && runtime.status !== "not-configured") {
+      reportProblem({ kind: "runtime-start-failed", code: `runtime-${runtime.status}`, stage: "startup" });
+    }
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
@@ -1300,13 +1717,22 @@ async function start() {
       }
       return;
     }
+    // "external" also covers a healthy codex-chatgpt-web daemon of this same release already
+    // serving the configured port (runtime-supervisor.cjs sets `healthy: true` only for that exact
+    // service/mode/version-checked case). Tearing down the Codex route as a defensive fail-safe
+    // there would silently break a model picker that is actually working; treat it as still routed
+    // instead of as a runtime failure.
+    if (runtime.status === "external" && runtime.healthy === true) {
+      logger.info("runtime.external_healthy_preserved", { detail: runtime.detail });
+      return;
+    }
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
+          ? "Another process owns the configured Codex Superpower runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -1320,6 +1746,8 @@ async function start() {
       });
     }
   }).catch(async (error) => {
+    reportLauncherStartup("unhealthy", "runtime-start-error");
+    reportProblem({ kind: "runtime-start-failed", code: "runtime-start-error", stage: "startup" });
     const primary = error instanceof Error ? error.message : String(error);
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const message = routeRecovery.error
@@ -1336,7 +1764,7 @@ async function start() {
   app.on("before-quit", (event) => {
     if (exitCommitted) return;
     event.preventDefault();
-    void requestQuit();
+    void quitAfterConfirmation();
   });
   process.once("SIGINT", () => { void requestQuit(); });
   process.once("SIGTERM", () => { void requestQuit(); });
@@ -1344,6 +1772,7 @@ async function start() {
 
 void start().catch(async (error) => {
   startupFailed = true;
+  reportLauncherStartup("unhealthy", "launcher-start-error");
   const message = error instanceof Error ? error.message : String(error);
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);

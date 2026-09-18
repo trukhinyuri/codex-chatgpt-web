@@ -116,6 +116,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
   const source = electronMain.slice(electronMain.indexOf("function showMainWindow()"), electronMain.indexOf("async function openWebUrl"))
     + electronMain.slice(electronMain.indexOf("void start().catch("));
   const events = [];
+  const reported = [];
   let visible = false;
   let answer;
   const dialogOpened = new Promise(resolve => {
@@ -126,6 +127,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
   const sandbox = {
     mainWindow: window, mainWindowReadyToShow: false, mainWindowShowRequested: false,
     startupFailed: false, quitting: false,
+    reportLauncherStartup: (status, reason) => reported.push([status, reason]),
     browserHost: { destroy: () => events.push("destroy") },
     browserControl: { close: async () => events.push("control closed") },
     start: async () => { throw new Error("Browser idle document did not commit within 10000ms"); },
@@ -155,6 +157,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
   await dialogOpened;
   assert.equal(visible, true, "the failed startup must expose its error owner without renderer readiness");
   assert.deepEqual(events.slice(0, 2), ["destroy", "control closed"]);
+  assert.deepEqual(reported, [["unhealthy", "launcher-start-error"]], "the update worker learns that this build failed to start");
   visible = false;
   sandbox.showMainWindow();
   assert.equal(visible, true, "a second launch must restore the existing startup error window");

@@ -60,3 +60,26 @@ test("DEV launcher ignores generic production path overrides", () => {
   assert.equal(development.codexHome, path.join(homeDir, "isolated-dev", "codex-home"));
   assert.equal(development.userData, path.join(homeDir, "isolated-dev", "launcher"));
 });
+
+test("the visible name is Codex Superpower while the durable identities keep their Codex Web GPT names", () => {
+  const homeDir = path.resolve("/Users/tester");
+  const appData = path.join(homeDir, "Library", "Application Support");
+  const production = resolveLauncherProfile({ argv: ["electron", "."], env: {}, homeDir, appData });
+  const development = resolveLauncherProfile({ argv: ["electron", ".", "--dev-profile"], env: {}, homeDir, appData });
+
+  assert.equal(production.displayName, "Codex Superpower");
+  assert.equal(development.displayName, "Codex Superpower DEV");
+  // The sign-in cookies, update state, rollback copies and the runtime home stay where they were:
+  // none of them is derived from the name the app shows.
+  assert.equal(production.userData, path.join(appData, "Codex Web GPT"));
+  assert.equal(production.browserPartition, "persist:codex-web-gpt-chatgpt");
+  assert.equal(production.coreHome, path.join(homeDir, ".codex-chatgpt-web"));
+  assert.equal(production.codexHome, path.join(homeDir, ".codex"));
+  assert.equal(development.browserPartition, "persist:codex-web-gpt-dev-chatgpt");
+  assert.equal(development.coreHome, path.join(homeDir, ".codex-chatgpt-web-dev"));
+  for (const profile of [production, development]) {
+    for (const key of ["userData", "browserPartition", "coreHome", "codexHome"]) {
+      assert.doesNotMatch(profile[key], /Superpower/i, `${profile.kind}.${key}`);
+    }
+  }
+});

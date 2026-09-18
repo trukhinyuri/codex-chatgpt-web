@@ -127,13 +127,22 @@ function indexedRollout(
   }
 }
 
+/**
+ * Thrown only when an otherwise well-formed, real, non-symlinked rollout file simply lives
+ * outside `sessions/` — the shape Codex leaves behind when it archives a session (for example
+ * into `archived_sessions/`) after the SQLite state index already recorded its original path.
+ * Every other validateRolloutPath failure (non-absolute, symlink, not-a-regular-file, wrong-thread
+ * filename) throws a plain Error and must keep failing closed with no recovery attempted.
+ */
+class CodexRolloutArchivedError extends Error {}
+
 function validateRolloutPath(codexHome: string, candidate: string, threadId: string): string {
   if (!isAbsolute(candidate)) throw new Error("Codex state returned a non-absolute rollout path");
   const sessionsRoot = realpathSync(join(codexHome, "sessions"));
   if (lstatSync(candidate).isSymbolicLink()) throw new Error("Codex rollout path is a symbolic link");
   const rolloutPath = realpathSync(candidate);
   if (!lstatSync(rolloutPath).isFile()) throw new Error("Codex rollout path is not a regular file");
-  if (!contains(sessionsRoot, rolloutPath)) throw new Error("Codex rollout path escapes the sessions directory");
+  if (!contains(sessionsRoot, rolloutPath)) throw new CodexRolloutArchivedError("Codex rollout path escapes the sessions directory");
   if (!canonicalRolloutName(basename(rolloutPath), threadId)) {
     throw new Error("Codex rollout filename does not belong to the requested thread");
   }
@@ -622,9 +631,25 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
   }
 
   const indexed = indexedRollout(configuredSqliteHome(codexHome, options.sqliteHome), lineage);
-  const candidates = indexed.kind === "found"
+  // The index can point at a rollout Codex has since archived (moved out of `sessions/`) without
+  // updating the index. That is an ordinary archival, not a security-boundary violation: recover
+  // it exactly like an unindexed lookup, by scanning `sessions/` for the canonical file instead.
+  // `usedIndexedRollout` then tracks which case we are actually in, since it decides below whether
+  // a turn-id mismatch is fatal (a single indexed candidate has no other candidate to try) or
+  // merely disqualifies one of several scanned candidates.
+  let usedIndexedRollout = indexed.kind === "found";
+  let candidates = indexed.kind === "found"
     ? [indexed.path]
     : scanCanonicalRollouts(codexHome, lineage.threadId);
+  if (usedIndexedRollout) {
+    try {
+      validateRolloutPath(codexHome, candidates[0]!, lineage.threadId);
+    } catch (error) {
+      if (!(error instanceof CodexRolloutArchivedError)) throw error;
+      usedIndexedRollout = false;
+      candidates = scanCanonicalRollouts(codexHome, lineage.threadId);
+    }
+  }
   if (candidates.length === 0) {
     if (!("parentThreadId" in lineage)) return undefined;
     throw new Error("Codex has no canonical rollout for the requested subagent thread");
@@ -641,7 +666,7 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
       const latest = latestTurnContext(fd, size);
       if (!latest) throw new Error("Codex rollout has no complete turn context");
       if (latest.turn_id !== turnId && (compactionSourceTurnId === undefined || latest.turn_id !== compactionSourceTurnId)) {
-        if (indexed.kind === "found") {
+        if (usedIndexedRollout) {
           throw new Error("Latest Codex rollout turn context does not belong to the requested turn");
         }
         continue;

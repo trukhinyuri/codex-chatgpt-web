@@ -1,202 +1,203 @@
-<p align="center">
-  <img src="assets/readme/hero.svg" width="960" alt="Switch to web models. Stay in Codex. Your ChatGPT plan. Your workflow. Maximum capabilities.">
-</p>
+# Codex Superpower
 
-<p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v5.0.8/codex-web-gpt-5.0.8-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v5.0.8/codex-web-gpt-5.0.8-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v5.0.8/codex-web-gpt-5.0.8-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
-</p>
+One model list in [Codex](https://developers.openai.com/codex) (app and CLI) for everything you pay for: the ChatGPT models on your ChatGPT plan, from Instant to Pro, and, through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), Claude, Gemini, GLM and other subscription models. Codex keeps its own sign-in, features, files, tools, approvals and tasks; a local bridge in the **Codex Superpower** desktop app sends each turn to ChatGPT web, to OpenAI, or to CLIProxyAPI.
 
-<p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v5.0.8/codex-web-gpt-5.0.8-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
-</p>
+Codex Superpower started as a fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) (formerly `trukhinyuri/codex-chatgpt-web`). It fixes failures seen in daily use, installs from source on macOS, and keeps itself up to date from this repository's `main` branch: every update must pass the full test suite and start cleanly, or the previous build stays in place.
 
-<p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
-</p>
+[Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [CLIProxyAPI models](#models-from-cliproxyapi) · [What this fork changes](#what-this-fork-changes) · [Updates](#updates-and-rollback) · [Problem reports](#problem-reports) · [Troubleshooting](#troubleshooting)
 
-<p align="center">
-  <img src="assets/demo.gif" width="960" alt="A live ChatGPT Web turn using the native Codex harness">
-</p>
+## Quick start
 
-<p align="center">
-  <a href="#get-started">Get started</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases">What’s new</a> · <a href="docs/architecture.md">Architecture</a> · <a href="TROUBLESHOOTING.md">Troubleshooting</a>
-</p>
-
-Use the ChatGPT Web models available on your account, including Pro, from Codex’s native model picker—with ChatGPT Web’s separate usage limits, without spending your Work or Codex quota. Keep the same interface, tasks, images, and streaming.
-
-Full harness mode connects ChatGPT to the current task’s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
-
-<div id="get-started"><a id="quick-start"></a></div>
-
-## Get started
-
-**Available models:** Free/Go → **Luna / Think**. Accounts with reasoning controls → **Instant–High**, plus **Extra High** and **Pro** when available. The launcher detects what your account can use.
-
-1. **Install the launcher** using the download for your system above.
-2. **Sign in to ChatGPT** in the embedded browser and run the browser smoke test.
-3. **Install models**, restart Codex once, and choose a **ChatGPT Web — …** model.
-4. **For coding with tools**, open **MCP** in the launcher and complete the Full harness setup below.
-
-The app includes its browser and runtime. No separate Chrome, Node, or Bun installation is needed.
-
-<details>
-<summary><strong>Terminal install, updates & repair</strong></summary>
-
-Quit the launcher before updating. These installers select the platform and architecture, verify the published checksums, and preserve your ChatGPT profile and launcher settings.
-
-**macOS / Linux**
+On macOS (Apple silicon or Intel) with Git, Node.js and Bun 1.4.0:
 
 ```bash
-curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install-launcher.sh | sh
+curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | bash
 ```
 
-**Windows PowerShell**
+The script clones this repository into `~/.codex-chatgpt-web-source`, runs `bun run verify` (all tests), packages the app, installs **Codex Superpower** into `/Applications`, and ends with `RESULT installed commit=…`. It tells you exactly what to install if a prerequisite is missing.
 
-```powershell
-irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install-launcher.ps1 | iex
+The app shows the name Codex Superpower. Its bundle is still `/Applications/Codex Web GPT.app`, its data folder `~/Library/Application Support/Codex Web GPT` and its runtime home `~/.codex-chatgpt-web`, so the paths below keep the old name; your ChatGPT sign-in and settings carry over unchanged.
+
+Then, in the launcher:
+
+1. Sign in to ChatGPT in the embedded browser and run **Run browser smoke test**.
+2. Press **Install models**, restart Codex once, and choose a **ChatGPT Web — …** model (Instant, Medium, High, Extra High or Pro, as your plan allows).
+3. For file, terminal and patch tools, open **MCP**: create a Tunnel and an API key in the OpenAI platform, press **Connect harness**, enable ChatGPT Developer Mode, add a Tunnel connector named exactly **Codex Native2** (Authentication: None, Allow all actions), then press **Verify runtime**.
+4. For long tasks, turn on **Settings → Bigger Context** and restart Codex. The Pro window grows to 336,579 tokens, with compaction at 285,000.
+5. Optional: [add the models of a local CLIProxyAPI](#models-from-cliproxyapi) (Claude, Gemini, GLM and others) to the same model list.
+
+## Set up with an AI agent
+
+Paste one of these prompts into Codex or Claude Code on the Mac you are setting up. The agent follows [AGENTS.md](AGENTS.md). It never types passwords, codes or API keys: you sign in and paste secrets yourself.
+
+**Install and configure**
+
+```text
+Install and configure Codex Superpower from https://github.com/trukhinyuri/codex-superpower on this Mac.
+Follow the repository's AGENTS.md. Run the installer with WAIT_FOR_IDLE=1, install any prerequisite it
+names, and report its RESULT line. Then use Computer Use to walk me through the launcher: I sign in to
+ChatGPT and paste the Tunnel ID and API key myself; you run the smoke test, Install models, Connect
+harness and Verify runtime, and tell me when to restart Codex. Finish with the checks in AGENTS.md
+("Verify") and report each result, including anything that failed.
 ```
 
-</details>
+**Verify an existing install with Computer Use**
 
-<details>
-<summary><strong>Models, modes & MCP setup</strong></summary>
+```text
+Verify Codex Superpower on this Mac using the "Verify" section of AGENTS.md in
+https://github.com/trukhinyuri/codex-superpower. Run doctor, send one test turn with a ChatGPT Web model,
+and use Computer Use to screenshot the launcher's Browser view while the turn runs and confirm that the
+ChatGPT composer shows the same mode as the model you chose. Do not quit the launcher while a turn is
+running. Report every check as passed or failed, with the exact error text.
+```
 
-<a id="modes"></a>
+**Update without interrupting work**
 
-Automatic modes offer Luna/Think when the account has no reasoning selector; otherwise Instant–High, with Extra High and Pro available independently when exposed by the account.
+```text
+Update Codex Superpower to the latest main of https://github.com/trukhinyuri/codex-superpower without
+interrupting running Codex work: follow the "Update" section of AGENTS.md, then run doctor and report the
+installer's RESULT line.
+```
 
-| Mode | Sending messages | Local Codex tools |
+## How it works
+
+```mermaid
+sequenceDiagram
+    participant C as Codex (app or CLI)
+    participant B as Local bridge<br/>127.0.0.1:17841
+    participant W as Launcher browser<br/>ChatGPT tab
+    participant G as ChatGPT web
+    participant T as Connector Codex Native2<br/>and tunnel
+    C->>B: 1. task context (Responses API)
+    B->>W: 2. prompt, in parts if large
+    W->>G: 3. send in the selected mode
+    G-->>C: answer and reasoning stream back through the tab and the bridge
+    G->>T: 4. tool call (Full harness)
+    T->>B: 5. through the outbound tunnel
+    B->>C: 6. native tool call
+    C->>B: tool result, after Codex sandbox and approvals
+    B->>T: result
+    T->>G: result, same ChatGPT response
+```
+
+1. Codex sends the task to the local bridge exactly as it would send it to OpenAI.
+2. The bridge compiles the context and hands it to a ChatGPT tab in the launcher. With Bigger Context, a large context travels in two or three messages.
+3. ChatGPT answers in the mode you picked in Codex. The answer and reasoning summaries stream back to Codex.
+4. In Full harness mode, ChatGPT calls Codex tools through the **Codex Native2** connector. The call reaches your Mac through an outbound tunnel, so no port is opened.
+5. The bridge turns the call into a native Codex tool call. Codex runs it with its own sandbox and approvals and sends the result back into the same ChatGPT response.
+
+Every model Codex lists goes through the same local bridge, and the bridge sends each turn to the service that owns the model. Codex keeps its built-in OpenAI provider and your sign-in, so none of its features change:
+
+```mermaid
+flowchart LR
+    C[Codex app or CLI] --> B[Local bridge<br/>127.0.0.1:17841]
+    B -- "chatgpt-web/…" --> W[ChatGPT web<br/>in the launcher's browser]
+    B -- "OpenAI models" --> O[OpenAI<br/>with your Codex sign-in]
+    B -- "models of a local CLIProxyAPI" --> P[CLIProxyAPI<br/>127.0.0.1:8317]
+    P --> X[Claude, Gemini, GLM and others]
+```
+
+Browser-only mode stops after step 3 and has no local tools. Zero Risk mode lets you paste and send each prompt yourself. Details: [architecture](docs/architecture.md) and [security model](docs/security-model.md).
+
+## Models from CLIProxyAPI
+
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) serves models from other subscriptions and API keys (Claude, Gemini, GLM and more) through one local, OpenAI-compatible endpoint. Connect a CLIProxyAPI that runs on this Mac, and its models join the Codex model list next to the OpenAI and ChatGPT Web models:
+
+```bash
+printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" cliproxy connect --api-key-stdin
+```
+
+- The key is read from standard input, checked against the proxy, and stored in `~/.codex-chatgpt-web/secrets/cliproxy-api-key` (owner-only). Add `--base-url http://127.0.0.1:PORT` if the proxy does not listen on 8317; only addresses on this Mac are accepted.
+- Codex keeps its own OpenAI provider and ChatGPT sign-in, so its features stay on. Turns of a proxy model go to CLIProxyAPI with the proxy's key; your ChatGPT credentials never reach it. A model that OpenAI also serves stays on your own Codex sign-in.
+- Compaction works for proxy models too: the bridge asks the model for the same summary Codex's own compaction would.
+- `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
+- Manage the proxy's accounts from here once you add its management key (`remote-management.secret-key` in its config), again on standard input: `cliproxy management-key --stdin`, then `cliproxy accounts` (e-mail addresses masked unless `--show-emails`), `cliproxy login claude` (also `codex`, `antigravity`, `kimi`, `xai`, `devin`, `meta`; opens the provider's sign-in page and waits), and `cliproxy remove REF` (the `ref` from the list).
+- The launcher's **CLIProxyAPI** section does the same with buttons: connect, add the management key, sign accounts in and remove them. Keys are cleared from the form as soon as they are sent.
+- The app carries a CLIProxyAPI build from `cliproxyapi/` when it was built with Go. `cliproxy service adopt --config ~/path/config.yaml [--replace-label <your LaunchAgent>]` lets the launcher run the proxy with that config: it stops your LaunchAgent (keeping a copy), and from then on every app update brings the proxy up to date too, only while Codex is idle; if the proxy does not come back, the whole update is rolled back. `cliproxy service release` gives your own LaunchAgent back.
+
+## What this fork changes
+
+| Area | Upstream 5.0.8 | This fork |
 | --- | --- | --- |
-| **Browser-only** | Automatic | No |
-| **Full harness (With Automation)** | Automatic | Yes, through MCP |
-| **Zero Risk** | Paste and send manually | Yes, through a separate MCP connector |
+| Skills outside Git, or in a project with several folders | The turn fails with "ChatGPT web turn is missing cwd in trusted Codex environment context" | Works. Extra folders are trusted only when Codex itself labels the environment and the skill |
+| "Too many requests" | The turn fails at once; Codex retries within seconds and deepens the limit ([#547](https://github.com/miuuyy/codex-chatgpt-web/issues/547)) | An account-wide pause of 60, 120, 240, then 300 s; Codex waits the stated delay, and no request reaches ChatGPT meanwhile |
+| "Something went wrong" right after a rate limit | Retried within a second | Treated as the same limit, so Codex waits |
+| Compaction during a rate limit | Fails with "ChatGPT did not complete the context handoff" ([#556](https://github.com/miuuyy/codex-chatgpt-web/issues/556)) | Returns the rate limit with its delay; Codex retries after it |
+| Bigger Context | Context parts go in Instant; only the last part uses the selected mode | Every part uses the selected mode, which is checked again before the last part |
+| A tool call that ChatGPT stops before it runs | The model may blame Codex auto-review or the target service | The model reports that ChatGPT stopped the call and that it never reached Codex |
+| Updates | Offers upstream release packages | Installs this repository's `main` automatically after the full test suite passes, only while Codex is idle, and restores the previous build if the new one does not start cleanly |
+| Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
+| Fixes from the wider project | Open pull requests and forks, unmerged | About thirty fixes ported from upstream pull requests and other forks, each with a regression test: DNS-rebinding protection for the bridge, exact origin checks, no resend of a prompt ChatGPT already accepted, retry and continuation fixes, composer and effort-slider races, retained-tab and session recovery, compaction persistence, image validation, doctor evidence, a visible tray icon |
+| Quitting with running turns | Cancels them | Asks first; the default keeps the launcher running |
+| Other models | — | [Models from a local CLIProxyAPI](#models-from-cliproxyapi) join the same Codex model list, with Codex's own sign-in and features intact |
+| Problem reports | — | [Consented GitHub issues](#problem-reports) built only from fixed codes and versions |
+| AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
 
-Zero Risk does not read or operate the ChatGPT page. Choose the model and `Codex Zero Risk` connector yourself, paste and send the prepared prompt, then confirm **Sent** in the launcher. Automatic model entries each select a fixed ChatGPT mode; Codex’s Effort and Speed rows do not override it.
+Each fix meant for upstream lives in its own `fix/…` branch with a regression test.
 
-<a id="full-harness"></a>
+## Updates and rollback
 
-### Full harness
+- **Automatic (default).** The launcher checks `main` every hour. A new commit installs by itself when it only adds commits to the installed build, its GitHub checks passed (or the repository runs none), and it has not failed on this Mac before. The launcher builds it at low CPU priority, runs `bun run verify`, packages it, and swaps the app after Codex has had no turn in flight for ten minutes; when every recent ChatGPT Web turn failed, or the update has waited six hours, one quiet minute is enough, so a fix reaches a failing installation instead of waiting behind its failures. A click on the update button installs it 30 seconds after Codex's tasks finish. A task whose tool runs longer than that without a model request can still see one failed request, which Codex reports; continue it. The new launcher must report a healthy start within six minutes; otherwise the previous app goes back into place and that commit is never installed automatically again. Turn this off in **Settings → Automatic updates**.
+- **Manual.** Any other update, for example one that failed before, appears as **Update to v5.0.8+‹commit›**. The same checks apply; it installs after 30 idle seconds.
+- **From a terminal.** Rerun the quick-start command with `WAIT_FOR_IDLE=1` before `bash`. It keeps the replaced build and restores it if the new one does not start cleanly, like the launcher does.
+- **Rollback.** The two builds replaced last are kept in `~/Library/Application Support/Codex Web GPT/rollback.noindex`. To put the newest one back (after Codex is idle; `LIST=1` lists them, `ENTRY=<name>` picks one):
 
-Full mode connects ChatGPT's tool calls back to the current Codex task through the official
-[OpenAI tunnel-client](https://github.com/openai/tunnel-client). The tunnel is outbound: it does
-not expose a public IP, open an inbound port, or require router forwarding.
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/rollback-fork-macos.sh | bash
+  ```
 
-The launcher's **MCP** page guides the complete setup. For the exact clicks, see the
-[video walkthroughs](TROUBLESHOOTING.md).
+  Automatic updates then skip the commit you rolled back from until `main` moves on.
+- **Logs.** `~/Library/Application Support/Codex Web GPT/logs/source-update.log` records every check, build step, swap and rollback.
+- **Trust.** An update runs this repository's build and tests on your Mac, as the installer does. Only the maintainer can push to `main`.
 
-> **Limits**
->
-> See [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309) for the current
-> ChatGPT message allowances for **GPT-5.6 Sol Pro** and **GPT-6 Astra**. Context limits depend on
-> the account type and selected effort. Plus Medium/High uses a measured 90,000-token window, or
-> up to 270,000 tokens with experimental **3× context** enabled, with native Codex compaction
-> supported throughout.
+## Problem reports
 
-1. Finish the required setup, open **MCP**, create the Tunnel and regular API key, then press
-   **Connect harness**.
-2. Enable ChatGPT **Developer Mode** and create a new Tunnel connector named exactly
-   **Codex Native2**, with **Authentication: None** and **Allow all actions**.
-3. Run **Verify runtime** to confirm that **Codex Native2** is attached and available.
+When an update fails to build or pass its tests, is rolled back, or the local runtime does not start, the launcher can open an issue in this repository so the maintainer can fix it. The first time, it asks and shows the exact report; choose **Always report automatically**, **Report this one**, **Not now** or **Never**, and change it later in **Settings → Report problems to the maintainer**.
 
-Write/modify actions also require the ChatGPT workspace and its administrator policy to permit
-them. See
-[developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
-Unexpected approval prompts fail closed unless `--auto-approve-tool-calls` is explicitly enabled;
-that option clicks **Allow once**, never a permanent grant.
+- A report contains only fixed codes from a closed list, the app version and commit, the macOS version and the CPU architecture. It never contains prompts, session content, file paths, account data or error text; the code that builds reports drops anything else.
+- It is sent through your own GitHub CLI login (`gh`), so the issue is public and shows your GitHub account. Without `gh` nothing is sent.
+- Each problem is one issue, shared by everyone who hits it; a repeat adds at most one short comment a day. At most five new issues a day are opened from one Mac.
 
-</details>
+## Requirements and limits
 
-<details>
-<summary><strong>Diagnostics & subagents</strong></summary>
+- **Platform.** The installer and in-app updates support macOS. On Windows or Linux, build from source (below) or use the upstream releases, which do not contain these changes.
+- **Account.** Any ChatGPT plan; the available modes depend on the plan. Full harness mode also needs an OpenAI platform account for the Tunnel and API key.
+- **Automation.** This drives ChatGPT web in a browser; it is not an OpenAI API. A ChatGPT UI change can break it, and it then fails with an explicit error instead of switching model or mode.
+- **Limits and safety checks.** ChatGPT's message limits, rate limits and safety checks apply as usual. The bridge waits them out and never bypasses them.
+- **Affiliation.** Independent software, not affiliated with or endorsed by OpenAI. Use it with your own account and within the [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/).
 
-<a id="operations"></a>
+## Troubleshooting
 
-Use **Activity** for safe local diagnostics and **Settings → Run doctor** for end-to-end health.
-Settings can also cancel a retained browser turn or remove the Codex integration before uninstall.
-Set `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` only when every browser checkpoint needs a screenshot.
+| Message in Codex | Meaning | What to do |
+| --- | --- | --- |
+| `ChatGPT rate limit … Please try again in Ns` | ChatGPT is throttling the account | Nothing: Codex waits and retries. Fewer parallel tasks and subagents help |
+| ChatGPT stopped a tool call before it ran | ChatGPT's own check stopped the call; it never reached Codex | Rephrase the request as one clear operation, or run that step with a native Codex model |
+| `exceeds the measured … ChatGPT browser message boundary` | The context no longer fits one message | Turn on Bigger Context, or run `/compact` |
+| `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Superpower |
 
-New installs use **Compatibility V1** for cross-backend subagents. **Native** preserves Codex's own
-feature settings and enables plaintext Web-to-Web V2 delegation. Restart Codex and start a new task
-after changing the protocol:
+More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), **Activity** and **Settings → Run doctor** in the launcher.
 
-```bash
-codex-chatgpt-web subagents status
-codex-chatgpt-web subagents compatibility-v1
-codex-chatgpt-web subagents native
-```
+## Develop
 
-</details>
+Requirements, process and current state for contributors and agents: [docs/requirements.md](docs/requirements.md), [docs/engineering-process.md](docs/engineering-process.md), [docs/roadmap.md](docs/roadmap.md).
 
-<details>
-<summary><strong>Requirements & security</strong></summary>
-
-<a id="limitations-and-security"></a>
-
-- This is unofficial browser automation, not an OpenAI API. ChatGPT UI changes can break selectors;
-  drift fails explicitly instead of silently switching model or transport.
-- Browser state is a sensitive login artifact, and the loopback listener is reachable by processes
-  running as the same local user. Never share the launcher profile; use a trusted workstation.
-- Release packages currently target macOS 13+ (arm64/x64), Windows x64, and Linux x64. Runtime,
-  tests, and packaging are gated on all three in CI; account-bound browser and MCP flows use the
-  separate [release validation](docs/release-validation.md).
-- Builds are not yet platform-signed, so Gatekeeper or SmartScreen may warn. The installers verify
-  the published SHA-256 manifest before installation.
-
-Read the complete [architecture](docs/architecture.md) and
-[security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
-[SECURITY.md](SECURITY.md).
-
-Temporary Chat is a [ChatGPT privacy mode](https://help.openai.com/en/articles/8914046-temporary-chat-faq); prompts are still processed by OpenAI.
-
-Validation coverage: [release validation](docs/release-validation.md).
-
-This is independent software and is not affiliated with or endorsed by OpenAI. Use it only with
-your own account and in accordance with applicable [Terms of Use](https://openai.com/policies/terms-of-use/)
-and workspace policies; it does not bypass authentication or access controls.
-
-</details>
-
-<details>
-<summary><strong>Run from source & develop</strong></summary>
-
-<a id="development"></a>
+Building from source requires Bun 1.4.0 exactly. The CLIProxyAPI component in `cliproxyapi/` builds with a Go toolchain the build downloads from go.dev on first use and checks by SHA-256, so Go does not need to be installed.
 
 ```bash
-git clone https://github.com/miuuyy/codex-chatgpt-web.git && \
-cd codex-chatgpt-web && \
-bun run app
-```
-
-This source path requires Bun 1.4.0. The command installs locked dependencies and opens the app.
-
-```bash
-bun run app
-bun run dev:launcher
-bun run src/cli.ts dev status
-bun run dev:chat compaction-lab "Reply with exactly: DEV READY"
+git clone https://github.com/trukhinyuri/codex-superpower.git
+cd codex-superpower
+bun install --frozen-lockfile && (cd launcher && bun install --frozen-lockfile)
 bun run verify
-bun run smoke:subagents
+bun run app
 bun run app:package
 ```
 
-`dev:launcher` uses a separate profile and account under `~/.codex-chatgpt-web-dev`. `dev:chat` exercises the real browser and compaction paths with explicit simulated tool results, without changing your normal Codex route. See the [DEV chat harness](docs/dev-chat.md) for setup and commands.
+`bun run verify` is the gate for `main`: installed launchers pick up a new `main` within an hour, and they install nothing that fails it or that does not start cleanly. Fixes meant for upstream start from `upstream/main` in a `fix/…` branch; fork-only changes start from `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [DEV chat harness](docs/dev-chat.md).
 
-</details>
+The upstream README and its translations are in [docs/upstream](docs/upstream/README.md). `cliproxyapi/` holds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT), kept in sync with upstream as a `git subtree`; see AGENTS.md.
 
-## Star History
+## Credits and license
 
-<a href="https://www.star-history.com/?repos=miuuyy%2Fcodex-chatgpt-web&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=miuuyy/codex-chatgpt-web&type=date&theme=dark&legend=top-left&sealed_token=hBVvg_eOjfMFDrfyeo5FPQkIwcvBEmXc6F7ZoOKnfFE4KPCs67o34w4XwVuM-bHGnKR-SKCAN_TSTWrzuqSBNU-RjNZCLT4f-xNs9qcDhciQtemxHKuuFj0N5YNqZIihdaQfakrh2ANhOrvP0K2LmLXX2zbsYyVaYZknyTnlYeIS_mOGvMcO32ZmPCHK">
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=miuuyy/codex-chatgpt-web&type=date&legend=top-left&sealed_token=hBVvg_eOjfMFDrfyeo5FPQkIwcvBEmXc6F7ZoOKnfFE4KPCs67o34w4XwVuM-bHGnKR-SKCAN_TSTWrzuqSBNU-RjNZCLT4f-xNs9qcDhciQtemxHKuuFj0N5YNqZIihdaQfakrh2ANhOrvP0K2LmLXX2zbsYyVaYZknyTnlYeIS_mOGvMcO32ZmPCHK">
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=miuuyy/codex-chatgpt-web&type=date&legend=top-left&sealed_token=hBVvg_eOjfMFDrfyeo5FPQkIwcvBEmXc6F7ZoOKnfFE4KPCs67o34w4XwVuM-bHGnKR-SKCAN_TSTWrzuqSBNU-RjNZCLT4f-xNs9qcDhciQtemxHKuuFj0N5YNqZIihdaQfakrh2ANhOrvP0K2LmLXX2zbsYyVaYZknyTnlYeIS_mOGvMcO32ZmPCHK">
-  </picture>
-</a>
-
----
-
-[Troubleshooting](TROUBLESHOOTING.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE) · [CI](https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml)
-
-Also by me: <img src="assets/readme/persona-voice.svg" width="20" height="20" alt=""> [ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice) — local, near-real-time custom voices for ChatGPT and Codex.
+- Fork maintained by Yuri Trukhin ([@trukhinyuri](https://github.com/trukhinyuri)), <yuri@trukhin.com>.
+- Based on [Codex Web GPT](https://github.com/miuuyy/codex-chatgpt-web) by [miuuyy](https://github.com/miuuyy) and its contributors.
+- Released under the [MIT License](LICENSE); the original copyright notice is kept. Third-party notices are in [LICENSES](LICENSES).

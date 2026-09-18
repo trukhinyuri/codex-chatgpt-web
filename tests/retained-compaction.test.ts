@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
-import { ChatGptCompactionHandoffAccepted, chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptRateLimitCause, chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
 import {
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   cancelAllStructuredCompactions,
@@ -1109,6 +1109,108 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
   }
 });
 
+// Upstream PR #537: the outer handoff deadline was armed once, before the code waited for an
+// active source turn to settle. A slow-but-healthy source could burn most or all of that budget
+// before the summary generation even began, so the summary got only the leftovers instead of its
+// own full window. Fixed by re-arming the deadline right after the source settles and right
+// before the summary handoff starts.
+test("a retained compaction re-arms its deadline after the source settles, so a slow source does not eat the summary's budget", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-deadline-rearm-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://retained-compact-deadline-rearm-${Date.now()}`,
+    chatgptWeb: {
+      // Chosen so the bug reproduces reliably without the fix: the source takes 450ms to settle,
+      // the summary generation takes another 450ms, and 700ms is enough for either phase alone but
+      // not for both back-to-back from a single un-re-armed deadline.
+      turnTimeoutMs: 700,
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      appName: "Codex Native DEV",
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
+    },
+  };
+  const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const sourceRequest = request(false);
+  const namespace = chatGptWebExecutionNamespace(provider);
+  const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
+  const conversationKey = chatGptConversationKey(sourceRequest, namespace)!;
+  let releases = 0;
+  chatGptTurnSessions.getOrCreate(sourceKey, () => ({
+    mode: "read-only",
+    // Still running (not yet settled) when the compaction handoff begins, so the handoff must
+    // wait on this before it can start the summary phase.
+    browser: new Promise(resolve => setTimeout(() => resolve("source complete"), 450)),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey,
+    releaseRetainedConversation: async () => { releases += 1; },
+    cancel() {},
+  }));
+  // Deliberately not awaited: the source must still be active when `runTurn` below starts, so the
+  // handoff takes the "wait for the active source, then hand off" path this fix targets.
+
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    // The summary generation itself takes real time. Only a deadline re-armed after source
+    // settlement gives it room; the stale, un-re-armed deadline would already have fired by now.
+    await new Promise(resolve => setTimeout(resolve, 450));
+    const prepared = await turn.prepareResume!();
+    const binding = controlBinding(prepared.text);
+    prepared.release();
+    await callTurnBroker(provider.chatgptWeb!.brokerSocketPath!, {
+      method: "submit_compaction_handoff",
+      token: binding.token,
+      handoffId: binding.handoffId,
+      summary: "Adapter retained checkpoint",
+    });
+    return "Checkpoint submitted through MCP";
+  };
+  const compact = structuredClone(sourceRequest);
+  compact._compactionRequest = true;
+  const compactSourceMessage = (compact._rawBody as { input: Array<{
+    content: Array<{ type: string; text: string }>;
+  }> }).input[0]!;
+  compactSourceMessage.content = [{
+    type: "input_text",
+    text: "Provider-normalized current task revision",
+  }];
+  (compact._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
+    "x-codex-turn-metadata": JSON.stringify({
+      thread_id: "thread_retained_compaction",
+      turn_id: "turn_compact",
+    }),
+  };
+  expect(chatGptConversationKey(compact, namespace)).toBe(conversationKey);
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(
+      compact,
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    expect(events.find(event => event.type === "error")).toBeUndefined();
+    const text = events
+      .filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
+      .map(event => event.text)
+      .join("");
+    expect(text).toContain("Adapter retained checkpoint");
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    expect(releases).toBe(1);
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
+
 test("a compact HTTP observer can reconnect without sending a second retained-chat message", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-reconnect-"));
   const provider: CodexProviderConfig = {
@@ -1563,4 +1665,85 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a rate-limited compaction handoff keeps the rate-limit code and retry delay for Codex", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-rate-limited-compact-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://rate-limited-compact-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      localToolsEnabled: true,
+      solAvailable: true,
+      extraHighAvailable: true, proAvailable: true,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  const rateLimit = new ChatGptWebAdapterError(
+    "ChatGPT rate limit: too many requests. Please try again in 60s.",
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+  let browserStarts = 0;
+  // No retained source exists, so every attempt takes the fresh fallback and meets the rate limit.
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+    browserStarts += 1;
+    throw rateLimit;
+  };
+  const attempt = async (): Promise<AdapterEvent | undefined> => {
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(provider).runTurn!(
+      request(true),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    return events.at(-1);
+  };
+  try {
+    for (let retry = 1; retry <= 3; retry += 1) {
+      expect(await attempt()).toMatchObject({
+        type: "error",
+        message: "ChatGPT rate limit: too many requests. Please try again in 60s.",
+        status: 429,
+        errorType: "rate_limit_error",
+        code: "rate_limit_exceeded",
+        retryable: true,
+      });
+      expect(browserStarts).toBe(retry);
+    }
+    // The shared retry budget turns the fourth consecutive limit into a final answer, and a later
+    // replay is refused before it can open another browser turn.
+    for (const expectedStarts of [4, 4]) {
+      expect(await attempt()).toMatchObject({
+        type: "error",
+        message: "ChatGPT rate limit: too many requests. Please try again in 60s. ChatGPT remained unavailable after several attempts.",
+        code: "rate_limit_exceeded",
+        retryable: false,
+      });
+      expect(browserStarts).toBe(expectedStarts);
+    }
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rate-limit detection looks through wrapped compaction failures only", () => {
+  const rateLimit = new ChatGptWebAdapterError(
+    "ChatGPT rate limit: too many requests. Please try again in 60s.",
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+  expect(chatGptRateLimitCause(rateLimit)).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new Error("handoff failed", { cause: rateLimit }))).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new AggregateError([new Error("retire failed"), rateLimit], "both"))).toBe(rateLimit);
+  expect(chatGptRateLimitCause(new ChatGptWebAdapterError("ChatGPT failed", {
+    status: 502, errorType: "server_error", code: "chatgpt_error", retryable: true,
+  }))).toBeUndefined();
+  expect(chatGptRateLimitCause(new Error("timeout"))).toBeUndefined();
+  expect(chatGptRateLimitCause("rate_limit_exceeded")).toBeUndefined();
 });

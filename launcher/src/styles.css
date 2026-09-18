@@ -2703,3 +2703,33 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* CLIProxyAPI surface */
+.cliproxy-form {
+  margin: 12px 0 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.cliproxy-form .button-primary {
+  margin-top: 14px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.setting-row .button-row {
+  margin-top: 0;
+}
+
+.surface-note {
+  max-width: 560px;
+  margin: 12px 0 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}

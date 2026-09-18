@@ -1,0 +1,19 @@
+{
+  "go": {
+    "version": "1.26.8",
+    "archives": {
+      "darwin-arm64": { "file": "go1.26.8.darwin-arm64.tar.gz", "sha256": "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b" },
+      "darwin-x64": { "file": "go1.26.8.darwin-amd64.tar.gz", "sha256": "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150" },
+      "linux-x64": { "file": "go1.26.8.linux-amd64.tar.gz", "sha256": "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b" },
+      "linux-arm64": { "file": "go1.26.8.linux-arm64.tar.gz", "sha256": "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0" },
+      "win32-x64": { "file": "go1.26.8.windows-amd64.zip", "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59" },
+      "win32-arm64": { "file": "go1.26.8.windows-arm64.zip", "sha256": "4bc560ed3ccb64eec0be6180b8c29185c07f5215276820adb4303d7bf3365435" }
+    }
+  },
+  "antigravityClient": {
+    "repository": "router-for-me/CLIProxyAPI",
+    "commit": "b773607e3e7756dc6020a291825e4eb08899595a",
+    "path": "internal/auth/antigravity/constants.go",
+    "sha256": "f99ba3bafd7ba273600582d171a79a701c593cf391039d3495634c30601fff11"
+  }
+}

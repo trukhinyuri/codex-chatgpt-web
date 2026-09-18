@@ -38,8 +38,9 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, onTurnEnded = () => {} }) {
     this.logger = logger;
+    this.onTurnEnded = onTurnEnded;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
@@ -323,6 +324,7 @@ class BrowserControlServer {
           body.connectorBound === true,
         );
         this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
+        try { this.onTurnEnded(body.status); } catch {}
         writeJson(response, 200, { ok: true, ...release });
         return;
       }

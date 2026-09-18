@@ -2,8 +2,12 @@
   "name": "codex-web-gpt-launcher",
   "version": "5.0.8",
   "private": true,
-  "description": "Desktop control center for Codex ChatGPT Web",
-  "author": "miuuyy",
+  "description": "Desktop control center for Codex Superpower",
+  "author": {
+    "name": "Yuri Trukhin",
+    "email": "yuri@trukhin.com",
+    "url": "https://github.com/trukhinyuri"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -13,10 +17,11 @@
     "build:renderer": "vite build",
     "build": "bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
-    "package": "bun run build && bun run build:runtime && bun run scripts/package.cjs",
-    "package:mac": "bun run build && bun run build:runtime && bun run scripts/package.cjs --mac",
-    "package:win": "bun run build && bun run build:runtime && bun run scripts/package.cjs --win",
-    "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
+    "build:cliproxyapi": "node scripts/prepare-cliproxyapi.cjs",
+    "package": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs",
+    "package:mac": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --mac",
+    "package:win": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --win",
+    "package:linux": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "electron ."
@@ -27,6 +32,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -42,7 +48,9 @@
   },
   "build": {
     "appId": "dev.codexwebgpt.launcher",
-    "productName": "Codex Web GPT",
+    "productName": "Codex Superpower",
+    "executableName": "Codex Web GPT",
+    "copyright": "Copyright © 2026 Yuri Trukhin. Based on Codex Web GPT by miuuyy and contributors. MIT License.",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
@@ -55,6 +63,8 @@
       "dist/**",
       "electron/**",
       "assets/icon.png",
+      "assets/trayTemplate.png",
+      "assets/trayTemplate@2x.png",
       "assets/linux-appimage-runner.sh",
       "package.json"
     ],
@@ -62,6 +72,10 @@
       {
         "from": "build/runtime",
         "to": "runtime"
+      },
+      {
+        "from": "build/cliproxyapi",
+        "to": "cliproxyapi"
       }
     ],
     "mac": {
@@ -79,6 +93,7 @@
       "target": ["nsis"]
     },
     "linux": {
+      "executableName": "codex-web-gpt-launcher",
       "category": "Development",
       "icon": "assets/icon.png",
       "target": ["AppImage"]

@@ -1284,6 +1284,11 @@ export async function callTurnBroker<T>(
         // frame is therefore the terminal boundary; ordinary calls still wait for physical close.
         finishResponse();
         socket.destroy();
+      } else {
+        // The server has finished writing the complete response frame. Close our writable half so
+        // Windows named pipes can complete the full-duplex close handshake, then let the `close`
+        // event settle the call only after both sides are actually finished.
+        socket.end();
       }
     });
   });
@@ -1303,7 +1308,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
       status = await callTurnBroker(this.socketPath, { method: "owner_status" });
     } catch (error) {
       throw new Error(
-        "The running launcher runtime does not expose the DEV turn-owner protocol; update and restart Codex Web GPT once before using the working-tree DEV chat"
+        "The running launcher runtime does not expose the DEV turn-owner protocol; update and restart Codex Superpower once before using the working-tree DEV chat"
         + ` (${error instanceof Error ? error.message : String(error)})`,
       );
     }

@@ -1,5 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
-import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { closeChatGptBrowserWorkers, validateChatGptWebInputImage } from "./adapters/chatgpt-web/browser-worker";
+import { chatGptWebAttachedInputImages } from "./adapters/chatgpt-web/prompt";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
@@ -14,11 +15,13 @@ import {
   extractChatGptTurnIdentity,
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
+  chatGptTurnUserRevisionHistory,
 } from "./adapters/chatgpt-web/environment";
-import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import { bindCompactionContinuationStore, ChatGptCompactionContinuationStore, rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import { rememberRetryableTurnFailure } from "./adapters/chatgpt-web/retry-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { defaultCompactionContinuationStatePath, providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -49,6 +52,15 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import {
+  augmentCatalogWithCliProxy,
+  cliProxyRouteFor,
+  compactViaCliProxy,
+  compactionTurnViaCliProxy,
+  forwardCliProxyResponses,
+  type CliProxyConnection,
+  type CliProxyFetch,
+} from "./cliproxy";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -103,6 +115,34 @@ function streamFailureEvidence(
 const reportHttpStreamFailure: HttpStreamFailureReporter = evidence => {
   console.warn(`[codex-chatgpt-web] http_stream_failed ${JSON.stringify(evidence)}`);
 };
+
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Reject a request whose Host header does not name this loopback bridge, and, for a browser
+ * request, whose Origin does not match it either. A hostile web page can point a hostname it
+ * controls at 127.0.0.1 after the browser's initial DNS lookup (DNS rebinding); the Host header
+ * still names that hostname, and the Origin header still names the page's real origin, so both are
+ * checked against the loopback set and the port this server actually bound. Codex CLI/Desktop send
+ * no Origin header at all and are accepted on Host alone. A Host header with no port (never sent by
+ * a real HTTP client talking to a non-default port, only ever seen from a hand-built request) is
+ * accepted on hostname alone rather than compared to a default port that would never match.
+ */
+function isLoopbackRequest(url: URL, req: Request, boundPort: number): boolean {
+  if (!LOOPBACK_HOSTNAMES.has(url.hostname)) return false;
+  if (url.port !== "" && Number(url.port) !== boundPort) return false;
+  const origin = req.headers.get("origin");
+  if (origin === null) return true;
+  try {
+    const parsedOrigin = new URL(origin);
+    const originPort = parsedOrigin.port === "" ? 80 : Number(parsedOrigin.port);
+    return parsedOrigin.protocol === "http:"
+      && LOOPBACK_HOSTNAMES.has(parsedOrigin.hostname)
+      && originPort === boundPort;
+  } catch {
+    return false;
+  }
+}
 
 function emitHttpStreamFailure(
   reporter: HttpStreamFailureReporter,
@@ -360,6 +400,13 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Route CLIProxyAPI models; the running server passes its home, direct callers opt in explicitly. */
+  cliProxy?: CliProxyWiring;
+}
+
+export interface CliProxyWiring {
+  home: string;
+  fetchImpl?: CliProxyFetch;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -389,6 +436,7 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
   onFailure?: (failure: ModelCatalogFailure) => void,
+  cliProxy?: CliProxyWiring,
 ): Promise<Response> {
   let upstream: Response;
   let sent = false;
@@ -412,6 +460,8 @@ export async function modelsRequest(
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
+  // CLIProxyAPI models join after the native and ChatGPT Web rows; a proxy failure never costs Codex its catalog.
+  if (cliProxy) catalog = await augmentCatalogWithCliProxy(catalog, req, cliProxy);
   const body = JSON.stringify(catalog);
   const headers = new Headers(upstream.headers);
   headers.delete("content-encoding");
@@ -448,6 +498,29 @@ async function nativeImagesRequest(
   }
 }
 
+/**
+ * Fail fast at the HTTP boundary: an image ChatGPT Web will actually attach to this turn must
+ * already satisfy the browser worker's format constraint (chatGptImageFilePayloads in
+ * browser-worker.ts), otherwise the turn dies mid-flight -- browser tab opened, quota spent --
+ * with an adapter error instead of an immediate, retryable 400. Only checks images
+ * chatGptWebAttachedInputImages proves will actually be attached (the compiler's own
+ * one-pixel-placeholder and oldest-overflow-drop rules), so a historical image the compiler will
+ * correctly omit from this turn's attachments is never rejected. Compaction requests further trim
+ * history by a JSON byte budget this does not replicate; they are left to the deep validation in
+ * chatGptImageFilePayloads instead of this early check.
+ */
+function findInvalidChatGptWebInputImage(parsed: CodexParsedRequest): string | undefined {
+  if (parsed._compactionRequest) return undefined;
+  for (const [index, image] of chatGptWebAttachedInputImages(parsed.context.messages).entries()) {
+    const invalid = validateChatGptWebInputImage(image.imageUrl);
+    if (invalid) {
+      return `ChatGPT web input image ${index + 1} (${image.role} message) ${invalid}. `
+        + "Inline the image bytes as a base64 data URL (png, jpeg, gif, or webp) before retrying.";
+    }
+  }
+  return undefined;
+}
+
 function toolBridgeMaps(parsed: CodexParsedRequest): {
   toolNsMap: Map<string, { namespace: string; name: string }>;
   freeformToolNames: Set<string>;
@@ -462,6 +535,42 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
     if (tool.toolSearch) toolSearchToolNames.add(tool.name);
   }
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
+}
+
+/** The CLIProxyAPI connection for a proxy model, null for any other model, or an error response. */
+function cliProxyConnectionFor(model: string, wiring: CliProxyWiring | undefined): CliProxyConnection | null | Response {
+  if (!wiring) return null;
+  try {
+    return cliProxyRouteFor(model, wiring.home);
+  } catch (error) {
+    return formatErrorResponse(
+      500,
+      "server_error",
+      `The CLIProxyAPI connection is misconfigured: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function cliProxyResponse(
+  model: string,
+  raw: unknown,
+  request: Request,
+  wiring: CliProxyWiring | undefined,
+): Promise<Response | null> {
+  const proxy = cliProxyConnectionFor(model, wiring);
+  const fetchImpl = wiring?.fetchImpl;
+  if (proxy instanceof Response) return proxy;
+  if (!proxy || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const body = raw as Record<string, unknown>;
+  try {
+    const tail = Array.isArray(body.input) ? body.input.at(-1) : undefined;
+    if (tail && typeof tail === "object" && (tail as { type?: unknown }).type === "compaction_trigger") {
+      return await compactionTurnViaCliProxy(request, body, proxy, fetchImpl);
+    }
+    return await forwardCliProxyResponses(request, body, proxy, fetchImpl);
+  } catch (error) {
+    return formatErrorResponse(502, "upstream_error", `CLIProxyAPI: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export async function responseRequest(
@@ -493,6 +602,8 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    const proxied = await cliProxyResponse(requestedModel, raw, nativeRequest, options.cliProxy);
+    if (proxied) return proxied;
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -507,6 +618,14 @@ export async function responseRequest(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    // A restart must not lose evidence of a compaction handoff this daemon already completed for
+    // a still-open native turn. Resolved fresh per request (matching ChatGptThreadEnvironmentStore
+    // and ChatGptLunaCheckpointStore in index.ts) rather than cached at module scope, so it always
+    // reflects the config this request is actually running under. Bind before any later call can
+    // consult isAcceptedCompactionContinuation for this exact `parsed` object (see
+    // extractChatGptTurnUserRevision/isChatGptCompactionContinuation in environment.ts, reached
+    // deep inside the adapter's own turn processing below).
+    bindCompactionContinuationStore(parsed, new ChatGptCompactionContinuationStore(defaultCompactionContinuationStatePath()));
     route = routeChatGptWebRequest(parsed, config);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
@@ -529,6 +648,10 @@ export async function responseRequest(
       "invalid_request_error",
       "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
     );
+  }
+  const invalidWebImage = findInvalidChatGptWebInputImage(parsed);
+  if (invalidWebImage) {
+    return formatErrorResponse(400, "invalid_request_error", invalidWebImage);
   }
 
   const compaction = parsed._compactionRequest === true;
@@ -610,12 +733,19 @@ export async function responseRequest(
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
+  const rememberRetryableFailure = (event: AdapterEvent): void => {
+    if (event.type !== "error" || event.retryable !== true || event.status !== 503) return;
+    const identity = extractChatGptTurnIdentity(parsed);
+    const source = chatGptTurnUserRevisionHistory(parsed).at(-1);
+    if (source) rememberRetryableTurnFailure(parsed, identity, source);
+  };
   if (req.signal.aborted) abort.abort();
   else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
   const run = async () => {
     try {
       await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => {
         options.onAdapterEvent?.(event);
+        rememberRetryableFailure(event);
         queue.push(event);
       });
     } catch (error) {
@@ -675,7 +805,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "cliProxy"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -718,6 +848,15 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    const proxy = cliProxyConnectionFor(raw.model, options.cliProxy);
+    if (proxy instanceof Response) return proxy;
+    if (proxy) {
+      try {
+        return await compactViaCliProxy(nativeRequest, raw, proxy, options.cliProxy?.fetchImpl);
+      } catch (error) {
+        return formatErrorResponse(502, "upstream_error", `CLIProxyAPI compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -790,11 +929,17 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    adapterFactory?: ChatGptWebAdapterFactory;
+    cliProxy?: CliProxyWiring;
+  } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
+  // The service entry point wires CLIProxyAPI routing to its home; embedded servers opt in.
+  const cliProxy = dependencies.cliProxy ?? undefined;
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -829,6 +974,14 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      const boundPort = server.port;
+      if (boundPort === undefined || !isLoopbackRequest(url, req, boundPort)) {
+        console.warn(`[codex-chatgpt-web] rejected request with a non-loopback Host or Origin: ${JSON.stringify({
+          host: req.headers.get("host"),
+          origin: req.headers.get("origin"),
+        })}`);
+        return formatErrorResponse(403, "invalid_request_error", "Request Host or Origin is not allowed");
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
@@ -1026,6 +1179,7 @@ export function startServer(
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
             value => { failure = value; },
+            cliProxy,
           );
           if (response.ok) {
             successfulModelCatalogRequests += 1;
@@ -1047,7 +1201,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, cliProxy },
           ),
           req.signal,
           process.platform,
@@ -1061,7 +1215,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, cliProxy },
           ),
           req.signal,
           process.platform,

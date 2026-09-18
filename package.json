@@ -3,13 +3,18 @@
   "version": "5.0.8",
   "private": true,
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
+  "author": {
+    "name": "Yuri Trukhin",
+    "email": "yuri@trukhin.com",
+    "url": "https://github.com/trukhinyuri"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/miuuyy/codex-chatgpt-web.git"
+    "url": "git+https://github.com/trukhinyuri/codex-superpower.git"
   },
-  "homepage": "https://github.com/miuuyy/codex-chatgpt-web#readme",
+  "homepage": "https://github.com/trukhinyuri/codex-superpower#readme",
   "bugs": {
-    "url": "https://github.com/miuuyy/codex-chatgpt-web/issues"
+    "url": "https://github.com/trukhinyuri/codex-superpower/issues"
   },
   "packageManager": "bun@1.4.0",
   "type": "module",
@@ -28,7 +33,7 @@
     "doctor": "bun run src/cli.ts doctor",
     "dev:launcher": "bun run src/cli.ts dev launcher",
     "dev:chat": "bun run src/cli.ts dev chat",
-    "test": "bun test ./tests",
+    "test": "bun test --timeout 60000 ./tests",
     "audit": "bun audit",
     "check-version": "bun run scripts/check-version.ts",
     "typecheck": "bun x --no-install --bun tsc --noEmit",

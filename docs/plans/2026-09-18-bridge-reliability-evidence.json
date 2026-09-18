@@ -1,0 +1,1328 @@
+[
+ {
+  "class": "ChatGPT connector \"Codex Native2\" missing from the @codex mention menu or catalog. All 7 of today's occurrences fall in the connector setup window (08:31:58–08:37:55Z), after the runtime had already switched to Full/MCP mode and before ChatGPT listed the connector. Recovery gap: the code reloads the page once, then returns a non-retryable 424 connector_not_found. Codex then shows \"Reconnecting 1/5…5/5\" (each retry replays the stored error) and ends with a message telling the user to create a connector, which the user was already doing.",
+  "evidence": [
+   "Source of the 7: python aggregation of today's launcher.jsonl lines runtime.daemon_stdout matching /catalog is missing|exposed no row/. Result: 4 × 'stage=prompt_attachment failed: ChatGPT connector catalog is missing \"Codex Native2\"' plus 3 × 'connector menu opened but exposed no row named \"Codex Native2\" after 3 complete mention trigger attempt(s)'. They come from 4 browser attempts of 3 Codex turns, between 08:31:58Z and 08:37:55Z. In the same window, 1 extra attempt ended with 'ChatGPT connector selection failed and its composer state could not be cleared' (08:37:40Z).",
+   "No recurrence after 08:42Z: checkpoint counts for today (regex checkpoint=NN-connector-*) show connector-menu-missing 4 (08:32:06–08:37:54), connector-catalog-stale 4, connector_catalog_refresh completed 4 (1681–2378 ms each), and then connector-menu-visible 88 and connector-selected 87 from 08:42:23 to 17:29:32. After 08:42 there were no misses.",
+   "Setup timeline from launcher.jsonl (runtime.operation_started / connector.* / mcp.verification_requested). Onboarding completed 07:32:43Z. core-setup --browser-only ran 4× at 08:15. mcp-setup with --full and a tunnel id ran at 08:22:28Z. mcp.verification_requested fired 11 times between 08:27:27 and 08:41:51: 9 ran, 2 were rejected because a turn was active (08:32:05/06). connector.verification_failed 8 times: 4 'exposed no row' (about 12 s each) and 4 'ChatGPT personalization preflight exceeded its readiness deadline' (about 32 s each, 08:29:45–08:32:49). connector.verified once, at 08:41:55Z. First successful connector attachment in a turn: 08:42:23Z.",
+   "Runtime ran Full mode while the connector was unverified: in main.cjs, the launcher:setup-mcp handler (around L903–935) sets mcpSetupComplete:false, but the daemon is already `setup --full`. In src/config.ts:593, localToolsEnabled = config.mode === 'full', so every automatic turn goes through the connector 'mention' path (browser-worker.ts attachPrompt L3567). Nothing checks mcpSetupComplete before a turn.",
+   "Tunnel-client log (codex-chatgpt-web.log, structural fields only, times converted to UTC). The log begins at 08:22:33Z, when the new tunnel profile was set up. The first ChatGPT→tunnel traffic ('dispatcher forwarded command to MCP server') is at 08:27:03Z. Handshake bursts (3 forwarded commands + 1 'acknowledged notification' + 1 more command) appear at 08:27:03, 08:28:02, 08:29:52, 08:31:00 and 08:39:07. So ChatGPT reached the MCP server at least 14 min 52 s before the @codex menu listed the connector (08:41:55), and 2 min 48 s after the last burst.",
+   "Tunnel restarts: python per-client_instance_id lifecycle over the tunnel log. 29 tunnel-client instances today; 28 exited with 'stdio MCP command failed; requesting tunnel-client shutdown'. In the setup window there were 5 restarts: 08:22:33 (double setup run), 08:28:51 (launcher relaunch, 7.7 s gap), 08:29:04 (Bigger Context setup with --restart-service, 1.3 s gap), 08:33:54 (launcher relaunch, 6.5 s gap) and 08:38:43 (mcp-setup --restart-service, 2.6 s gap). Tunnel readiness at the time of each failure: doctor --json reported 'Tunnel runtime reports healthy and ready' in all 10 runs today.",
+   "The doctor never uses local proof of attachment: src/doctor.ts L351–358 always emits the connector check as status 'warning' with unprovenLocally:true and the text 'Local checks cannot prove that ChatGPT connector … is attached to this tunnel' (10 occurrences today in runtime.stdout). Yet the live tunnel-client /metrics (GET of the local health URL, read-only) shows per-method counters, e.g. command_end_to_end_latency_milliseconds_count{request_method=\"initialize\"} 4, notifications/initialized 4, tools/call 40, with tunnel_service_status=\"200\". That is direct local evidence that ChatGPT reached this tunnel.",
+   "Existing self-heal is a single immediate retry: browser-worker.ts L5008–5064. catalogRefreshAvailable is true only for fresh, non-multipart turns. On ChatGptConnectorCatalogStaleError the code does one page.reload plus prepareTemporaryChatSurface, then retries with the rest of a shared budget of MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS=3 (L130), after which it throws chatGptConnectorUnavailableError: status 424, code connector_not_found, retryable:false (L188–196).",
+   "Codex view (~/.codex/logs_2.sqlite, targets codex_core::responses_retry and session::turn, 08:31–08:39Z). Turn 1: 5 WARN 'stream disconnected - retrying sampling request (1/5 … 5/5)' at 08:32:06–08:32:10, then 'Turn error: stream disconnected before completion: ChatGPT connector menu opened but exposed no row…' at 08:32:13. Turn 2: 5 retries at 08:33:42–45. Turn 3: 4 retries at 08:37:55–58. launcher.jsonl shows no extra browser.turn_started for those retries, because index.ts L1476–1482 keeps a non-retryable ChatGptWebAdapterError replayable, so every Codex retry replays the same failure.",
+   "Diagnostics were lost: ~/.codex-chatgpt-web/diagnostics/browser-turns has only 10 trace folders, all written 19:16–19:21 local, because CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10 (browser-worker.ts L1942). The DOM snapshots of the 08:31–08:37Z connector failures and of the verify-* traces no longer exist. Even when kept, connectorRows records only the exact-match selector's rows with textChars; it cannot tell whether visible rows were a near-name match.",
+   "Scale: browser.turn_ended today at time of query: failed 127, completed 51, aborted 23. This class accounts for 4 failed browser attempts (3 Codex tasks) plus about 19.5 minutes of setup time (08:22:28 → 08:41:55) with 9 manual Verify runs.",
+   "Upstream (gh issue/pr view, read-only): #437 (Codex Native intermittently not visible, open) and #436 (personalization preflight deadline, open) match this pattern. #305, #350 and #480 describe 'Error creating connector' after tunnel restarts or on a first Create. The upstream TROUBLESHOOTING says ChatGPT can reject the first Create while the tunnel is healthy. Scan of the 44 most recently pushed forks via gh api compare: no fork commit adds automatic connector-catalog recovery."
+  ],
+  "rootCauses": [
+   {
+    "cause": "No readiness gate between 'Full mode installed' and 'connector verified'. mcp-setup switches the daemon to --full right away, and every automatic Codex turn then needs the Codex Native2 mention. While the user is still creating or attaching the connector in ChatGPT, every turn fails.",
+    "status": "CONFIRMED",
+    "evidence": "mcp-setup --full at 08:22:28Z; connector.verified only at 08:41:55Z; 3 Codex turns (4 browser attempts) failed at prompt_attachment in between. The main.cjs launcher:setup-mcp handler sets mcpSetupComplete:false but nothing consults that flag. config.ts:593 derives localToolsEnabled from mode alone."
+   },
+   {
+    "cause": "The turn's recovery is too short for how long ChatGPT takes to list a new connector: one reload (about 2 s) and three mention attempts inside about 10 s, then a hard non-retryable 424. ChatGPT listed the connector about 15 minutes after it first reached the tunnel.",
+    "status": "CONFIRMED",
+    "evidence": "First tunnel contact 08:27:03Z → first successful @codex listing 08:41:55Z. Each failing attempt: catalog-stale at about +3.5 s, refresh 1.7–2.4 s, final failure at about +6.6 s (daemon durationMs). Code at browser-worker.ts L5008–5064 and L3444–3483."
+   },
+   {
+    "cause": "Why ChatGPT did not list 'Codex Native2' during 08:27–08:41Z. Candidates: (a) the ChatGPT 'Create' attempts failed or were repeated, which fits the 5 handshake bursts and the upstream note that the first Create is often rejected; (b) delay or caching between connector creation and the @-mention catalog; (c) a transient name mismatch while the user was creating it; (d) Developer Mode or per-conversation availability.",
+    "status": "HYPOTHESIS",
+    "evidence": "5 handshake bursts in the tunnel log (08:27:03, 08:28:02, 08:29:52, 08:31:00, 08:39:07); success 2 min 48 s after the last burst, with no new burst. The @codex menu showed at least one other row (the catalog-stale error is thrown only when visibleRows.length > 0), but row titles are deliberately not recorded and the diagnostics were already pruned, so no ChatGPT-side evidence remains."
+   },
+   {
+    "cause": "The launcher restarts the tunnel during the pairing window for unrelated reasons: an app relaunch, a Bigger Context toggle, and a repeated mcp-setup with --restart-service. This could break an in-flight ChatGPT 'Create' and adds tunnel downtime exactly while ChatGPT validates the connector.",
+    "status": "HYPOTHESIS",
+    "evidence": "The restarts themselves are CONFIRMED: 5 tunnel restarts between 08:22:33 and 08:38:43Z with gaps of 1.3–7.7 s, and 29 tunnel instances today, each ended by 'stdio MCP command failed'. That any restart hit a pending Create is not proven: no ChatGPT-side log."
+   },
+   {
+    "cause": "Connector verification is manual and nothing re-checks automatically. The user had to press Verify 11 times (2 rejected because a turn was active). The doctor always says attachment 'cannot be proven locally', although the tunnel-client exposes per-method MCP counters that prove ChatGPT reached the tunnel.",
+    "status": "CONFIRMED",
+    "evidence": "mcp.verification_requested 11× (08:27:27–08:41:51); main.cjs launcher:mcp-verify runs only from IPC; src/doctor.ts L351–358 is hard-coded to warning/unprovenLocally; /metrics shows initialize, notifications/initialized and tools/call counters with status 200."
+   },
+   {
+    "cause": "Verification sometimes reports a missing connector as 'ChatGPT personalization preflight exceeded its readiness deadline' and burns the full 30 s budget. The likely path: when neither Personalized nor Unpersonalized is visible, the proof mention fails and toggleChatGptPersonalizationChoice waits out the deadline.",
+    "status": "HYPOTHESIS",
+    "evidence": "The misreport is CONFIRMED: 4 of 8 failed verifications (08:29:45–08:32:49), each about 32 s after the doctor, while turns at 08:31:54 in the same window captured personalization-already-enabled within 15 ms and failed on the catalog instead. The branch (0/0 controls) is inferred from ensureChatGptPersonalizedConnectorAccessWithinDeadline L608–653; the snapshots were pruned. Same symptom as upstream #436."
+   },
+   {
+    "cause": "The user-facing outcome is misleading and does not say what happens next. The non-retryable failure goes out as a streamed response.failed, Codex retries it 5 times (replayed, so no cost, but it shows 'Reconnecting 5/5'), and the final text says 'create a connector with that exact name before retrying' while a connector was in fact already reaching the tunnel.",
+    "status": "CONFIRMED",
+    "evidence": "logs_2.sqlite responses_retry: 5+5+4 retries within 3–7 s per turn, with no new browser turns in launcher.jsonl. Message built in browser-worker.ts connectorMentionFailure (L3307–3310). Replay behaviour in index.ts L1476–1497."
+   },
+   {
+    "cause": "Diagnostics retention is too short to investigate this class after the fact: only the last 10 traces are kept, so failures are evicted by later successful turns within hours.",
+    "status": "CONFIRMED",
+    "evidence": "CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10; the 10 retained folders date from 19:16–19:21 local; no folders remain for the failing traces or the verify-* traces."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Automatic connector pairing monitor: re-verify in the background until the connector is ready, and replace the Verify button loop with live status",
+    "priority": "P0",
+    "files": [
+     "launcher/electron/main.cjs (launcher:setup-mcp ~L903-935, launcher:mcp-verify ~L731-812: extract runConnectorVerificationCycle)",
+     "launcher/electron/connector-readiness.cjs (new: state machine + backoff scheduler)",
+     "launcher/electron/browser-host.cjs (runConnectorVerification ~L2887)",
+     "launcher/electron/state.cjs (persist connectorState, lastVerifiedAt, lastFailureKind, lastChatGptContactAt)",
+     "launcher/src/App.tsx, launcher/src/i18n.ts"
+    ],
+    "behaviour": "Start the monitor after setup-mcp succeeds, on launcher start in Full mode, after every tunnel restart, and after any turn fails with connector_not_found. While mcpSetupComplete is false: run the existing verifyConnector (it types '@codex' and clears the composer; no ChatGPT message is ever sent) every 15 s for 5 min, then every 60 s up to 30 min, then every 5 min. Run it only when browserHost.activeTraceId is null and the launcher surface is idle (the existing enqueueMaintenance/withManualOperation guards). Do not run it in Zero Risk mode. When it succeeds, set mcpSetupComplete=true, publish 'ChatGPT connector ready', and stop. The UI shows a live checklist with an auto-updated status (tunnel ready · ChatGPT reached tunnel · connector listed) instead of asking the user to press Verify. A manual Verify stays available but is never required.",
+    "tests": "launcher/tests: (1) verifyConnector fails 3× then succeeds → state becomes verified with no IPC call, and the loop stops; (2) no verification starts while activeTraceId is set, and it resumes after the turn ends; (3) backoff schedule and cap with fake timers; (4) Zero Risk mode never schedules; (5) a tunnel restart event re-arms the monitor; (6) a connector_not_found turn failure re-arms the monitor with no user action.",
+    "risk": "Extra '@codex' probes in the launcher-owned ChatGPT surface. They must never overlap a turn (guarded) and must leave an empty composer (the existing clearChatGptComposerState). There is no quota impact because nothing is submitted. Keep the schedule bounded to avoid unnecessary ChatGPT page loads.",
+    "effort": "M"
+   },
+   {
+    "title": "Stepwise self-healing inside prompt_attachment: check the tunnel, reload the catalog, wait with bounded backoff, retry the mention",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (prompt_attachment loop ~L5008-5064, selectConnector ~L3348-3490, ChatGptConnectorCatalogStaleError ~L177)",
+     "src/adapters/chatgpt-web/browser-helper-main.ts (progress messages to the launcher)",
+     "launcher/electron/runtime-supervisor.cjs (readLocalTunnelHealth ~L839, startTunnel ~L977: helper-requested tunnel check/restart)"
+    ],
+    "behaviour": "When the mention misses, before the prompt is ever submitted, proceed as follows. (1) Ask the launcher for tunnel health (healthz/readyz/mcp). If it is not ready, request one supervised tunnel restart and wait up to 30 s for readyz. (2) Reload the page and prepareTemporaryChatSurface (existing), then mention again. (3) If the row is still missing and the tunnel shows ChatGPT contact (fix 4), the connector exists but is not listed yet: wait 15/30/60/60/60 s (total at most about 4 min), each time reload and mention again, emitting adapter progress so the SSE stall timer and Codex keep-alive stay satisfied, plus a visible status line 'Waiting for ChatGPT to list connector Codex Native2'. (4) If the tunnel has never been contacted since setup, skip the wait and fail at once with a human-action message (fix 3). Never cancel the running Codex turn, never submit a ChatGPT message during the ladder, keep one tab, and respect the abort signal at every step. Apply the same ladder to multipart and retained-conversation turns before the first stage is staged.",
+    "tests": "tests/browser-worker-contract.test.ts: (1) row appears on the 3rd reload → turn attaches, and the call order is [mention, reload, mention, wait, reload, mention]; (2) tunnel not ready → exactly one restart request, then success; (3) never-contacted tunnel → fails in under 10 s with kind connector_never_contacted and no waits; (4) abort during a wait → stops without extra DOM mutation and with an empty composer; (5) progress events are emitted during waits (the bridge stall timer does not fire); (6) the existing test 'verifyConnectorExclusive does not reload' still passes.",
+    "risk": "Longer time-to-failure when a connector is really absent. This is limited by the never-contacted fast path and a hard cap. Reloads happen only before submission, so no user content is lost. A tunnel restart from inside a turn must not disturb other in-flight tool calls: allow it only when readyz fails.",
+    "effort": "M"
+   },
+   {
+    "title": "Classify the final failure and tell the user exactly what happens next; show a human-action message only when a person must act",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (connectorMentionFailure ~L3290-3311, chatGptConnectorUnavailableError ~L188)",
+     "src/adapters/chatgpt-web/index.ts (failure emission ~L1463-1497)",
+     "launcher/src/i18n.ts, launcher/electron/main.cjs (notification when the pairing monitor turns ready)"
+    ],
+    "behaviour": "Replace the single 'create a connector with that exact name' text with kinds, each carrying one next step. tunnel_unavailable: 'local tunnel could not be restarted; the launcher keeps retrying; nothing to do unless the Tunnel API key was revoked'. connector_never_contacted: human action, 'ChatGPT has never connected to this computer's tunnel: in ChatGPT Plugins create Codex Native2 → Tunnel → <this tunnel> → Authentication None; the launcher detects it automatically and the next task runs'. connector_listed_under_other_name: case- and whitespace-normalised match only, 'rename it to exactly Codex Native2'. developer_mode_off: detected by a read-only probe of the settings switch, 'turn on Developer Mode in ChatGPT Settings → Apps → Advanced; nothing else changes'. catalog_not_listed_yet: 'ChatGPT reached the tunnel but has not listed the connector after N min; the launcher keeps checking and will notify when ready; then resend the task'. Put the kind in the error code (connector_not_found:<kind>) for structured logs. When the monitor later verifies the connector, the launcher shows one notification: 'Connector ready — resend the failed task'.",
+    "tests": "Unit tests for the kind selection matrix (tunnel health × contact evidence × menu observation × developer-mode probe) → message and code. A snapshot test that messages contain no prompt text or paths. A launcher test that the ready notification fires once after a connector_not_found failure followed by successful verification.",
+    "risk": "The Developer Mode probe depends on the settings UI and its localisation. If the switch cannot be read, report NOT_OBSERVED and fall back to catalog_not_listed_yet rather than guessing. Codex will still show the 5 replayed reconnects unless the error category is changed (see unverified).",
+    "effort": "S"
+   },
+   {
+    "title": "Prove connector attachment locally from tunnel-client metrics instead of the fixed 'cannot prove' warning",
+    "priority": "P1",
+    "files": [
+     "launcher/electron/runtime-supervisor.cjs (new probeTunnelChatGptContact next to probeTunnelMcpTransport ~L728)",
+     "launcher/electron/state.cjs (lastChatGptContactAt survives tunnel restarts)",
+     "src/doctor.ts (connector check ~L351-358)",
+     "src/tunnel.ts"
+    ],
+    "behaviour": "Parse `/metrics` on the tunnel's local health URL: command_end_to_end_latency_milliseconds_count with request_method in {initialize, tools/list, tools/call} and tunnel_service_status=200, plus process_start_time_seconds. Counters reset on every tunnel restart (29 today), so persist 'last seen contact' in launcher state and compare deltas on each 10 s monitor tick. Doctor output: ok 'ChatGPT reached this tunnel at <time>', warning 'ChatGPT has not connected to this tunnel since setup at <time>', or NOT_OBSERVED if metrics are unreadable. Feed the result into fixes 1–3.",
+    "tests": "Fixture metrics text → parsed counts; missing metric names → NOT_OBSERVED, not 'no contact'; a counter reset after restart keeps the persisted timestamp; doctor JSON variants.",
+    "risk": "The metric names are internal to the pinned tunnel-client version. Parse defensively, pin the check to the installed binary version, and never treat absence as proof. Tunnel metrics carry no user content (method names and counts only).",
+    "effort": "S"
+   },
+   {
+    "title": "Do not restart the tunnel for unrelated setting changes, and hold restarts while the connector is being paired",
+    "priority": "P1",
+    "files": [
+     "launcher/electron/main.cjs (Bigger Context / setup handlers that pass --restart-service)",
+     "launcher/electron/runtime-supervisor.cjs (restart ~L2041, startTunnel forceRestart ~L977)",
+     "src/setup.ts"
+    ],
+    "behaviour": "When the tunnel configuration (tunnel id, key, profile, MCP command) is unchanged, restart only the daemon and leave tunnel-client and its stdio MCP child running. If the MCP child must pick up new code, restart only after a quiet period. While the pairing monitor is open (setup-mcp done, connector not yet verified), defer non-essential restarts unless readyz fails.",
+    "tests": "Toggling Bigger Context with an unchanged tunnel config does not call stopTunnelGracefully/startTunnel, and the tunnel pid is unchanged. A deferred restart runs after verification. A readyz failure still restarts immediately.",
+    "risk": "Version skew between the running MCP stdio child and a new daemon build. Needs a check of whether the MCP child reads config that changes with these toggles; not verified.",
+    "effort": "M"
+   },
+   {
+    "title": "Fix the personalization preflight misreport when the connector is simply not listed",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (ensureChatGptPersonalizedConnectorAccessWithinDeadline ~L581-716, toggleChatGptPersonalizationChoice ~L546)"
+    ],
+    "behaviour": "If neither Personalized nor Unpersonalized is visible and the proof mention finds no connector row while other rows are visible, return a catalog-missing result immediately (ChatGptConnectorCatalogStaleError, so fixes 2 and 3 handle it). Do not try to toggle a control that is not there, which currently burns the 30 s deadline. Capture a structural checkpoint 'personalization-control-absent'.",
+    "tests": "Fake page with 0/0 controls and no row → catalog-missing in under 5 s, not a deadline error. 0/0 with the row present → already-personalized. 0/1 → the existing toggle path is unchanged. Covers upstream #436.",
+    "risk": "A real Unpersonalized state hidden during hydration could be misclassified. Keep one settle re-check (existing) before deciding.",
+    "effort": "S"
+   },
+   {
+    "title": "Keep failure diagnostics and record structural menu evidence",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT L1942, pruneBrowserDiagnostics ~L1950-1965, snapshot connectorRows ~L2046-2106)"
+    ],
+    "behaviour": "Keep the last 10 traces plus the last 20 failed or verify-failed traces (48 h, with a size cap). In connector checkpoints add counts only: visibleMenuRows, exactMatch, normalizedMatch (case- and whitespace-folded), legacyMatch, devMatch, and personalizationControls {personalized, unpersonalized}. Record no titles or text.",
+    "tests": "Prune keeps failed traces when newer successful ones arrive. The checkpoint JSON contains the counts and no strings longer than attribute names.",
+    "risk": "Disk growth, bounded by the cap. Privacy is unchanged because only counts and booleans are recorded.",
+    "effort": "S"
+   },
+   {
+    "title": "Optional, with explicit one-time consent: automated connector provisioning in the launcher's own ChatGPT surface",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (new maintenance op 'provisionConnector')",
+     "src/adapters/chatgpt-web/browser-helper-main.ts",
+     "launcher/electron/main.cjs",
+     "launcher/src/App.tsx"
+    ],
+    "behaviour": "Serves the owner's 'no manual account configuration' goal. After one explicit consent screen in the launcher, the launcher opens ChatGPT Plugins, creates 'Codex Native2' (Tunnel → this tunnel id, Authentication None), retries 'Create' once (known first-attempt rejection), reads it back from the list, then hands off to the pairing monitor. The 'Allow all actions' permission and the Developer Mode toggle stay a user click the launcher shows and confirms, never flipped silently.",
+    "tests": "DOM-fixture tests for create-and-readback, the single Create retry, and abort. A test that there is no permission escalation without a recorded consent receipt.",
+    "risk": "High: account-level mutation, ChatGPT UI churn, and upstream deliberately keeps this manual. Must never bypass ChatGPT safety checks or rate limits, and must not run without consent.",
+    "effort": "L"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/437 (Codex Native intermittently not visible, open)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/436 (personalization preflight exceeded its readiness deadline, open)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/480 (connector unavailable after restart; maintainer: tunnel not running)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/305 (cannot create Codex Native2; maintainer: first Create may time out, click Create again)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/350 (Error creating connector; TROUBLESHOOTING section)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/304 ('This conversation does not support developer MCPs'; Developer Mode recovery)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/187 (verification failed because of a broad @c query; fixed v4.0.2)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/151 (use @codex when selecting the connector, merged)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/374 (connector identity keyed on App Id; fixed-name decision)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/425 (cannot replace old connector with the same name)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/547 (Codex retries 5x within seconds on a non-recoverable-in-seconds failure)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/428 (follow-up turns omit the connector mention; adjacent)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/354 (rediscover uncached tunnel health before monitoring, closed)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/402 (recognize Chinese temporary-chat personalization controls, merged)",
+   "https://github.com/openai/tunnel-client (exposes /healthz, /readyz, /metrics, /ui; per-method command counters)",
+   "https://developers.openai.com/api/docs/guides/secure-mcp-tunnels",
+   "https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt",
+   "Fork scan (gh api compare over the 44 most recently pushed forks): no fork commit implements automatic connector-catalog recovery. Connector or tunnel commits exist in miziusLabs/Codax, Froraut/NEKODEX and Evanlau1798/codex-chatgpt-web, but none cover this."
+  ],
+  "unverified": [
+   "Why ChatGPT did not list 'Codex Native2' from 08:27:03Z (first tunnel contact) to 08:41:55Z. Failed Create attempts, delay before the @-mention catalog updates, a temporary name mismatch and Developer Mode state are all open: there is no ChatGPT-side evidence, the DOM diagnostics for these traces were pruned, and row titles are not recorded by design.",
+   "Which rows the @codex menu showed during the failures. Only 'at least one other row' is implied by the code path that throws ChatGptConnectorCatalogStaleError.",
+   "Whether the 4 verification deadline failures really took the 0/0 personalization-control branch (snapshots pruned).",
+   "What the 5 handshake bursts were: ChatGPT Create clicks, connector refreshes or validation probes. Also what triggered the launcher relaunches at 08:28:51Z and 08:33:54Z (source-update.log starts only at 14:28Z).",
+   "Whether any tunnel restart overlapped a pending ChatGPT Create and caused it to fail.",
+   "Which streamed response.failed error codes Codex treats as fatal, i.e. whether the 5 replayed reconnects can be avoided without misrepresenting the error (codex-rs source not checked).",
+   "How stable the tunnel-client /metrics names are across versions. Only the currently running instance was read.",
+   "The 3552 non-JSON lines in the tunnel-client log were not inspected (they may contain MCP child stderr), for privacy reasons.",
+   "Whether the MCP stdio child actually needs a tunnel restart when Bigger Context or other settings change (it affects fix 5).",
+   "Developer Mode state today and whether a read-only settings probe can read it reliably in all UI languages.",
+   "The overall turn tallies (completed/failed/aborted) keep changing because launcher.jsonl was still being appended during the analysis. The counts for the connector window (08:22–08:45Z) are stable."
+  ]
+ },
+ {
+  "class": "Зависания и таймауты браузерной автоматизации ChatGPT Web (renderer занят огромным сообщением + связка всех вкладок через per-turn connectOverCDP + повторы Codex, которые умножают нагрузку). «response-stalled-60s» и «prompt attachment aborted» к этому классу не относятся: первое — диагностическая метка долгого ответа, второе — прерывание задачи самим Codex.",
+  "evidence": [
+   "Попытки за день. Запрос: launcher.jsonl, записи с at^='2026-09-18'; попытка = browser.turn_started по traceId, строки моста 'browser turn <id> stage=…/opened/failed:' приписываются последней попытке этого trace (скрипт /private/tmp/claude-501/-Users-trukhinyuri/e7c43c6f-a8c6-446f-aa9f-b365939a0826/scratchpad/turns3.py + norm.py, срез около 17:35Z, лог продолжает расти). Итог: 204 попытки, 138 trace, 31 trace с повторами (максимум 8 попыток). Исходы: 52 completed, 78 rate limit, 21 'Something went wrong', 6 viewport timeout, 3 browser_page 60s timeout, 3 сбоя send (2 × locator.press 15s, 1 × stage send 20s), 4 Stopped thinking, 4 displayed error, 2 missing completion action, 23 aborted.",
+   "response-stalled-60s. Это checkpoint diagnostics.capture(page,'response-stalled-60s') ровно через 60 с после send, без проверки здоровья страницы (browser-worker.ts:5369-5377). Его достигли 51 попытка, из них 40 завершились completed. Флаги в строках 'waiting for completed-turn evidence' (51 строка): 47 × running=true, sawRunning=true, textChars=0, completionActionVisible=false (модель ещё думает); 3 × running=true, text>0; 1 × running=false, text>0, completionAction=true.",
+   "Время получения страницы (stage=browser_page completed durationMs) в зависимости от tabCount из browser.tab_created перед turn_started: 1 вкладка n=42, медиана 82 ms, максимум 287 ms; 2 вкладки n=25, медиана 193 ms, p90 3.9 s; 3 вкладки n=29, медиана 884 ms, p90 28 s, ≥10 s — 6 раз; 4 вкладки n=31, медиана 2.3 s, p90 58 s, ≥10 s — 9 раз; 5 вкладок n=28, медиана 4.3 s, p90 25.6 s, ≥10 s — 5 раз. В зависимости от числа ходов, уже идущих на старте: 0 → медиана 119 ms; 1 → 477 ms; 2 → 4.2 s; 3 → 2.9 s; 4 → 16.6 s.",
+   "Одна занятая вкладка блокирует другие ходы (launcher.jsonl, 14:27–14:36Z). В 14:27:39 f89a91 начал multipart_stage_1_send части в 300,494 символов; стадия заняла 146,301 ms. В то же окно b397b3 упал на browser_page ровно через 60,000 ms (14:28:39). Для вкладки f89a91 browser.tab_responsive пришёл в 14:28:46. Повтор b397b3, начатый в 14:28:41, получил страницу за 7,205 ms. Пока f89a91 ждал acknowledgement, у b397b3 ещё дважды был browser_page 60,001 ms (14:34:24 и 14:35:26).",
+   "Rebind. Стадий response_page_rebind_N: 18 начато, 12 завершено (3.4–58 s), 6 провалено; все 6 провалов с текстом 'did not expose an operational viewport'. Rebind был в 16 попытках, ни одна не завершилась completed (исходы: 6 viewport, 4 rate limit, 4 SWW, 1 displayed error, 1 stopped thinking). Все 12 успешных rebind — checkpoint assistant-page-rebound, то есть сразу после send.",
+   "Rebind и размер входа (estimatedInputTokens из строки 'opened'): <20k — 0 из 22; 20–50k — 4 из 100; 50–100k — 6 из 10 (completed только 1 из 10); ≥100k — 5 из 31.",
+   "Длительность send (stage send durationMs). Inline: n=96, медиана 527 ms, максимум 20 s. Финальный send Bigger Context: n=6, медиана 26.5 s, максимум 85.9 s, 3 из 6 провалены. При этом CHATGPT_SEND_ACTION_TIMEOUT_MS=15000 (browser-worker.ts:145). Acknowledgement multipart-стадий: n=30, медиана 39.9 s, 17 провалено.",
+   "Зависание renderer (hang monitor Chromium). browser.tab_responsive: 17:13:56 и 17:14:45 для 5a92fa (параллельных ходов 0), 17:18:05 для 29f862 — в те же секунды, что их locator.press 'Timeout 15000ms exceeded' на send-button. Записей browser.tab_unresponsive за день 0, хотя обработчик есть (browser-host.cjs:872-877).",
+   "Диагностические снимки (~/.codex-chatgpt-web/diagnostics/browser-turns, только структура). У 29f862: 30-send-ready — user=2/assistant=2, 31-turn-failed — user=3/assistant=3: промпт принят, а ход провален. В обоих сохранившихся trace с viewport-сбоем (0b8f3296efe6-*) turn-failed содержит captureErrors.state 'DOM observation did not respond within 5000ms', то есть renderer занят. Viewport внутри trace скачет 868x835 ↔ 1120x913. У f76574 и 29f862 он сменился на 1120x913 между 17:15:59 и 17:16:48, когда создавались другие вкладки; effort_selection у f76574 занял 30,833 ms при медиане дня 734 ms.",
+   "Повторы Codex (~/.codex/logs_2.sqlite, target='codex_core::responses_retry', ts ≥ 2026-09-18T00:00Z): 209 предупреждений. Номер попытки: 1/5 — 52, 2/5 — 39, 3/5 — 37, 4/5 — 35, 5/5 — 35. Классы sampling_error: SWW 42, 'did not confirm that the prompt was sent' 19, 'stopped responding after the task started' 15, rate limit около 55, Stopped thinking 10, browser_page timeout 3, viewport 1 (плюс вне класса: missing cwd 35, connector 14).",
+   "Всплеск 17:13–17:21: 12 попыток. Ходы multipart-3 на 205k–265k оценочных токенов (maxMessageChars 230k–318k). Trace 643f89 сделал 4 попытки (17:16:49, 17:18:43, 17:19:15, 17:20:24), все упали на SWW на acknowledgement стадии 1. browser_page в этом окне — 8–34 s.",
+   "Прерывания. Время 'aborting running task' в codex_core::tasks (13:29:19, 16:41:17, 17:15:41, 17:16:24, 17:30:05) совпадает со стартом попыток с prompt_attachment_aborted (13:29:18, 16:41:14, 17:15:40, 17:16:20, 17:30:03) с разницей 1–4 s. Только 3 из 23 aborted-попыток закончились в пределах 10 s от runtime.active_turns_cancelled.",
+   "Сборки обновлений (source-update.log, от 'source update' до 'verified and staged'): 7 окон, всего 36 минут. Внутри окон стартовали 17 попыток, completed 0 (8 из них — rate limit). Медианы стадий внутри и вне окон: temporary_chat 1.37 vs 1.32 s; effort 0.75 vs 0.73 s; prompt_attachment 1.40 vs 1.18 s; send 0.61 vs 0.53 s. Один и тот же коммит собирался дважды параллельно (15:38/15:41, 16:17/16:21, 16:58/17:01), каждый раз после перезапуска launcher; launcher.window_created за день — 21.",
+   "Разовый снимок около 17:37Z (sysctl, ps): vm.loadavg 13.24/17.39/16.20 при hw.ncpu 12. Три renderer вкладок Codex Web GPT по 98–102% CPU каждый, RSS 0.76–1.03 GB, pri 47 (не фоновый приоритет). Переключателей Chromium disable-renderer-backgrounding и disable-backgrounding-occluded-windows нет (main.cjs:1358-1361). launcher-state.json: showBrowserDuringTurns=true, experimentalBiggerContext=true.",
+   "Хранение диагностики: CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT=10 (browser-worker.ts:1942). Trace 29f862, записанный в 17:18, к 17:36 уже удалён. События show/hide/minimize/restore окна, смены viewport вкладок и длительность CDP connect в launcher.jsonl не пишутся."
+  ],
+  "rootCauses": [
+   {
+    "cause": "«response-stalled-60s» — не сбой. Checkpoint пишется на 60-й секунде после send при любом состоянии, а строка лога называет это stall. В тройку самых частых сбоев он попал ошибочно и уводит диагностику не туда.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:5369-5377. Из 51 попытки с этим checkpoint 40 завершились completed; 47 из 51 были в состоянии running=true, text=0 (модель думает)."
+   },
+   {
+    "cause": "Каждый ход открывает свой chromium.connectOverCDP ко всему Electron (launcher-browser-host.ts:267). В Playwright 1.62 connect ждёт _waitForAllPagesToBeInitialized: Runtime.enable, Network, Emulation и т.д. на КАЖДОЙ вкладке. Поэтому одна занятая вкладка задерживает browser_page и rebind всех остальных ходов, а цена подключения растёт с числом вкладок, включая retained.",
+    "status": "CONFIRMED",
+    "evidence": "coreBundle.js в playwright-core 1.62: await browser._waitForAllPagesToBeInitialized() в connectOverCDP. Медиана browser_page растёт с 82 ms (1 вкладка) до 4.3 s (5 вкладок), p90 при 4 вкладках — 58 s. Хронология 14:27:39–14:28:46 (f89a91 занят 146 s → у b397b3 browser_page 60 s → после tab_responsive приобретение за 7.2 s). Upstream: microsoft/playwright#42730 (open)."
+   },
+   {
+    "cause": "Основной поток renderer подолгу занят на очень больших сообщениях (staged-части по 180k–330k символов, финальный send поверх 2–3 таких частей), а автоматизация считает «занят» сбоем из-за фиксированных коротких лимитов: DOM probe 5 s, viewport 10 s, press 15 s. Текст 'did not expose an operational viewport' в основном означает занятый renderer, а не нулевой viewport.",
+    "status": "CONFIRMED",
+    "evidence": "Финальный multipart send: медиана 26.5 s при лимите press 15 s, 3 из 6 провалены. У 5a92fa сбой при 0 параллельных ходах; tab_responsive совпадает по времени со сбоями press. Rebind: 0 из 22 при входе <20k токенов против 6 из 10 при 50–100k. В 2 из 2 сохранившихся viewport-сбоев captureErrors.state — 5-секундный таймаут DOM при записи turn-failed. Константы: browser-worker.ts:145, 1272, 1309-1322."
+   },
+   {
+    "cause": "Rebind не лечит занятый renderer. Новое connectOverCDP ждёт инициализации и той самой занятой страницы, затем 10-секундная проверка viewport; после исчерпания MAX_CHATGPT_BROWSER_PAGE_REBINDS=2 или сбоя проверки ход проваливается. Отключение CDP к тому же может сбросить эмуляцию (#278).",
+    "status": "CONFIRMED",
+    "evidence": "rebindLauncherPage browser-worker.ts:4766-4823, 5222-5246. Rebind был в 16 попытках, completed — 0; из 18 rebind 6 упали на viewport; длительность rebind 3–58 s."
+   },
+   {
+    "cause": "Медленное подтверждение нажатия Enter превращает принятый промпт в сбой: catch в sendAttachedPrompt нажимает Stop, если генерация идёт, и бросает ошибку. Затем submittedTurnFailure (index.ts:350-354) показывает 'did not confirm that the prompt was sent / Check the ChatGPT tab' — сообщение, которое требует от пользователя разбираться в ошибке.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:3694-3720 (press с timeout 15 s, затем Stop в catch). Снимок 29f862: user/assistant 2→3 к моменту turn-failed. В логах Codex 19 повторов с 'did not confirm that the prompt was sent'."
+   },
+   {
+    "cause": "Codex повторяет неизвестные коды response.failed до 5 раз с задержкой в миллисекунды или секунды. Поэтому каждый сбой после send (зависание, rebind, SWW) заново отправляет весь контекст в новый Temporary Chat. Большие ходы умножаются, растёт нагрузка на renderer и срабатывают лимиты ChatGPT.",
+    "status": "CONFIRMED",
+    "evidence": "Комментарий в server.ts:718-722 ('Codex retries unknown streamed response.failed codes'). responses_retry: 209 предупреждений, 35 серий дошли до 5/5. У 643f89 4 попытки по 3 части ~250k символов за 5 минут, все SWW."
+   },
+   {
+    "cause": "Каждый новый или повторно используемый ход делает свою вкладку выбранной (selectedTabId = tab.id, при showBrowserDuringTurns=true — ещё и show()). Уже идущая вкладка при этом уходит за экран с device emulation на полный размер окна, то есть тяжёлая страница меняет viewport (868x835 → 1120x913) прямо посреди хода.",
+    "status": "CONFIRMED",
+    "evidence": "browser-host.cjs:2335-2340, 2355-2358, 1470-1526. Смена viewport у f76574 и 29f862 в 17:16:16–17:16:48 при создании других вкладок; effort_selection у f76574 занял 30.8 s при медиане 0.73 s. Вклад этой перекладки в зависания — гипотеза, сама смена подтверждена."
+   },
+   {
+    "cause": "'prompt attachment aborted' и большинство 'turn aborted' — прерывание задачи самим Codex (Esc, steering или новый ввод), а не зависание браузера. Лечить здесь нечего, и ход трогать нельзя.",
+    "status": "CONFIRMED",
+    "evidence": "5 из 5 prompt_attachment_aborted совпадают с 'aborting running task' в codex_core::tasks с разницей 1–4 s; runtime.active_turns_cancelled объясняет только 3 из 23 прерываний."
+   },
+   {
+    "cause": "Сборки обновлений под nice 15 заметного вклада не дают. Дополнительная нагрузка возникает от параллельной второй сборки того же коммита после каждого перезапуска launcher; вместе с общей загрузкой Mac (loadavg больше числа ядер) это может добивать renderer в тяжёлые моменты.",
+    "status": "HYPOTHESIS",
+    "evidence": "Медианы стадий внутри и вне окон сборок одинаковы. 2 viewport-сбоя (15:44, 15:45) пришлись на окно двойной сборки 15:38–15:46. Разовый снимок: loadavg 13–17 на 12 ядрах. История загрузки CPU не логируется."
+   },
+   {
+    "cause": "Окно скрыто или перекрыто (macOS occlusion) → renderer в фоне и rAF/lifecycle не идут, что даёт ложные «не создан ответ / нет completion action».",
+    "status": "HYPOTHESIS",
+    "evidence": "Видимость окна не логируется. Переключателей disable-renderer-backgrounding нет. В снимке renderer вкладок был pri 47, фонового приоритета не видно. Окно на втором мониторе (window-state y=-1016). Прямых данных на моменты сбоев нет."
+   },
+   {
+    "cause": "Все ходы идут в одном процессе helper (LauncherBrowserHelperClient.ensureChild) с общим event loop. Тяжёлая синхронная работа одного хода (Markdown/HTML крупного ответа, сериализация снимков) может задерживать 5-секундные таймеры probe у других.",
+    "status": "HYPOTHESIS",
+    "evidence": "launcher-helper-client.ts:380-420 — один child на daemon. Метрики event-loop lag нет, проверить нечем."
+   },
+   {
+    "cause": "Недостаточная наблюдаемость мешает автоматически лечить и разбирать сбои: хранятся только 10 trace (упавшие вытесняются за минуты); tab_unresponsive ни разу не записан; нет событий видимости окна, смен viewport и стоимости CDP connect.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:1942; trace 29f862 из 17:18 удалён к 17:36; tab_responsive записан 6 раз, tab_unresponsive — 0."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Одно долгоживущее CDP-подключение на процесс helper вместо connectOverCDP на каждый ход",
+    "priority": "P0",
+    "files": [
+     "src/launcher-browser-host.ts (connectLauncherBrowserHost, selectLauncherPage)",
+     "src/adapters/chatgpt-web/browser-worker.ts (runBrowserTurn: stage browser_page, rebindLauncherPage, finally с turnConnection.close)",
+     "src/adapters/chatgpt-web/browser-helper-main.ts"
+    ],
+    "behaviour": "Helper один раз подключается к launcher и держит Browser. Ход получает Page по карте targetId → surfaceId (Target.getTargetInfo считается один раз при появлении вкладки). Новые вкладки приходят через событие 'page' и инициализируются один раз, пока они ещё лёгкие. Rebind = заново найти Page в том же подключении, без close/reconnect. При 'disconnected' — одно переподключение с backoff для всех ходов и перепривязка их Page без повторной отправки промпта. Никакой ход больше не ждёт инициализации чужих вкладок, и отключение CDP не сбрасывает эмуляцию viewport.",
+    "tests": "Фейковый CDP, у одной страницы Runtime.enable не отвечает никогда: получение другой вкладки укладывается в 1 s. 10 последовательных ходов → ровно 1 вызов connectOverCDP. Разрыв подключения во время ответа → ход продолжает наблюдать ту же страницу, send не повторяется. Регресс по #278: после завершения другого хода эмуляция скрытой вкладки на месте.",
+    "risk": "Одна точка отказа на все ходы: нужен явный supervisor подключения и поколения Page. Общие для подключения init-скрипты и routes нельзя вешать per-turn. Упирается в открытый microsoft/playwright#42730, если переподключение всё-таки понадобится при занятой вкладке: инициализацию нужно ограничивать по каждой вкладке.",
+    "effort": "L"
+   },
+   {
+    "title": "Отличать «renderer занят» от «renderer сломан» и ждать, а не проваливать ход",
+    "priority": "P0",
+    "files": [
+     "launcher/electron/browser-host.cjs (heartbeatTurn, обработчики unresponsive/responsive/render-process-gone в районе 862-877)",
+     "src/adapters/chatgpt-web/browser-worker.ts (withChatGptBrowserObservationTimeout и его вызовы, waitForOperationalChatGptViewport, recoverPageObservation, константы 145/1272/1273)",
+     "src/launcher-browser-host.ts (разбор ответа heartbeat)"
+    ],
+    "behaviour": "Launcher в ответе на heartbeat отдаёт состояние renderer своей вкладки: флаг unresponsive от hang monitor, CPU% и RSS через app.getAppMetrics() по webContents.getOSProcessId(), crashed, текущий эмулированный размер viewport. Когда 5-секундный probe не ответил, helper спрашивает launcher. Renderer жив и занят → ждём с backoff в пределах бюджета стадии (с учётом suspension clock) и НЕ тратим лимит rebind. Renderer простаивает, а CDP молчит → один rebind. Renderer упал → понятный терминальный исход. Проверка viewport сначала сверяется с размером, известным launcher: если он не меньше 320x240, это «занят», и ошибка про viewport не выдаётся. В Codex идёт commentary-прогресс вида «ChatGPT обрабатывает большое сообщение, N s».",
+    "tests": "Probe молчит 40 s, launcher сообщает busy → rebind не запускается, ход завершается. idle + молчание → ровно один rebind. crashed → ход падает сразу с текстом о следующем шаге. viewport 0x0 по данным launcher → прежняя ошибка viewport. Регресс: ожидание отменяется по turn.abortSignal.",
+    "risk": "По-настоящему повисшая страница ждёт дольше (до бюджета стадии). Метрика CPU шумная — порог и окно нужно подбирать по логам. Нельзя растягивать бюджеты вне runStage.",
+    "effort": "M"
+   },
+   {
+    "title": "Не останавливать и не проваливать принятый промпт из-за медленного подтверждения нажатия",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (sendAttachedPrompt 3663-3721, CHATGPT_SEND_ACTION_TIMEOUT_MS)",
+     "src/adapters/chatgpt-web/index.ts (submittedTurnFailure 311-363)"
+    ],
+    "behaviour": "Если press('Enter') упал по таймауту, а не из-за отмены Codex: не нажимать Stop, а перепроверить признаки отправки (рост числа user-ходов, generation_running, MCP-прогресс) через busy-aware ожидание из предыдущего пункта. Промпт принят → вернуть evidence и продолжить ход. Не принят и renderer простаивает → неоднозначный исход без Stop и без повторного нажатия send. Для финального multipart send лимит действия выровнять с бюджетом стадии, поскольку медиана 26.5 s. Текст сбоя описывает, что будет дальше, а не просит «проверить вкладку».",
+    "tests": "Фейк: press висит 30 s, счётчик user-ходов вырос → стадия send возвращает user_turn, Stop не нажат, ответ дочитывается. press висит, признаков нет → ошибка без Stop и без второго submit. Отмена Codex во время press → Stop нажимается, как сейчас.",
+    "risk": "Главный риск — двойная отправка. Правило «после таймаута send не нажимается повторно никогда» закрепить тестом.",
+    "effort": "S"
+   },
+   {
+    "title": "Возобновлять застрявший ответ внутри моста и прекратить слепые 5 повторов с полным контекстом",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/index.ts (submittedTurnFailure, createChatGptWebAdapter)",
+     "src/adapters/chatgpt-web/turn-execution.ts",
+     "src/server.ts (кодирование ответа, по образцу client_cancelled, строки 716-730)",
+     "src/bridge.ts (response.failed)"
+    ],
+    "behaviour": "Если после send сломалась только локальная сторона (renderer занят, CDP разорван, сбой rebind), а вкладка жива, запрос Codex остаётся открытым с heartbeat, пока helper заново привязывается к той же вкладке и дочитывает ответ. Страница не перезагружается: Temporary Chat после reload может пропасть. Только если вкладка потеряна, вернуть терминальный исход, который Codex не повторяет вслепую (класс HTTP 4xx или известный нефатальный код с явной задержкой), с текстом о следующем шаге: например, «Codex отправит задачу заново через N s на свежей вкладке» или «задача остановлена, отправьте сообщение ещё раз». Повтор того же запроса после терминального исхода не создаёт новый browser turn. Лимиты ChatGPT не обходятся, выполняемый ход Codex не отменяется.",
+    "tests": "Зависание renderer после send длиной 90 s → Codex не получает response.failed, ответ приходит целиком. Вкладка закрыта → ровно один терминальный ответ, повтор идентичного запроса отвечает тем же кодом без открытия вкладки. Сбой до send по-прежнему повторяется в пределах MAX_CHATGPT_WEB_TURN_RETRIES.",
+    "risk": "Долгая тишина в интерфейсе Codex — нужны commentary-события прогресса. Поле 'retryable' Codex не понимает, поэтому нужно проверить, какие коды Codex считает фатальными, на живом Codex (сейчас вывод сделан по комментарию в server.ts).",
+    "effort": "L"
+   },
+   {
+    "title": "Очередь на тяжёлые фазы и не больше одного Bigger Context хода одновременно",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (runStage/runBrowserTurn: browser_page, temporary_chat_preparation, effort_selection, prompt/multipart attachment, send, response_page_rebind_N, connector_catalog_refresh)",
+     "src/adapters/chatgpt-web/concurrency.ts"
+    ],
+    "behaviour": "FIFO-семафор внутри процесса (helper у всех ходов один, так что межпроцессный lock через launcher не нужен) на стадии, которые активно двигают страницу. Ожидание ответа модели остаётся вне семафора. Отдельный лимит — один multipart (Bigger Context) ход за раз, следующий ждёт в очереди с прогрессом в Codex. Бюджет ожидания рассчитан на MAX_CHATGPT_BROWSER_TABS. Это снижает пиковый трафик на аккаунт и не обходит никаких ограничений.",
+    "tests": "Два хода: тяжёлые стадии не пересекаются, ожидание ответов идёт параллельно. Отмена или закрытие вкладки освобождает семафор. Реентерабельность вложенных стадий. Пять ходов не упираются в бюджет ожидания (ошибка из fork-коммита 29d9c2da). Второй multipart ход стартует после первого.",
+    "risk": "Дольше путь до ответа у параллельных сабагентов; возможна взаимоблокировка, если стадия под семафором ждёт другой ход. Эти данные — как раз измерение, которое просил upstream #381.",
+    "effort": "M"
+   },
+   {
+    "title": "Стабильный viewport идущей вкладки при смене выбора и видимости",
+    "priority": "P1",
+    "files": [
+     "launcher/electron/browser-host.cjs (hiddenTurnBounds 1470-1483, presentTurnView 1496-1526, выбор вкладки на старте хода 2335-2358)"
+    ],
+    "behaviour": "Эмулированный размер скрытой вкладки равен последнему видимому размеру панели (this.bounds, не меньше 800x600), а не полному размеру окна, чтобы переход visible↔hidden не менял innerWidth/innerHeight тяжёлой страницы. Новый ход не забирает выбор у идущей вкладки, если пользователь на неё смотрит. Вкладка остаётся отрисовываемой за экраном, как сейчас.",
+    "tests": "Юнит-тест launcher: ход A виден 868x835, стартует ход B → эмулированный размер A по-прежнему 868x835. setBounds во время скрытия применяет эмуляцию один раз. Регресс #240/#278: скрытая вкладка сохраняет рабочий viewport.",
+    "risk": "Минимальный: скрытые вкладки становятся уже, чем сейчас. Нужно проверить селекторы меню effort при ширине панели.",
+    "effort": "S"
+   },
+   {
+    "title": "Меньше работы renderer на одно сообщение для огромного контекста",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (resolveChatGptWebMultipartStagingMode, assertChatGptWebMultipartInputWithinLimits)",
+     "src/adapters/chatgpt-web/prompt.ts"
+    ],
+    "behaviour": "Адаптивный размер staged-части: после зафиксированного зависания renderer (tab_unresponsive или send/ack больше порога) уменьшать maxStageChars для следующих ходов. Второй вариант — передавать staged-контекст файлом .txt, а не текстом в composer (закрытый upstream PR #460), чтобы не рендерить 300k символов в DOM.",
+    "tests": "Staging режет контекст по пониженному порогу; протокол acknowledgement не меняется; при файловом варианте полнота контекста проверяется контрольным вопросом на тестовом аккаунте.",
+    "risk": "Меньшие части = больше сообщений на ход, то есть больше запросов к аккаунту. С файлом ChatGPT может работать через retrieval, а не полным контекстом. Нужен замер до включения по умолчанию.",
+    "effort": "M"
+   },
+   {
+    "title": "Наблюдаемость для самолечения и разбора",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (5369-5377, pruneBrowserDiagnostics и лимит на 1942)",
+     "launcher/electron/browser-host.cjs (windowVisibilityListener, presentTurnView, обработчик unresponsive на 872)",
+     "src/launcher-browser-host.ts"
+    ],
+    "behaviour": "Переименовать checkpoint в response-still-generating-60s и писать на уровне info. Логировать show/hide/minimize/restore и occlusion окна, смены эмулированного viewport вкладки, CPU/RSS renderer на границах стадий, длительность CDP connect и число инициализированных страниц, лаг event loop helper. Хранить упавшие trace отдельно от обычных (например, последние 20 упавших за 24 ч). Выяснить, почему не пишется browser.tab_unresponsive.",
+    "tests": "Pruning сохраняет упавшие trace при 50 успешных подряд. Схема новых событий без текста страниц и промптов. Тест: unresponsive → запись есть.",
+    "risk": "Объём лога; обязательная санитизация — только структурные поля.",
+    "effort": "S"
+   },
+   {
+    "title": "Одна сборка обновления за раз и фоновый QoS для сборки",
+    "priority": "P2",
+    "files": [
+     "launcher/electron/source-update.cjs",
+     "launcher/electron/source-update-worker.cjs"
+    ],
+    "behaviour": "Single-flight lock: перезапуск launcher не запускает вторую параллельную сборку того же коммита, а присоединяется к идущей. Сборку запускать через taskpolicy -b (background QoS, эффективные ядра), а не только с nice, и откладывать тяжёлые шаги verify/package, пока идут браузерные ходы.",
+    "tests": "Второй старт при идущей сборке не создаёт новый процесс; аргументы запуска содержат taskpolicy; сборка ждёт, пока active_browser_turns > 0.",
+    "risk": "Обновления ставятся дольше. По данным это не главный источник сбоев.",
+    "effort": "S"
+   },
+   {
+    "title": "Эксперимент с фоновым приоритетом renderer — только после замера",
+    "priority": "P2",
+    "files": [
+     "launcher/electron/main.cjs (1358-1361)"
+    ],
+    "behaviour": "Сначала логировать приоритет процессов renderer и occlusion в моменты зависаний. Переключатели disable-renderer-backgrounding и disable-backgrounding-occluded-windows включать, только если замер покажет фоновый приоритет у идущих вкладок.",
+    "tests": "Сравнить задержку DOM probe у видимой и скрытой вкладки при одинаковой нагрузке до и после включения.",
+    "risk": "Больше CPU у простаивающих retained-вкладок; возможен эффект «пустого окна» (electron#42378).",
+    "effort": "S"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/278 — rebind после отправки теряет viewport скрытой вкладки; мейнтейнер пишет, что нужно отличать нулевой viewport от занятого renderer",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/359 — классифицировать viewport-сбои по фазе отправки, без повторной отправки принятых ходов",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/381 — сначала измерить конкуренцию renderer, потом менять планирование параллельных ходов (закрыт без решения)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/373 — сериализация тяжёлых фаз между параллельными ходами (закрыт)",
+   "https://github.com/Ahmet1991/codex-chatgpt-web/commits/contrib/heavy-browser-phase-lock — fork-коммиты 29d9c2da (ожидание рассчитано на 5 вкладок), 6e318af2 (под lock также connector_catalog_refresh и final_part_effort_selection), a55715a8 (исправлен regexp для нумерованных стадий rebind и multipart)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/226 — merged: отключать зависшее CDP-подключение до rebind",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/171 — merged: рабочий viewport у скрытых вкладок ходов",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/355 — закрыт: ограниченные повторы при сбое viewport без повторной отправки",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/255 — закрыт: не ждать навигацию после нажатия send",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/331 и https://github.com/miuuyy/codex-chatgpt-web/pull/334 — расширить допуски на долгие ходы (60→120 s)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/396 — учитывать уведомление ChatGPT «думает дольше», прежде чем объявлять ход зависшим",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/547 — при 'Too many requests' Codex повторяет 5 раз за секунды, каждый повтор тратит сообщение",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/460 — закрыт: загружать большой контекст файлом TXT",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/559 — открыт: перепривязка продолжения и ограничение native polling",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/459 — закрыт: до 10 параллельных вкладок (обратное направление; по этим данным увеличивает задержку получения страницы)",
+   "https://github.com/microsoft/playwright/issues/42730 — открыт: connectOverCDP не завершается, если существующая вкладка перестала отвечать на CDP",
+   "https://github.com/microsoft/playwright-mcp/issues/1757 — тот же механизм, ожидание всех вкладок при подключении",
+   "https://github.com/electron/electron/issues/9567 и https://github.com/electron/electron/issues/31016 — пределы backgroundThrottling:false для скрытых и перекрытых окон",
+   "https://github.com/electron/electron/issues/42378 — пустое окно при скрытии с отключённым backgroundThrottling"
+  ],
+  "unverified": [
+   "Загрузка CPU и видимость или перекрытие окна в моменты сбоев: не логируются; есть только разовый снимок около 17:37Z (NOT_CHECKED).",
+   "Для viewport-сбоев в 11:50, 14:44 (fallback-ход), 15:44 и 15:45 неясно, был ли renderer занят или viewport действительно схлопнулся: диагностика этих trace уже удалена. Для 15:44/15:45 снимок turn-failed записался без ошибки, так что настоящее схлопывание не исключено.",
+   "Реакция Codex на коды response.failed взята из комментария в server.ts:718 и логов повторов Codex, исходный код Codex не проверялся.",
+   "Зависит ли 'Something went wrong' на multipart-стадиях по 200k+ токенов от размера сообщения или от нагрузки и лимитов на стороне ChatGPT — не установлено.",
+   "Почему browser.tab_unresponsive ни разу не записан при 6 записях browser.tab_responsive — не выяснено.",
+   "Соответствие 868x835 = видимая панель, 1120x913 = скрытая эмуляция выведено из hiddenTurnBounds и window-state.json (1120x913), напрямую не наблюдалось.",
+   "Переживает ли Temporary Chat перезагрузку страницы — не проверено; от этого зависит, можно ли лечить reload.",
+   "Лаг event loop helper не измерялся, гипотеза о взаимном влиянии ходов через общий процесс не проверена.",
+   "Из 765 форков просмотрены 4 активных (Evanlau1798, Ahmet1991, Froraut/NEKODEX, miziusLabs/Codax); поиск коммитов по всему GitHub форки не покрывает.",
+   "Счётчики сняты около 17:35Z; launcher.jsonl продолжает расти, поэтому числа немного расходятся с числами в постановке (например, 51 против 50 для stalled-60s, 18 против 17 для rebind).",
+   "Предложения не реализовывались и не тестировались: расследование только на чтение."
+  ]
+ },
+ {
+  "class": "Большие задачи через Bigger Context (сообщения по 200–320 тыс. символов, 200–285 тыс. оценочных токенов) падают тремя разными способами, и ни один из них не лечится автоматически: (1) «Something went wrong» на подтверждении первой части, после чего бридж повторяет тот же payload без изменений; (2) таймаут нажатия Send на финальной части. Это регрессия форка, при которой бридж ещё и останавливает уже отправленный ответ; (3) зависание рендерера, которое бридж ошибочно распознаёт как «нет viewport». Отдельно: у компакции нет пути уменьшить слишком большой контекст.",
+  "evidence": [
+   "Исходные данные: запрос jq -r 'select(.event==\"runtime.daemon_stdout\" or .event==\"runtime.daemon_stderr\")' по launcher.jsonl (9 543 строки бриджа), затем разбор строк 'browser turn <id> opened (transport=…, maxMessageChars=…, estimatedInputTokens=…)' и 'failed: …'. Результат: 170 попыток браузерного хода, из них inline 137, multipart-2 14, multipart-3 19.",
+   "Итоги дня (browser.turn_ended за 2026-09-18): completed 50, failed 117, aborted 22. «Something went wrong»: 21 провал в 12 трейсах. Из них 17 inline и 4 multipart-3, причём все 4 multipart приходятся на один трейс 643f8970f1dd на стадии multipart_stage_1_acknowledgement. Подтверждения частей: 9 успешных, 15 проваленных (SWR 4, abort 4, Stopped thinking 2, viewport 2, rate limit 1, displayed error 1, attachment aborted 1).",
+   "Поправка к исходной формулировке. Цифры «550k–1,5M символов» взяты из bodyTextChars в диагностике, а это document.body.textContent. На пустом Temporary Chat этот показатель уже равен 547 614–548 831 символам до любой отправки (все 10 сохранённых папок, контрольная точка temporary-chat-navigation-complete). Реальный размер одного сообщения в composer: 224 693–318 083 символа. Транзакции весили 202 838–264 702 оценочных токена, стадии 65 102–85 570 токенов (строки 'multipart staging effort=… maxStageMessageTokens=… maxStageChars=…').",
+   "Окно 17:13–17:21Z, пять больших multipart-3 ходов, а не пять SWR. 5a92fa7560d7 (Pro, effort=max, 263 443 токена): стадии 1 и 2 подтверждены, затем 'stage=send failed durationMs=28785: locator.press: Timeout 15000ms'. 29f8620368a7 (xhigh, 264 702): тот же сбой через 26 548 мс. 0b8f3296efe6 (Pro, 211 577): 4 перепривязки после 'DOM observation did not respond within 5000ms' и 2 провала 'did not expose an operational viewport' (waitForFunction 10 с). 0366feaa63d5: отменён Codex через 0 мс (attachment aborted), новый ход 643f8970f1dd стартовал в ту же секунду. 643f8970f1dd (xhigh, стадия 245 370 символов / 65 308 токенов): 4 раза SWR через 19–38 с после отправки стадии 1.",
+   "Отправка финальной части: 29f8620368a7 в момент провала показывает users=3 и stopButtonCount=1 (файл 31-turn-failed.json). Значит, финальная часть была принята ChatGPT, а бридж сообщил Codex 'did not confirm that the prompt was sent'. Длительность Send у больших ходов: успешная финальная отправка 16:47:15 заняла 12 782 мс, успешная отправка стадии 14:30:05 заняла 146 301 мс (тогда ограничения ещё не было), провалы 17:14:46 и 17:18:05 произошли на 28 785 и 26 548 мс.",
+   "Коммит 0ecf7bf7 ('bound the ChatGPT send keypress and stop a generation on its failure', порт Misty4119 a2a1801) поставил CHATGPT_SEND_ACTION_TIMEOUT_MS = 15 000 вместо timeout: 0 и добавил нажатие Stop в catch. Проверка git merge-base --is-ancestor: коммит входит в сборки 00edb11e (установлена в 15:37:59Z) и 86f2d311 (16:58:35Z), в 0fe41813 его нет. В upstream/main стоит timeout: 0 с комментарием про то, что вложенный таймаут ломает 180-секундный бюджет (исправление #302 в v5.0.0).",
+   "Повтор того же payload: у 643f8970f1dd 4 браузерные попытки в 17:17:05, 17:18:51, 17:19:45 и 17:20:41 с одинаковым maxStageChars=245 370. Пятый ретрай Codex (17:21:27) новой попытки не открыл и получил 'remained unavailable after several attempts'. Источник в коде: отправка стадий не вызывает onSendActivated (browser-worker.ts около строки 4927), поэтому фаза остаётся prepared, ошибка сохраняет retryable:true, а MAX_CHATGPT_WEB_TURN_RETRIES = 3.",
+   "Ретраи Codex (sqlite -readonly ~/.codex/logs_2.sqlite, target='codex_core::responses_retry', с 00:00Z): всего 212 строк. SWR: 43 строки, все на модели chatgpt-web/extra-high. Остальное: rate limit 55, ambiguous send 19, stopped responding 18, missing cwd 35, connector 14, Stopped thinking 10. Паузы между ретраями 184 мс – 3,4 с. Для неретраябельных ошибок бридж отдаёт сохранённый результат без новой браузерной работы: после 17:14:46 и 17:20:41 строк 'opened' нет.",
+   "Размер одного сообщения против исхода (inline: estimatedInputTokens − 8192, multipart: maxStageMessageTokens; rate limit и abort исключены). Меньше 30k токенов: 43 из 57 успешны, SWR 7 (12%). От 30k и выше: 4 из 29 успешны, SWR 14 (48%). Жёсткого порога нет: тот же поток Codex получил 6 inline-SWR на 73–81k токенов сообщения (15:41–16:09), потом прошёл inline на ~85,6k (0642b90fdf74, 16:26) и multipart-стадии на 79k и 85k. SWR также получил inline-ход на 31k токенов (bcb589e64d46, 17:18:28) при 4 активных ходах, и ходы на 32–40k в 12:13–12:20 и 15:31–15:32.",
+   "Попытки компакции через fallback: d59ad8caf4cd_fallback и dd0a17e1363b_fallback, multipart-3, 285 549 токенов, стадии 93 106–93 112 токенов, 4 изображения. Исходы: rate limit, viewport, abort. Строк 'structured context handoff failed' 12; причины: rate_limit_exceeded, viewport, compaction_handoff_timeout 300 000 мс.",
+   "Лимиты в коде для Pro-аккаунта (chatgpt-web-models.ts). Одно сообщение: xhigh 103 000 токенов / 1 045 000 символов, max 104 000 / 1 635 000. Bigger Context умножает окно на 3: 333 579 / 336 579. Codex делает auto-compact на 285 000. Все падавшие ходы были меньше 285 000, поэтому Codex их не компактил, а предпроверку бриджа они прошли. Каталог моделей статичен (model-catalog.ts:139), изменения требуют перезапуска Codex.",
+   "Хранится только 10 последних папок диагностики (CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10), все 10 от проваленных ходов. Снимков успешных ходов не осталось, поэтому сравнить DOM успеха и провала по диагностике нельзя."
+  ],
+  "rootCauses": [
+   {
+    "cause": "Регрессия форка: нажатие Send на финальной части ограничено 15 с (CHATGPT_SEND_ACTION_TIMEOUT_MS) вместо внешнего бюджета стадии в 180 с. При таймауте бридж не проверяет, принята ли отправка, объявляет её неоднозначной (chatgpt_submission_ambiguous, retryable:false) и пытается нажать Stop на уже идущей генерации. Это убило 2 из 5 больших ходов в 17:13–17:21.",
+    "status": "CONFIRMED",
+    "evidence": "Коммит 0ecf7bf7 входит в установленные сборки 00edb11e и 86f2d311. Два провала 'locator.press: Timeout 15000ms' на 28 785 и 26 548 мс. У 29f8620368a7 при провале users=3 и stopButtonCount=1. Успешная финальная отправка заняла 12,8 с, а стадия до коммита отправлялась 146 с и прошла. В upstream стоит timeout:0 (#302). Код: browser-worker.ts, sendAttachedPrompt, catch с stop.press."
+   },
+   {
+    "cause": "Сбой на стадии повторяется одинаковым payload. SWR или displayed error на подтверждении стадии остаётся retryable, потому что фаза prepared. Бюджет ретраев тратится на 4 одинаковые отправки по ~245k символов без уменьшения и без паузы. Это впустую расходует лимит сообщений и нагружает аккаунт.",
+    "status": "CONFIRMED",
+    "evidence": "4 попытки 643f8970f1dd с maxStageChars=245 370. Отправка стадии вызывается без submissionLifecycle (browser-worker.ts около строки 4927). Затем submittedTurnFailure (index.ts:311) и retry-policy.ts с MAX=3. Та же картина описана в upstream #364."
+   },
+   {
+    "cause": "Нет классификатора отказов по размеру и нет обратной связи. Явного детектора текста 'The message you submitted was too long' нет. SWR на большом сообщении не отличается от сбоя на малом. Лимиты статичны: замерены до 2026-09-16 и умножаются на 3 для Bigger Context, результаты ходов бридж не учитывает. Пользователю выдаётся ручная инструкция: 'Run /compact, then retry' или 'Retry the turn'.",
+    "status": "CONFIRMED",
+    "evidence": "grep 'too long' по src/adapters не находит детектора. throwIfChatGptTerminalErrorAlert отображает всё в upstream_server_error с retryable:true. CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3. Тексты ошибок в assertChatGptWebMultipartInputWithinLimits и resolveChatGptWebMultipartStagingMode требуют ручного /compact."
+   },
+   {
+    "cause": "Компакция не умеет уменьшать слишком большой контекст. Любой _compactionRequest идёт тремя частями (usage.ts:79), а compileChatGptWebPrompt возвращает multipart-компакцию до цикла обрезки (prompt.ts:776-783). Если контекст не помещается в 3 × бюджет сообщения, компакция падает на предпроверке с советом сделать компакцию, то есть сама себя. Иначе она отправляет ~93k-токенные стадии, которые подвержены тем же сбоям. Fallback (source_unavailable_before_handoff) заново шлёт весь контекст.",
+    "status": "CONFIRMED",
+    "evidence": "Код prompt.ts и usage.ts. Fallback-ходы на 285 549 токенов провалились (rate limit, viewport, abort). Upstream #552 описывает детерминированный провал на Plus."
+   },
+   {
+    "cause": "Зависание рендерера ошибочно считается неисправной вкладкой. Проверки DOM (5 с) и viewport (waitForFunction 10 с) срабатывают по таймауту, пока ChatGPT обрабатывает сообщения на 225–318k символов на странице с 0,8–1,5M символов textContent. В итоге 2 перепривязки заканчиваются провалом хода, хотя вкладка исправна и просто занята.",
+    "status": "CONFIRMED",
+    "evidence": "0b8f3296efe6: 4 строки 'rebinding … stalled DOM probe' и 2 провала 'did not expose an operational viewport'. waitForOperationalChatGptViewport (browser-worker.ts:1307) не различает «evaluate не вернулся» и «размер слишком мал». За день 18 перепривязок и 6 провалов по viewport."
+   },
+   {
+    "cause": "Причина зависаний: одновременная тяжёлая работа с DOM в нескольких вкладках (до 5 вкладок, вес больших транзакций не учитывается) и общая нагрузка на CPU и рендерер.",
+    "status": "HYPOTHESIS",
+    "evidence": "Провалы 0b8f3296efe6 пришлись на 4 активных хода. concurrency.ts: MAX_CHATGPT_BROWSER_TABS = 5, вес multipart не учитывается. Upstream PR #373 и issue #381 описывают конкуренцию за рендерер, но измерения там нет. Делят ли WebContentsView один процесс рендерера, я не проверял."
+   },
+   {
+    "cause": "Сам SWR, скорее всего, серверная реакция ChatGPT. Она коррелирует с размером сообщения и с нагрузкой на аккаунт и держится для одного payload 10–30 минут, но детерминированного порога по размеру нет. Кроме того, после 2026-09-16 ChatGPT начал отвергать большие payload.",
+    "status": "HYPOTHESIS",
+    "evidence": "SWR 48% при сообщениях от 30k токенов против 12% ниже 30k. Тот же поток прошёл на большем размере через 17 минут после 6 SWR подряд. Одновременный SWR на inline-ходе в 31k. Upstream #541 и #441 сообщают о 'message too long' или SWR на Plus с 2026-09-16, в том числе 'with the first acknowledgment message'. Ответы ChatGPT по сети и текст страниц я не читал."
+   },
+   {
+    "cause": "Bigger Context на Plus High (окно 270 000, компакция на 240 000) и на Pro Instant (333 579) может превышать окно разговора ChatGPT: по стороннему источнику reasoning Plus 256K, Instant Pro 128K, reasoning Pro 400K.",
+    "status": "HYPOTHESIS",
+    "evidence": "Таблица ai-toolbox.co от 2026-09-09. Официальная статья help.openai.com/articles/11909943 вернула 403, поэтому цифры не проверены."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Отменить регрессию 15-секундного Send и проверять факт отправки до признания провала",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (sendAttachedPrompt, CHATGPT_SEND_ACTION_TIMEOUT_MS)",
+     "tests/browser-worker-contract.test.ts (тест 'Bigger Context send activation keeps the outer stage budget…', сейчас закрепляет 15 000)"
+    ],
+    "behaviour": "Для стадий и финальной части вернуть press(timeout: 0): бюджет задаёт runStage (180 с для multipart, 20 с для inline). Если press бросил исключение, сначала выполнить waitForSubmissionAcceptedWithRecovery; при признаках user_turn, generation_running или assistant_turn продолжать ход как принятый. Stop нажимать только при явной отмене (abort), когда признаков отправки нет, и никогда на принятой отправке.",
+    "tests": "(1) press возвращается через 20 с, при этом появляется новый user turn: ход продолжается, stop.press не вызывается. (2) press бросает Timeout, но user turn есть: возвращается evidence, ошибки нет. (3) press бросает исключение, признаков нет до конца бюджета: ошибка chatgpt_submission_ambiguous без нажатия Stop. (4) abort до отправки: Stop нажимается, только если генерация видна.",
+    "risk": "Намертво зависший рендерер держит вкладку до 180 с; так upstream работает с v5.0.0, отмена по abortSignal сохраняется. Порт a2a1801 частично откатывается, это нужно отметить в журнале портов.",
+    "effort": "S"
+   },
+   {
+    "title": "Классифицировать отказы по размеру и никогда не повторять одинаковый payload",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (throwIfChatGptTerminalErrorAlert, новый throwIfChatGptMessageTooLong, waitForMultipartAcknowledgement)",
+     "src/adapters/chatgpt-web/adapter-error.ts (коды chatgpt_message_too_long, chatgpt_size_suspect)",
+     "src/adapters/chatgpt-web/retry-policy.ts (запоминать maxMessageTokens и maxMessageChars по retryKey)",
+     "src/adapters/chatgpt-web/index.ts (runTurn и prepareWith: пересборка с уменьшенным бюджетом)"
+    ],
+    "behaviour": "Распознавать явную ошибку 'The message you submitted was too long' с локализациями. SWR или displayed error на сообщении не меньше текущего безопасного размера (см. адаптивный бюджет) помечать как size_suspect. Следующая попытка обязана быть строго меньше: переразбиение под бюджет ×0,6, а если частей больше 3, обрезка старейшей истории с сохранением системных записей, последнего checkpoint и всех записей текущего хода, плюс уведомление о пропуске, как в codex_transport_resume. Если меньше сделать нельзя, браузерного ретрая нет. SWR на сообщении ниже безопасного размера считать временным сбоем и отдавать с паузой (withChatGptRetryDelay, от 60 с), а не отправлять сразу.",
+    "tests": "Юнит retry-policy: попытка того же размера после size_suspect отклоняется. Контрактный тест: текст 'too long' даёт код chatgpt_message_too_long. Адаптерный тест: вторая попытка собрана с меньшим maxStageChars и содержит уведомление о пропуске, записи текущего хода и последний checkpoint целы. Тест: SWR на сообщении в 10k токенов даёт retry delay без мгновенного повтора.",
+    "risk": "Ложное срабатывание на размер лишний раз сужает контекст для модели; это ограничено восстановлением бюджета. Пауза удлиняет восстановление при коротких сбоях. Обход лимитов ChatGPT не вводится, число сообщений только уменьшается.",
+    "effort": "M"
+   },
+   {
+    "title": "Адаптивный безопасный размер сообщения по аккаунту и режиму вместо статических констант",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/transport-budget.ts (новый)",
+     "src/adapters/chatgpt-web/usage.ts (resolveBiggerContextMultipartParts, estimateChatGptWebUsage)",
+     "src/adapters/chatgpt-web/prompt.ts (бюджеты partitionMultipartContext)",
+     "src/chatgpt-web-models.ts (resolveChatGptWebMessageTokenBudget получает текущий бюджет)",
+     "src/adapters/chatgpt-web/browser-worker.ts (assertChatGptWebMultipartInputWithinLimits)"
+    ],
+    "behaviour": "Хранить исходы (размер сообщения в токенах и символах, режим, стадия, исход, время) в JSON в каталоге конфигурации, без текста. Правило AIMD: после size_suspect на размере S бюджет = min(бюджет, 0,7·S); после успеха на S бюджет = max(бюджет, S), не выше статического лимита; без провалов бюджет медленно возвращается к статике (примерно за 24 ч). Разбиение и предпроверка используют min(статика, бюджет). Частей не больше 3: если не помещается, работает компакция (следующие два пункта), а не 4–8 сообщений. Логировать структурную строку transport_budget_changed.",
+    "tests": "Юнит AIMD: снижение после провала, рост после успеха, возврат к статике. Проверка сохранения и загрузки файла. Проверка, что разбиение соблюдает выученный бюджет. Проверка, что без истории поведение совпадает с текущим.",
+    "risk": "При низком бюджете чаще нужна компакция. Состояние общее на аккаунт: один неудачный период снижает бюджет и для других потоков, это смягчается восстановлением.",
+    "effort": "M"
+   },
+   {
+    "title": "Компакция, которая всегда помещается: обрезка и иерархическая сводка для multipart и fallback",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/prompt.ts (compileChatGptWebPrompt: убрать ранний return для multipart-компакции, строки 776-783)",
+     "src/adapters/chatgpt-web/usage.ts (для _compactionRequest выбирать число частей по вместимости, а не всегда 3)",
+     "src/adapters/chatgpt-web/index.ts (runFreshCompactionFallback: при context_length_exceeded или size_suspect до отправки один повтор стандартной обрезанной компакцией, образец hankok dae456f9)",
+     "tests/retained-compaction.test.ts, tests/prompt-contract.test.ts"
+    ],
+    "behaviour": "Прогонять существующий цикл обрезки (сохраняя последний checkpoint и финальную инструкцию компакции) против бюджетов multipart с учётом адаптивного бюджета. Если после обрезки не помещается, делать иерархическую сводку: старейшие куски сводятся по одному в read-only Temporary Chat, каждое сообщение не больше бюджета, потом общая сводка. Трассировка trimmedCompactionMessages и число шагов сводки логируются структурно. Удачную сводку кэшировать по потоку и хэшу префикса истории, чтобы повтор не пересылал весь контекст.",
+    "tests": "Компакция на 400k токенов даёт стадии в пределах бюджета, trimmedCompactionMessages больше 0, checkpoint сохранён. После pre-send context_length_exceeded fallback повторяется один раз стандартным путём и завершается. Повторная компакция того же префикса берётся из кэша, без отправки.",
+    "risk": "Входу компакции становится доступно меньше старой истории; это то же поведение, что у существующей однопроходной компакции, с явным уведомлением. Иерархическая сводка стоит 2–4 дополнительных сообщения один раз на окно истории.",
+    "effort": "M"
+   },
+   {
+    "title": "Автоматически запускать нативную компакцию Codex до размера, который падает",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/usage.ts (estimateChatGptWebUsage)",
+     "src/adapters/chatgpt-web/index.ts (emitBrowserCompletion и emitToolBatch usage)",
+     "tests/chatgpt-web-usage.test.ts"
+    ],
+    "behaviour": "Если скомпилированная транзакция превышает выученную безопасную ёмкость (бюджет × 3 минус резерв), в usage ответа сообщать input_tokens = max(оценка, autoCompactTokenLimit). Тогда Codex сам сожмёт историю: посреди хода после пачки tool calls (openai/codex core/src/session/turn.rs: should_roll_over, run_auto_compact MidTurn) или перед следующим ходом (run_pre_sampling_compact). Задача продолжается без действий пользователя. Индикатор контекста в Codex показывает реальную ёмкость транспорта. Для первого запроса хода, который уже слишком велик, работает уменьшенная пересылка бриджа (пункт про классификацию размера).",
+    "tests": "Юнит: оценка выше выученной ёмкости даёт usage не меньше autoCompactTokenLimit, ниже неё отдаётся точная оценка. Защита от цикла: после компакции, если новая оценка всё ещё выше ёмкости, повторного завышения нет, вместо этого включается trimmed transport.",
+    "risk": "Индикатор Codex прыгает к 100%. Компакция становится чаще, качество сводки ниже. Нужна проверка на установленной версии Codex 26.9xx: поведение подтверждено только по исходникам main.",
+    "effort": "M"
+   },
+   {
+    "title": "Допуск тяжёлых транзакций по одной на аккаунт (снижение нагрузки, а не обход лимитов)",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/concurrency.ts",
+     "src/adapters/chatgpt-web/browser-worker.ts (стадии multipart attachment, send, ack и финальная отправка)"
+    ],
+    "behaviour": "Не больше одной multipart-транзакции в фазах вставки, отправки и подтверждения на аккаунт. Остальные ждут в FIFO с heartbeat и понятным статусом («жду окончания другой крупной передачи в ChatGPT»); ожидание не расходует бюджеты стадий. Сначала выпустить измерения (длительность стадий при 1, 2 и 5 активных вкладках, как просил мейнтейнер в #381), потом включать.",
+    "tests": "Два одновременных multipart-хода: вставка первой стадии второго начинается после того, как финальная отправка первого принята. Отмена ожидающего освобождает очередь. Inline-ходы не блокируются.",
+    "risk": "Параллельные большие ходы и сабагенты станут медленнее. Мейнтейнер upstream отклонил глобальную сериализацию без измерений (#373), поэтому нужны данные.",
+    "effort": "M"
+   },
+   {
+    "title": "Считать занятый рендерер занятым, а не сломанным",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (waitForOperationalChatGptViewport, withChatGptBrowserObservationTimeout, MAX_CHATGPT_BROWSER_PAGE_REBINDS)"
+    ],
+    "behaviour": "Проверять viewport одним page.evaluate с собственным таймаутом. Если evaluate не вернулся, это renderer_busy: ждать с нарастающей паузой до бюджета стадии, без провала. Проваливать только когда evaluate вернул размер меньше минимального. Пока ход в тяжёлой фазе (только что отправлено больше ~100k символов), таймауты DOM-проверки не считать поводом для перепривязки.",
+    "tests": "Фейковая страница: evaluate задерживается на 25 с и возвращает нормальный размер, провала нет. Возвращает 0×0, провал. Три таймаута проверки подряд в тяжёлой фазе не приводят к провалу хода.",
+    "risk": "Мёртвая вкладка обнаруживается позже, в пределах бюджета стадии.",
+    "effort": "S"
+   },
+   {
+    "title": "Сообщения, которые говорят, что произойдёт дальше",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/adapter-error.ts",
+     "src/adapters/chatgpt-web/browser-worker.ts (тексты 'Run /compact, then retry', 'Retry the turn')",
+     "src/adapters/chatgpt-web/index.ts"
+    ],
+    "behaviour": "Заменить ручные советы фактическими действиями. Пример: «ChatGPT отклонил часть контекста на 245 370 символов; бридж отправляет уменьшенный контекст (попытка 2 из 3)». Другой пример: «Codex сожмёт историю автоматически на следующем шаге, делать ничего не нужно». Ручной шаг называть только когда он действительно нужен, и тогда говорить, какой именно.",
+    "tests": "Снапшот-тесты сообщений для каждого кода: size_suspect, message_too_long, renderer_busy, submission_accepted_late, compaction_retry.",
+    "risk": "Низкий.",
+    "effort": "S"
+   },
+   {
+    "title": "Диагностика, пригодная для обучения размеров и сравнения успеха с провалом",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (bodyTextChars в строке 2065, pruneBrowserDiagnostics, CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT)"
+    ],
+    "behaviour": "Заменить document.body.textContent (базовая линия около 548k символов) на длину текста в [data-message-author-role] по ходам. Добавить структурную строку transport_outcome: число частей, maxStageTokens, maxStageChars, стадия, исход, число одновременных ходов, без текста. Хранить отдельно последние N проваленных и N успешных ходов.",
+    "tests": "Снимок пустого чата даёт conversationTextChars = 0. Хранилище оставляет хотя бы 3 успешных хода при 10 провалах.",
+    "risk": "Немного больше места на диске.",
+    "effort": "S"
+   },
+   {
+    "title": "Убрать шум 'Reconnecting 5/5' для окончательных повторов",
+    "priority": "P2",
+    "files": [
+     "src/server.ts",
+     "src/bridge.ts (response.failed)"
+    ],
+    "behaviour": "Для retryable:false, когда бридж отдаёт сохранённый результат, отвечать так, как Codex считает окончательным (по образцу существующего HTTP 400 для client_cancelled), чтобы Codex не делал 5 ретраев за 3 секунды. Сейчас это безвредно: новых браузерных попыток нет.",
+    "tests": "Повтор после chatgpt_submission_ambiguous даёт один терминальный ответ и не открывает новую браузерную попытку.",
+    "risk": "Неверная классификация в Codex (например, 'Invalid request') может ввести в заблуждение, поэтому код ответа нужно выбрать после проверки codex-api/src/sse/responses.rs.",
+    "effort": "S"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/541 (ChatGPT отвергает большие payload с 2026-09-16: 'message too long' или SWR)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/441 (SWR на длинных потоках, 'with the first acknowledgment message')",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/364 (повтор одинакового слишком большого payload, предложение прогрессивной обрезки)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/552 (компакция Bigger Context создаёт стадию больше бюджета, ранний return в prompt.ts)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/302 (вложенный таймаут press на Bigger Context; исправлено timeout:0 в v5.0.0, в форке регрессия)",
+   "https://github.com/Misty4119/codex-chatgpt-web/commit/a2a1801a6637b269f20c605fdca749c49426fe54 (источник порта 0ecf7bf7 с 15-секундным Send)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/426 (зависание между бюджетом одной части и лимитом компакции)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/373 и https://github.com/miuuyy/codex-chatgpt-web/issues/381 (конкуренция за рендерер, сериализация тяжёлых фаз; закрыто без измерений)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/460 и https://github.com/miuuyy/codex-chatgpt-web/discussions/492 (контекст TXT-вложением; закрыт, идея оценивается)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/471 и https://github.com/miuuyy/codex-chatgpt-web/pull/472 (контекст через MCP; мейнтейнер отказал, форк EmpRider использует)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/453 (2–8 частей, дробление записей, обрезка компакции; закрыт)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/547 (Codex ретраит 5 раз за секунды)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/562 (темп запросов и паузы для безопасности аккаунта)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/556 (компакция при rate limit)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/69 (SWR на холодном Temporary Chat на High)",
+   "https://github.com/Munizada/codex-chatgpt-web/commit/73b30f4667d41ac5490764b36335de88c138435d (стадии около 40k токенов, до 8 частей, перепривязка подтверждений)",
+   "https://github.com/hankok/codex-chatgpt-web/commit/dae456f9e361fcd0a1d53bf9579153ae9b783684 (повтор fallback-компакции стандартным путём при context_length_exceeded)",
+   "https://github.com/EmpRider/codex-chatgpt-web/commit/4e31a870a64ea947bf1ec62946eefa30b036aa34 (большой контекст компакции через MCP)",
+   "https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs (компакция посреди хода по token_limit_reached; ContextWindowExceeded вызывает set_total_tokens_full)",
+   "https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/sse/responses.rs (context_length_exceeded и invalid_prompt неретраябельны)",
+   "https://help.openai.com/en/articles/8555545-file-uploads-faq (512MB на файл, 2M токенов на текстовый файл)",
+   "https://www.ai-toolbox.co/chatgpt-models/chatgpt-context-window-token-limits-2026 (сторонняя таблица окон: Instant Pro 128K, reasoning Plus 256K, reasoning Pro 400K)"
+  ],
+  "unverified": [
+   "Точные лимиты ChatGPT на сегодня для режимов gpt-5.6-sol (одно сообщение и окно разговора, Pro и Thinking): официальная статья help.openai.com/articles/11909943 вернула 403, окна взяты только из сторонней таблицы.",
+   "Истинная причина SWR (размер, нагрузка на аккаунт или содержимое потока): текст страниц и сетевые ответы ChatGPT я не читал намеренно. Есть только корреляции по размеру, времени и числу одновременных ходов.",
+   "Нажал ли бридж Stop на уже принятой финальной части у 29f8620368a7 и 5a92fa7560d7: код это делает, если Stop виден, но отдельного лога нажатия нет, а диагностика 5a92 уже удалена ротацией.",
+   "Делят ли WebContentsView одного сайта общий процесс рендерера в этой сборке Electron: не проверял.",
+   "Откуда базовые ~548k символов textContent (скрипты гидрации или скрытый DOM): содержимое страниц не смотрел.",
+   "Что сегодня сделает установленный Codex 26.9xx при завышенном usage: поведение проверено только по исходникам openai/codex main, не по бинарнику.",
+   "Появлялась ли сегодня явная ошибка 'message too long': детектора нет, такие случаи попали бы в 4 провала 'displayed an error'.",
+   "Сравнение DOM успешных и проваленных ходов невозможно: из-за ротации (10 папок) не осталось ни одного успешного хода.",
+   "Коммиты форков Munizada, hankok и EmpRider прочитаны, но не собирались и не тестировались. Тесты и установщик по условию не запускались."
+  ]
+ },
+ {
+  "class": "model_catalog_failed: ложные 502 на /v1/models. В этих 81 случае нет сетевой ошибки к chatgpt.com. Судя по всему, это запросы, которые клиент оборвал сам, либо ошибки без кода до начала сетевого обмена. Отдельно подтверждены: нет резервного каталога на случай сбоя (last-good) и цикл лишних обновлений каталога из-за несовпадения ETag.",
+  "evidence": [
+   "Сколько и каких сбоев. Запрос: grep -c model_catalog_failed '~/Library/Application Support/Codex Web GPT/logs/launcher.jsonl'. Результат: 81 (к 17:25Z), 83 (к 17:34Z; каденс продолжается, например 17:30:04Z). Все 81 строки — события runtime.daemon_stderr со статусом 502. Этапы (парсинг JSON после 'model_catalog_failed '): transport 72, catalog 7, request 2, upstream 0. Поле failure.code заполнено в 0 из 81.",
+   "Длительность (elapsedMs, та же выборка). transport: меньше 10 мс — 24, 10–99 мс — 19, 100–299 мс — 26, 300–999 мс — 3. catalog: 187–595 мс. request: 1–2 мс. Для сравнения, полный успешный запрос через мост занимает около 230–400 мс (Codex logs_2 17:29:07.729→.975; model/list в логах Desktop длится 210–450 мс).",
+   "Как выглядят ошибки в Bun. Одноразовый скрипт в scratchpad на рантайме моста ~/.codex-chatgpt-web/versions/5.0.8-darwin-arm64/runtime/bun 1.4.0, с локальными серверами, живой мост не затрагивался. Сетевые ошибки несут строковый code: TypeError code='ConnectionRefused' и TypeError code='ECONNRESET'. Прерывание — DOMException AbortError с числовым code=20. Когда клиент рвёт соединение, вложенный fetch с req.signal падает AbortError ровно в момент обрыва (в пробе через 120 мс). Регэксп modelCatalogFailure (src/server.ts:428) отбрасывает нестроковый code. Значит, ни одна из 81 ошибок не была сетевой ошибкой Bun к chatgpt.com: у неё был бы строковый code.",
+   "Codex Desktop не видел ни одной ошибки каталога. Запрос: grep 'method=model/list' ~/Library/Logs/com.openai.codex/2026/09/18/*.log | grep response_routed. Результат: 701 из 701 с errorCode=null. Оговорка: raw_model_catalog в Codex глотает ошибку обновления, поэтому это слабое доказательство.",
+   "Что видел Codex по запросам /models. Запрос: sqlite3 ~/.codex/logs_2.sqlite, target='codex_http_client::client', тело like '%models?client_version%', ts ≥ 2026-09-18. Результат: 206 ответов 200 через 127.0.0.1:17841, 54 записи 'error sending request', 0 ответов со статусом 502, 175 ответов 401 token_revoked напрямую в chatgpt.com с 00:00 до 08:11 (это отдельная проблема, до установки маршрута). Все 54 'error sending request' приходятся на app-server туннеля (homebrew codex 0.154.0, CODEX_HOME=~/.codex, родитель — tunnel-client) при каждом рестарте моста: 2–4 попытки получают отказ соединения, затем 200 примерно через 1 с. До моста эти запросы не доходят, поэтому их нет среди 81.",
+   "App-server туннеля (0.154.0) обновляет /models каждые ~270 с, и все эти запросы вернули 200 (8055: 13:28–14:40, 20 запросов подряд). Значит, источник 81 сбоя — не он. Логи Codex Desktop (0.155.0-alpha.9) неполные: число строк на процесс урезается (например pid 52206: 4745 строк с 11:12 по 13:28, но /models видны только с 13:09). Файл models_cache.json записан в 17:30:01 без единой строки в логе.",
+   "Связь с рестартами и сбоями не найдена. По timeline.txt: 0 из 81 сбоев в пределах 10 с после runtime.daemon_started и 0 из 81 в пределах 10 с до runtime.daemon_exited. Сбои чередуются с успешными ответами в пределах одной жизни демона: у демона с 13:28:37 было не меньше 101 запроса и 19 сбоев. В сумме 83 сбоя из не менее чем 442 запросов, то есть до 18,8%. Сегодня 31 daemon_exited, 17 runtime.active_turns_cancelled; httpTurns>0 было только в 14:42:54 и 15:40:45, ни один сбой каталога на эти моменты не пришёлся.",
+   "Периодичность по часам. 25 из 43 быстрых сбоев (<50 мс) попадают в окно ±30 с от минуты, кратной 10 (:x0). Случайно ожидалось бы ~10%, получилось 58%. Вывод: какой-то клиент дёргает /models по расписанию раз в 10 минут, и этот запрос сразу обрывается. Процесс не найден. Автоматизации Codex все PAUSED. Задачи по расписанию Claude и LaunchAgents не подходят. App-server туннеля работает с периодом 270 с.",
+   "CLIProxyAPI не участвует. В launcher.jsonl 0 строк cliproxy_catalog_failed и cliproxy_config_invalid. Порт 127.0.0.1:8317 слушает cli-proxy. В runtime/model-routes.json 8 native и 39 proxy слагов. augmentCatalogWithCliProxy (src/cliproxy.ts) никогда не роняет каталог и держит последний список.",
+   "Несовпадение ETag (подтверждено). Мост ставит на /v1/models etag W/\"<base64url sha256 тела>\" (src/server.ts:470). Сквозные ответы /responses через мост пробрасывают апстримный x-models-etag W/\"8939…\" (32 hex): 36 таких ответов в logs_2, модель gpt-5.6-luna. Codex сравнивает их и при расхождении делает Online-обновление каталога внутри потока хода: ResponseEvent::ModelsEtag → refresh_if_new_etag (codex-rs/core/src/session/turn.rs ~2788; models-manager/src/manager.rs 408–432). Значения никогда не совпадут, поэтому каждый нативный ответ вызывает лишний запрос /models.",
+   "Общий кэш моделей перетирается. Две версии Codex (0.154.0 у туннеля и 0.155.0 у Desktop) пишут один ~/.codex/models_cache.json. В сохранённых логах 20 записей 'models cache: cache version mismatch' и 20 'no usable cache entry' против 139 попаданий в кэш; каждый промах — лишний онлайн-запрос.",
+   "В лаунчере сегодня 0 событий уровня launcher 'codex.model_catalog_failed' и 6 событий codex.model_catalog_verified. Монитор startCatalogVerificationMonitor (launcher/electron/main.cjs:160) останавливается после первого успеха, поэтому сегодняшние 502 до интерфейса не доходили.",
+   "Смена модели. По rollout-файлам сегодня (~/.codex/sessions/2026/09/18, turn_context.model) переходов pro→extra-high 4 (14:58:15, 14:58:33, 17:15:55, 17:34:05), extra-high→pro 3. Перед каждым идёт событие thread_settings_applied с новой моделью. Его отправил рендерер Desktop вызовом thread/settings/update (лог Desktop, например 14:58:11.406), а не ядро. Одно из событий совпало с thread/resume в 17:28:50. По времени 3 из 4 переходов идут через 12–33 с после сбоя моста, но model/list в эти моменты вернул успех.",
+   "Что Codex делает при неудачном каталоге (по исходникам openai/codex main). models-manager/src/manager.rs: raw_model_catalog пишет 'failed to refresh available models' и возвращает прежние модели из памяти, если совпадает identity; иначе берёт models_cache.json (при совпадении версии и identity); иначе встроенный models.json, в котором нет строк chatgpt-web. model-provider/src/models_endpoint.rs:39: MODELS_REFRESH_TIMEOUT = 5 с на весь запрос вместе с повторами. model-provider-info/src/lib.rs: 4 повтора, base_delay 200 мс, retry_5xx=true, retry_transport=true. Итог: одиночный 502 Codex тихо повторяет."
+  ],
+  "rootCauses": [
+   {
+    "cause": "Все 81 ошибку «transport»/«catalog» даёт одна точка: modelsRequest (src/server.ts:433) пишет в журнал любое исключение до ответа апстрима как 502. Сетевых ошибок к chatgpt.com среди них нет: у них в Bun есть строковый code, а здесь code нет ни разу. Мост при этом теряет само имя ошибки, поэтому различить обрыв клиентом, таймаут и ошибку дескриптора лаунчера невозможно.",
+    "status": "CONFIRMED",
+    "evidence": "0 из 81 с failure.code. Проба Bun 1.4.0: ConnectionRefused и ECONNRESET несут строковый code, а AbortError — числовой 20, который отбрасывает регэксп в modelCatalogFailure (src/server.ts:428–431). После 08:11 Codex не залогировал ни одного 502 по /models."
+   },
+   {
+    "cause": "Большинство сбоев — запросы, которые клиент (Codex) сам оборвал. Сигнал req.signal пробрасывается в апстримный fetch через httpTurns.track → new Request(req, {signal}). Когда клиент бросает запрос, Bun бросает AbortError, мост пишет 502 и перезаписывает lastModelCatalogResult, хотя этот 502 уже никто не получит. Вероятные источники обрыва: периодический (раз в 10 мин) вызов в app-server Codex Desktop, прерывание хода с refresh_if_new_etag внутри потока, выход короткоживущих app-server от плагинов. Альтернатива для части случаев без code: обычный Error из readLauncherBrowserHostDescriptor или SyntaxError в fetchNativeCodex; такие 502 Codex получил бы и тихо повторил.",
+    "status": "HYPOTHESIS",
+    "evidence": "Проба: обрыв клиентом даёт AbortError в момент обрыва, elapsed совпадает со временем жизни клиента (1–344 мс). 25 из 43 быстрых сбоев выровнены по 10-минутной сетке. 20 из 81 в пределах 3 с от browser.turn_started. 13:29:20.058 совпадает с 'prompt attachment aborted' в 13:29:20.635. Прямого доказательства нет: мост не пишет error.name и req.signal.aborted, а логи Codex Desktop неполные."
+   },
+   {
+    "cause": "Нет резервного каталога. Строки ChatGPT Web (и Pro) строятся только из живого нативного каталога chatgpt.com (augmentNativeModelCatalog → selectNativeTemplate, src/model-catalog.ts). Любой настоящий сбой апстрима или транспорта, когда повторы Codex не помогли за 5 с, оставляет Codex без Web-моделей. Codex тогда откатывается на models_cache.json или на встроенный models.json, где chatgpt-web нет. Сегодня это к видимой поломке не привело, но это тот же механизм, что в upstream #543 («Web models disappear mid-session»).",
+    "status": "CONFIRMED",
+    "evidence": "Код: src/server.ts:433–473 при ошибке сразу отдаёт 502, кэша нет. Upstream miuuyy src/server.ts:386 устроен так же. У 15 самых свежих форков по коммитам нет last-good кэша. Поведение Codex по manager.rs: get_remote_models → load_remote_models_from_file при несовпадении identity."
+   },
+   {
+    "cause": "Цикл обновлений по ETag. Мост подменяет ETag каталога на sha256 своего тела, но пропускает апстримный X-Models-Etag в сквозных /responses. Значения не совпадают никогда, и каждый нативный ответ (gpt-5.6-luna и другие нативные ходы через мост) запускает внутри хода Online-обновление /models. Это лишние запросы и лишняя задержка, а ещё поставщик запросов, которые обрываются при прерывании хода.",
+    "status": "CONFIRMED",
+    "evidence": "36 ответов через 127.0.0.1:17841 с x-models-etag W/\"8939…\" (32 hex), тогда как etag моста — W/\"<base64url sha256>\" (src/server.ts:470). В native-passthrough.ts:262 и далее endToEndHeaders пропускает этот заголовок. Codex: codex-api/src/sse/responses.rs читает X-Models-Etag; turn.rs обрабатывает ModelsEtag через refresh_if_new_etag(...).await; models_endpoint.rs берёт ETag ответа /models."
+   },
+   {
+    "cause": "Две версии Codex перетирают общий кэш. Туннель запускает `codex app-server` из PATH (/opt/homebrew/bin/codex 0.154.0), а Codex Desktop использует свой бандл 0.155.0-alpha.9. Оба живут в одном CODEX_HOME=~/.codex, поэтому models_cache.json постоянно не подходит по версии, и app-server идёт в сеть за каталогом.",
+    "status": "CONFIRMED",
+    "evidence": "ps: tunnel-client (8803) → node /opt/homebrew/bin/codex app-server (8807/8831), CODEX_HOME=~/.codex; `codex --version` = 0.154.0, ChatGPT.app codex = 0.155.0-alpha.9. В logs_2 20 строк 'cache version mismatch'. Лог 17:29:07: кэш 0.154.0 отвергнут процессом 0.155.0. Upstream openai/codex#33593 описывает тот же класс."
+   },
+   {
+    "cause": "Гонка при старте: app-server туннеля стартует одновременно с демоном моста и получает отказ соединения на 2–4 первых запросах /models. Codex восстанавливается повтором примерно за 1 с. Это шум, пользователь этого не видит.",
+    "status": "CONFIRMED",
+    "evidence": "54 записи 'error sending request' в logs_2, все из app-server туннеля (client_version 0.154.0) в секунды после runtime.daemon_started; следующий запрос каждый раз 200."
+   },
+   {
+    "cause": "Смена модели «ChatGPT Web — Pro → ChatGPT Web — Extra High» не вызвана сбоями каталога. Её инициирует рендерер Codex Desktop через thread/settings/update. Возможно, при thread/resume он восстанавливает последнюю модель треда вместо глобальной по умолчанию (config.toml model=chatgpt-web/pro). Возможна и реакция UI на провал хода Pro (лимит, «Something went wrong»). Причину по доступным логам установить нельзя: Desktop не пишет поля модели.",
+    "status": "HYPOTHESIS",
+    "evidence": "4 перехода pro→extra-high, каждому предшествует thread_settings_applied от thread/settings/update (лог Desktop 14:58:11.406, 17:34:03.329); 17:28:50 совпадает с thread/resume и maybe_resume_success; 701 из 701 model/list успешны."
+   },
+   {
+    "cause": "2 сбоя на этапе request (1–2 мс) — входящий GET /v1/models без 'Bearer ' в Authorization. Источник неизвестен: во всех сохранённых запросах Codex к /models auth_header_attached=true (441 из 441).",
+    "status": "HYPOTHESIS",
+    "evidence": "Сбои 10:46:57.652 и 11:12:08.048 (этап request). forwardNativeCodexRequest бросает исключение до вызова fetch только при отсутствии Bearer. feedback_tags endpoint=/models: 441 из 441 с auth_header_attached=true."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Отделить обрыв клиентом от настоящего сбоя и писать в журнал имя и место ошибки",
+    "priority": "P0",
+    "files": [
+     "src/server.ts",
+     "src/native-network.ts",
+     "launcher/electron/main.cjs",
+     "tests/server-models.test.ts",
+     "tests/server-lifecycle.test.ts"
+    ],
+    "behaviour": "В modelsRequest и в обработчике /v1/models (recordResult) проверять req.signal.aborted. Если исключение (AbortError) пришло, когда клиент уже ушёл, записывать stage='client_aborted': отвечать 499, не трогать lastModelCatalogResult, вести отдельный счётчик и писать только debug-строку model_catalog_client_aborted вместо warn model_catalog_failed. Для настоящих сбоев добавить в журнал структурные поля: failure.name — имя конструктора ошибки (AbortError, TimeoutError, TypeError, SyntaxError, Error), и failure.origin — 'descriptor' | 'proxy_resolve' | 'upstream_fetch' | 'body'. В fetchNativeCodex обернуть чтение дескриптора и resolve-proxy в ошибки со строковыми кодами LauncherDescriptorUnavailable и LauncherProxyResolveFailed. Тексты ошибок, URL и пути в журнал не писать. Монитор проверки каталога в лаунчере должен игнорировать stage 'client_aborted'.",
+    "tests": "server-models.test.ts. (1) Клиент обрывает запрос во время апстримного fetch: нет warn model_catalog_failed, last_model_catalog_result и successful_model_catalog_requests не меняются, счётчик client_aborted = 1. (2) Дескриптор отсутствует: failure.code = LauncherDescriptorUnavailable, failure.origin = descriptor. (3) Апстрим бросает TypeError с code=ECONNRESET: stage transport, code ECONNRESET, name TypeError. (4) Регэксп: name подходит под /^[A-Za-z]{1,40}$/, в строке журнала нет подстрок 'Bearer', 'http', '/Users'. server-lifecycle.test.ts: монитор верификации не публикует catalog-verification failed для client_aborted.",
+    "risk": "Низкий. Настоящий таймаут на стороне сервера можно принять за обрыв клиентом, поэтому классифицировать только по req.signal.aborted, а не по error.name. Меняется формат строки журнала — поправить парсеры диагностики и doctor.",
+    "effort": "S"
+   },
+   {
+    "title": "Резервный нативный каталог (last-good) и один повтор, чтобы строки ChatGPT Web не пропадали",
+    "priority": "P0",
+    "files": [
+     "src/server.ts",
+     "src/model-catalog-cache.ts (новый)",
+     "src/model-catalog.ts",
+     "tests/server-models.test.ts",
+     "tests/model-catalog-cache.test.ts (новый)"
+    ],
+    "behaviour": "При успешном ответе сохранять СЫРОЙ нативный каталог (models[]) с апстримным ETag и fetchedAt: в памяти и атомарно на диск в ~/.codex-chatgpt-web/runtime/native-model-catalog.json с правами 0600. Ключ — client_version плюс sha256 идентификатора аккаунта (заголовок chatgpt-account-id или claim из токена). Сам токен не сохранять и не логировать. При сбое transport, upstream 5xx или catalog, пока клиент ещё подключён: один повтор через ~250 мс, только если прошло меньше 2 с (запас внутри 5-секундного таймаута Codex), и никогда при 401, 403 или 429. Если повтор не помог, собрать ответ из last-good каталога заново через augmentNativeModelCatalog с ТЕКУЩИМ config (изменение возможностей аккаунта, например proAvailable, применяется сразу) плюс строки CLIProxy. Отдавать 200 с заголовком x-codex-chatgpt-web-catalog: stale; age=<s> и писать в журнал model_catalog_served_stale {stage, ageSec}. Ограничить возраст (например, 24 ч). Если last-good нет вовсе, отдавать каталог только из Web-строк на последнем сохранённом шаблоне; если нет и шаблона — 502, как сейчас. Апстримные 401 и 403 по-прежнему пропускать как есть, чтобы Codex сам восстановил вход; строки ChatGPT Web в таком ответе не нужны. В health моста выставить catalog_stale_age_sec. Лаунчер при устаревшем каталоге показывает понятное пользователю сообщение: список моделей временно взят из кэша, обновление автоматическое, делать ничего не нужно.",
+    "tests": "(1) Успех, затем апстрим бросает ECONNRESET: 200, заголовок stale, строки chatgpt-web/pro и extra-high присутствуют. (2) После сбоя proAvailable=false в config: строки Pro в устаревшем ответе нет. (3) Ни одного успеха раньше, апстрим бросает ошибку: 502 и понятная причина (или каталог из шаблона, если выбран этот вариант). (4) Апстрим 401: ответ 401 пропущен, устаревший каталог не отдаётся. (5) На ECONNRESET ровно один повтор, на 429 повтора нет, на обрыв клиентом повтора нет. (6) Файл кэша создан с правами 0600 и не содержит 'Bearer', access_token, email. (7) Другой хэш аккаунта: last-good не используется. (8) Возраст больше лимита: last-good не используется.",
+    "risk": "Средний. Если апстрим за время сбоя добавил или убрал модели, до восстановления будет виден устаревший список нативных моделей; это смягчают лимит возраста и ключ по аккаунту. Постоянную поломку апстрима можно замаскировать, поэтому нужен счётчик устаревших ответов в health и в doctor. Повтор — это только GET каталога, лимиты ChatGPT он не обходит.",
+    "effort": "M"
+   },
+   {
+    "title": "Согласовать ETag каталога и X-Models-Etag, чтобы убрать шторм обновлений",
+    "priority": "P1",
+    "files": [
+     "src/native-passthrough.ts",
+     "src/server.ts",
+     "tests/native-passthrough.test.ts",
+     "tests/server-models.test.ts"
+    ],
+    "behaviour": "Минимальный вариант: в forwardNativeCodexRequest для endpoint 'responses' и 'responses/compact' удалять x-models-etag из responseHeaders. Codex тогда обновляет каталог по своему TTL (300 с) и не делает Online-запрос после каждого нативного ответа. Полный вариант: ETag каталога моста выводить детерминированно — W/\"sha256(апстримный ETag | отпечаток аугментации: capabilities, context override, список CLIProxy)\" — и тем же значением переписывать x-models-etag в сквозных ответах. Если апстримный ETag неизвестен, заголовок удалять. Заодно в ответе /v1/models удалять set-cookie, который сейчас копируется из апстрима (__oailb).",
+    "tests": "native-passthrough.test.ts: сквозной /responses с x-models-etag из апстрима — в ответе клиенту заголовка нет (или он равен текущему ETag каталога моста в полном варианте). server-models.test.ts: два одинаковых апстримных каталога дают одинаковый ETag; смена proAvailable меняет ETag; в ответе /v1/models нет set-cookie.",
+    "risk": "Низкий. Изменение апстримного каталога Codex увидит не сразу, а в пределах 5 минут TTL.",
+    "effort": "S"
+   },
+   {
+    "title": "Одна версия Codex для туннеля и Desktop, туннель — после готовности моста",
+    "priority": "P2",
+    "files": [
+     "src/tunnel-service.ts",
+     "src/tunnel.ts",
+     "launcher/electron/main.cjs",
+     "src/doctor.ts",
+     "tests/tunnel-service.test.ts",
+     "tests/doctor.test.ts"
+    ],
+    "behaviour": "Запускать tunnel-client с PATH, в котором первым идёт каталог того бинаря codex, что использует Codex Desktop (/Applications/ChatGPT.app/Contents/Resources). Тогда app-server туннеля и Desktop работают на одной версии и перестают перетирать ~/.codex/models_cache.json. Если tunnel-client поддерживает явный путь к codex, использовать его. Doctor сообщает о расхождении версий как о самоисцеляемом состоянии: лаунчер исправит сам при следующем перезапуске туннеля. Запускать tunnel-client только после ответа /health моста — это убирает 2–4 отказа соединения на каждом старте.",
+    "tests": "Юнит: выбор бинаря предпочитает бандл Desktop, если он есть, иначе PATH. Doctor: при версиях 0.154.0 и 0.155.0 статус 'version_skew' с автоматическим действием. Супервизор: tunnel стартует только после успешного health моста (фейковый health: сначала 503, потом 200).",
+    "risk": "Средний. Не проверено, как tunnel-client (функция 'harpoon') выбирает бинарь codex. Бандл Desktop — альфа-версия; обновление приложения меняет путь.",
+    "effort": "M"
+   },
+   {
+    "title": "Найти источник 10-минутных обрывов и причину смены Pro на Extra High",
+    "priority": "P2",
+    "files": [
+     "src/server.ts (после фикса P0-1)"
+    ],
+    "behaviour": "После выката P0-1 собрать за сутки error.name, origin и client_aborted с User-Agent (только originator и версия, это разрешено как структурное поле). Так станет видно, какой клиент (Desktop 0.155 или плагинный app-server) обрывает /models по 10-минутной сетке. Смену модели разобрать отдельно по трассировке thread/settings/update в Desktop вокруг thread/resume; мост на неё не влияет.",
+    "tests": "Не требуются: это диагностика. Критерий: у 95% сбоев есть name и origin, а у client_aborted — originator.",
+    "risk": "Минимальный: только журналирование структурных полей.",
+    "effort": "S"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/543 — Web-модели пропадают из пикера посреди сессии (тот же механизм: нет last-good каталога)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/466 — после первого сообщения нельзя выбрать модель",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/535 — таймаут нативного каталога без системного прокси (закрыт)",
+   "https://github.com/miuuyy/codex-chatgpt-web/commit/657b24c17cc4e902637b10eec16fec6213bde3f3 — fetchNativeCodex через resolve-proxy лаунчера (добавил шаг, ошибки которого сейчас попадают в transport без кода)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/112 — /v1/models passthrough 502 на Windows (закрыт)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/299 — doctor: доказательства запросов каталога",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/473 — лаунчер: показ обновления каталога как pending",
+   "https://github.com/openai/codex/issues/33593 — общий models_cache.json колеблется между процессами app-server",
+   "https://github.com/openai/codex/issues/41728 — обновление каталога посреди сессии меняет поведение сессии",
+   "https://github.com/openai/codex/issues/32526 — холодное обновление каталога блокирует первый ход",
+   "https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs — ResponseEvent::ModelsEtag → refresh_if_new_etag",
+   "https://github.com/openai/codex/blob/main/codex-rs/models-manager/src/manager.rs — откат при сбое: память → models_cache.json → встроенный models.json, TTL 300 с",
+   "https://github.com/openai/codex/blob/main/codex-rs/model-provider/src/models_endpoint.rs — MODELS_REFRESH_TIMEOUT 5 с",
+   "https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs — 4 повтора, 200 мс, retry_5xx=true"
+  ],
+  "unverified": [
+   "Какой клиент обрывает запросы с 10-минутным выравниванием (25 из 43 быстрых сбоев): NOT_CHECKED. Логи Codex Desktop в logs_2.sqlite урезаются по процессам, а мост не пишет User-Agent и error.name.",
+   "Что ошибки без кода — именно AbortError, а не обычный Error при чтении дескриптора лаунчера или SyntaxError в resolve-proxy: HYPOTHESIS. Проба Bun подтверждает только, что сетевые ошибки несут строковый code.",
+   "Получал ли хоть один живой клиент эти 502. Codex повторяет 5xx до 4 раз в пределах 5 с, поэтому успешный повтор не оставил бы ERROR. Полнота логов Desktop — NOT_CHECKED.",
+   "Источник 2 сбоев на этапе request (GET /v1/models без Bearer): NOT_CHECKED.",
+   "Почему Codex Desktop переключает тред с Pro на Extra High. В логах Desktop нет полей модели; связь с thread/resume и с провалами ходов Pro — HYPOTHESIS. Сообщение «Model changed…» рисует закрытый клиент Desktop, в открытом codex-rs этого текста нет.",
+   "Совпадает ли ETag ответа chatgpt.com/backend-api/codex/models с X-Models-Etag в /responses: NOT_CHECKED, мост перезаписывает ETag. Это важно только для полного варианта фикса P1.",
+   "Как tunnel-client (функция 'harpoon') выбирает бинарь codex и можно ли задать путь: NOT_CHECKED.",
+   "Сбои catalog (7, 187–595 мс): обрыв чтения тела клиентом или исключение в augmentNativeModelCatalog — не различимо без полей из фикса P0-1.",
+   "Живой health моста (successful_model_catalog_requests) не запрашивал: только чтение, без обращений к работающему мосту. Общее число запросов (не меньше 442) — нижняя граница по максимальным номерам запросов в журнале сбоев.",
+   "Проверены только 15 самых свежих форков из 765 (по сообщениям коммитов); остальные NOT_CHECKED.",
+   "Пока шёл разбор, рабочее дерево сдвинулось (HEAD 02f79ee97, коммиты другой сессии). Файлы src/server.ts, native-network.ts, native-passthrough.ts, cliproxy.ts по опорным строкам не изменились; номера строк даны по текущему HEAD."
+  ]
+ },
+ {
+  "class": "Лимиты ChatGPT Web (\"Too many requests\"), ответы \"Something went wrong\" и повторы Codex \"Reconnecting N/5\" поверх cooldown моста (codex-chatgpt-web 5.0.8, форк trukhinyuri/codex-superpower main 91a38989, codex-cli 0.154.0). Окно анализа: 2026-09-18 08:14Z – 17:38:28Z (снимок launcher.jsonl).",
+  "evidence": [
+   "Почасовая таблица, UTC, запрос final.py по снимку launcher.jsonl (scratchpad/rl/launcher-snapshot.jsonl, до 17:38:28Z). Считались browser.turn_started и turn_ended, строки 'stage=browser_page started', 'submission accepted', 'failed: ChatGPT rate limit: too many requests', 'not started: ChatGPT rate limit', \"failed: ChatGPT ended the turn with 'Something went wrong'\", 'broker trace=… delivered calls'. Формат: час попытки/max_conc/mean_conc/принятых сообщений/раундов инструментов/RL-диалогов/локальных отказов/SWWR. 08: 11/2/0.24/7/24/0/0/0; 09: 15/4/0.73/14/69/0/0/0; 10: 39/3/1.23/15/124/25/0/0; 11: 25/5/1.21/11/166/11/3/1; 12: 10/4/0.74/7/69/3/0/5; 13: 12/4/1.98/10/211/0/0/0; 14: 46/5/2.27/22/128/11/13/0 (+1 эскалированный SWWR, +3 regen-error); 15: 15/1/0.42/15/57/0/0/8; 16: 5/1/0.26/6/39/0/0/2; 17: 24/5/0.70/17/50/4/4/5. Итого: 202 браузерные попытки на 137 разных trace (65 повторов), 124 принятых сообщения, завершено 51, ошибок 127, прервано 23; 54 RL-диалога, 20 локальных отказов, 2 эскалации SWWR в RL, 21 SWWR, 4 regen-error, 32 старта демона.",
+   "Связь нагрузки и лимита не монотонна (тот же запрос). В 13Z самая высокая средняя параллельность (1.98) и больше всего раундов инструментов (211), при этом 0 RL-диалогов. Часы с RL — это часы повторных попыток: в 10Z 19 из 39 попыток были повторами того же trace, в 14Z 17 из 46.",
+   "Где появляется диалог (последняя строка stage перед 'failed: … too many requests', 50 случаев до 17:25Z): 45 из 50 на stage=effort_selection, то есть до отправки промпта. 38 из них в попытках без единого 'submission accepted'.",
+   "Первый диалог каждого из 8 эпизодов (кластеры с разрывом меньше 10 мин): в 6 из 8 эпизодов за предыдущие 30 с была одна загрузка страницы. В 2 из 8 перед диалогом шли две загрузки с интервалом 4.0 и 4.2 с. Для сравнения: у 20% всех загрузок страницы (n=181) была другая загрузка в пределах 10 с. Короткий всплеск наших открытий обычно не запускает первый лимит.",
+   "Паузы Codex между ошибкой и следующим browser.turn_started того же trace. Старая формулировка без задержки ('Try again in a few minutes', 30 случаев с 10:21 по 11:03Z): n=18, медиана 0.5 с, диапазон 0.3–1.0 с. С 'Please try again in Ns' (n=10) Codex выждал не меньше N секунд в 10 из 10 случаев (медиана 120 с). Локальный отказ cooldown соблюдён в 5 из 5. SWWR: n=11, медиана 0.5 с. regen-error: n=4, медиана 0.4 с.",
+   "Логи Codex: запрос sqlite3 -readonly ~/.codex/logs_2.sqlite \"select ts,thread_id,feedback_log_body from logs where ts>=1789689600 and ts<=<17:38:29Z> and file='core/src/responses_retry.rs'\". Всего 214 повторов, 34 цепочки дошли до 5/5. По причинам: missing cwd 35, SWWR 33, RL без задержки 25, RL с задержкой 22, 'did not confirm that the prompt was sent' 19, локальный отказ cooldown 15, 'stopped responding after the task started' 15, нет строки коннектора 'Codex Native2' 14, 'Stopped thinking' 10, исчерпан бюджет моста 5. 98 из 214 (46%) — повторы ошибок, которые мост уже пометил retryable:false или которые детерминированы. Задержки Codex: 0.2/0.4/0.8/1.6/3.2 с, а при RL с задержкой — 60–300 с.",
+   "Исходники Codex rust-v0.154.0 (codex-api/src/sse/responses.rs, core/src/responses_retry.rs, async-utils/src/backoff.rs, protocol/src/error.rs, codex-api/src/api_bridge.rs, model-provider-info/src/lib.rs). Задержка из response.failed разбирается только для кодов rate_limit_exceeded и slow_down, регуляркой (?i)try again in\\s*(\\d+(?:\\.\\d+)?)\\s*(s|ms|seconds?). Иначе backoff 200 мс·2^(n-1) ±10%, stream_max_retries по умолчанию 5. Поле retryable в error не десериализуется. Без повторов Codex обрабатывает только context_length_exceeded, insufficient_quota и родственные коды, usage_not_included, cyber/bio/misalignment policy, invalid_prompt (сообщение показывается как есть) и server_is_overloaded (фиксированный текст 'Selected model is at capacity. Please try a different model.'). HTTP 429 вне потока становится UsageLimitReached только при type usage_limit_reached, иначе RetryLimit; заголовок Retry-After не читается. Если заголовок openai-model не совпадает с запрошенной моделью, Codex показывает ModelReroute и предупреждение о high-risk cyber activity.",
+   "Эскалация считается по каждому упавшему параллельному turn, а не по инциденту. 11:25:17 — два диалога в одну секунду, задержки 120 и 240 с. 14:57:10 и 14:57:16 — 240 и 300 с. 17:34:36 — два диалога в одну секунду, 240 и 300 с. Стадо на истечении cooldown: отказы в 17:33:48 (осталось 35 с) и 17:34:06 (18 с), затем в 17:34:23–17:34:25 стартовали три turn, и два из них получили диалог в 17:34:36.",
+   "Перезапуск теряет cooldown. В 14:49:08 объявлен cooldown 300 с; в 14:51:13 локальный отказ с остатком 176 с; в 14:52:18 перезапуск демона; в 14:53:09 снова диалог с задержкой 60 с (эскалация сброшена); в 14:54:07 отказ на 2 с, в 14:54:11 диалог со 120 с. 13 перезапусков сегодня отменили 45 браузерных и 3 HTTP turn. После перезапуска в 14:42:54 за первые 120 с стартовали 5 turn, через 76 с после старта пришёл диалог (14:44:23).",
+   "SWWR — в основном не следствие rate limit: 21 из 25 SWWR/regen-ошибок случились позже чем через 10 мин после любого диалога. Исходы inline-попыток по maxMessageChars из строки 'opened (…)': до 20k — 7 OK из 15, SWWR 0; 20–60k — 14 из 25, SWWR 0; 60–120k — 25 из 72, SWWR 6; от 120k — 2 из 21, SWWR 11. Multipart: 2 OK из 33 попыток. Trace 643f8970f1dd: 4 одинаковые попытки (стадия 245 370 символов, около 65k токенов, xhigh), все SWWR через 19–38 с после принятия part 1. В снимках diagnostics composer перед отправкой 245 353 символа, пузырь ассистента 124 символа, streamingStatusCount 0 — генерация не стартовала. Статические лимиты Pro (103k токенов на сообщение, composer 1.045M символов) эти сообщения не превышали.",
+   "Инцидент 17:13–17:21Z: с 17:01 по 17:30 не было ни одного диалога 'Too many requests'. Было 8 trace. Ошибки: SWWR 5 раз, но только у двух trace; viewport timeout 2; locator.press timeout 15 с на send 2; attachment aborted 2. Четыре multipart-turn со стадиями 230–318k символов на xhigh/max. Задача утверждала, что 'все пять упали с SWWR' — это не так. 'Reconnecting 5/5': 4 браузерные попытки 643f и затем мгновенный ответ 'exhausted'; у двух других trace 5 повторов за 3 с с 'did not confirm that the prompt was sent' без нового browser.turn_started.",
+   "Зависания DOM-probe ('is rebinding … stalled DOM probe'): 15 из 18 за день случились, когда в полёте был хотя бы один turn с сообщением от 120k символов. Для сравнения, при принятых отправках такой turn был в полёте в 52 из 123 случаев (42%).",
+   "Код моста. Cooldown — browser-worker.ts:806–871 (ChatGptRateLimitCooldown). Он живёт в экземпляре worker внутри процесса helper (2330–2348: ключ — JSON resolved config, а не аккаунт). assertReady отказывает сразу (4641). escalate() вызывается на каждый упавший turn (5435). recordResponse (5420) сбрасывает только эскалацию. MAX_CHATGPT_BROWSER_TABS=5 — жёсткий отказ без выдержки между стартами (concurrency.ts:6, browser-worker.ts:2409, turn-execution.ts:530). Бюджет повторов MAX_CHATGPT_WEB_TURN_RETRIES=3 живёт в памяти процесса (retry-policy.ts). submittedTurnFailure (index.ts:311–362) ставит retryable:false, но оставляет код, поэтому Codex всё равно повторяет. Лаунчер показывает coolingDown только для аккаунтов CLIProxyAPI (App.tsx:1693), для ChatGPT Web — нет.",
+   "Заготовки для fallback уже есть: forwardNativeCodexRequest и scrubBridgeArtifactsForNative (native-passthrough.ts:92, 208), cliProxyRouteFor, forwardCliProxyResponses, scrubHistoryForCliProxy, compactionTurnViaCliProxy (cliproxy.ts:289–455). Ответные заголовки native пробрасываются как есть (endToEndHeaders), поэтому openai-model дойдёт до Codex. Нативный каталог сегодня падал 81 раз на stage transport за 5–206 мс (server.ts:1157, ошибки model_catalog_failed)."
+  ],
+  "rootCauses": [
+   {
+    "cause": "Лимит без задержки в понятном Codex формате ('Try again in a few minutes') приводил к 5 повторам Codex примерно за 6 с. Каждый повтор открывал новый Temporary Chat и снова ловил диалог. Исправлено коммитом 1ac9b616 (10:36Z), новый runtime работает примерно с 11:05Z.",
+    "status": "CONFIRMED",
+    "evidence": "30 ошибок в старой формулировке с 10:21 по 11:03Z. Пауза до следующей попытки 0.3–1.0 с (n=18). Регулярка Codex не находит числа, и срабатывает backoff 0.2–3.2 с. После фикса задержка соблюдена в 10 из 10 случаев."
+   },
+   {
+    "cause": "Эскалация cooldown считается по каждому упавшему параллельному turn, а не по инциденту. Один эпизод за секунды разгоняет паузу 60→120→240→300 с. После истечения нет пробного turn (half-open) и нет разнесённого выпуска очереди. Отложенные Codex-повторы получают одинаковое время истечения, стартуют стадом и снова ловят лимит.",
+    "status": "CONFIRMED",
+    "evidence": "11:25:17 (120 и 240 с), 14:57:10–16 (240/300), 17:34:36 (240/300 в одну секунду). В 17:34:23–25 три старта сразу после истечения, два диалога в 17:34:36. В 14:54:07 отказ на 2 с, в 14:54:11 диалог."
+   },
+   {
+    "cause": "Cooldown и бюджет повторов живут только в памяти процессов helper/демона и теряются при каждом перезапуске (32 за день). Перезапуски ещё и отменяют идущие turn, после чего их повторы приходят пачкой.",
+    "status": "CONFIRMED",
+    "evidence": "Перезапуск в 14:52:18 посреди объявленного cooldown (осталось около 110 с). В 14:53:09 новый диалог, эскалация снова с 60 с. После перезапуска в 14:42:54 за 120 с стартовали 5 turn, в 14:44:23 диалог. 13 перезапусков отменили 45 браузерных turn."
+   },
+   {
+    "cause": "Codex не читает retryable:false. Терминальные для моста ошибки с кодами upstream_server_error, chatgpt_submission_ambiguous, chatgpt_submitted_turn_failed, chatgpt_stopped_thinking, unusual_activity_detected, исчерпанный бюджет, ошибки без кода Codex считает повторяемыми. Мост отвечает на повторы сохранённым отказом: пользователь видит 'Reconnecting 1/5…5/5' за ~3 с, затем ошибку.",
+    "status": "CONFIRMED",
+    "evidence": "В исходнике Codex 0.154.0 у struct Error нет поля retryable. В logs_2.sqlite 98 из 214 повторов относятся к таким ошибкам. Пример: 5 повторов 'did not confirm that the prompt was sent' за 3 с без нового browser.turn_started."
+   },
+   {
+    "cause": "Большинство 'Something went wrong' — это отказ ChatGPT принять крупное сообщение (inline от 120k символов, стадии multipart 230–318k), а не хвост rate limit. Повтор того же payload падает детерминированно. Статические лимиты размера сообщения в chatgpt-web-models.ts устарели (изменение на стороне ChatGPT около 2026-09-16).",
+    "status": "HYPOTHESIS",
+    "evidence": "SWWR 0 из 40 до 60k, 6 из 72 в диапазоне 60–120k, 11 из 21 от 120k. 21 из 25 SWWR вне 10-минутного окна после диалога. 643f: 4 из 4 одинаковых отказов, генерация не стартовала (пузырь 124 символа). То же в upstream #541 и #364. Текст ошибки на странице не читался из соображений приватности."
+   },
+   {
+    "cause": "Таймауты viewport и press, а также зависания DOM-probe в 17:13–17:21 вызваны конкуренцией renderer: несколько вкладок одновременно держат огромные composer и DOM.",
+    "status": "HYPOTHESIS",
+    "evidence": "15 из 18 зависаний при turn от 120k символов в полёте против 42% в базовой линии. Метрик CPU и renderer нет. Та же гипотеза открыта upstream в #381."
+   },
+   {
+    "cause": "Первый лимит ChatGPT срабатывает от суммарной активности аккаунта за длинное окно (открытия разговоров, раунды инструментов, сообщения). Наш короткий всплеск его обычно не предсказывает, поэтому безопасную фиксированную частоту мост вычислить не может. Управляемо только усиление после первого инцидента.",
+    "status": "HYPOTHESIS",
+    "evidence": "В 6 из 8 эпизодов первому диалогу предшествовала одна загрузка страницы за 30 с. В 13Z при максимальной нагрузке 0 диалогов. 45 из 50 диалогов пришлись на effort_selection до отправки. Мейнтейнер в #230 тоже говорит, что стабильной квоты нет."
+   },
+   {
+    "cause": "Латентный дефект: classifyError и formatErrorResponse превращают 503 без явного кода (например, при draining) в server_is_overloaded. Комментарий в src/lib/errors.ts:153 утверждает, что Codex сделает backoff, а на деле Codex завершает turn текстом 'Selected model is at capacity. Please try a different model.'",
+    "status": "CONFIRMED",
+    "evidence": "Исходник Codex: ServerOverloaded не повторяется. Сегодня в logs_2.sqlite 0 записей 'at capacity' — дефект не проявился."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Шлюз допуска на уровне аккаунта: ждать внутри моста, а не отказывать сразу",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/rate-limit-gate.ts (новый)",
+     "src/adapters/chatgpt-web/browser-worker.ts (ChatGptRateLimitCooldown 806–871, run 2405–2424, assertReady 4641, escalate 5435)",
+     "src/adapters/chatgpt-web/launcher-helper-client.ts (событие инцидента от helper к демону)",
+     "src/adapters/chatgpt-web/index.ts (runTurn: ожидание при уже взведённом heartbeat)",
+     "src/adapters/chatgpt-web/concurrency.ts"
+    ],
+    "behaviour": "Состояние принадлежит одному шлюзу на аккаунт или профиль и живёт в демоне. (1) Инцидент фиксируется один раз: ошибка turn, стартовавшего до начала инцидента, эскалацию не двигает. Пауза 60→120→240→300 с растёт на инцидент, а не на turn. (2) Пока идёт cooldown, новые turn не падают, а стоят в очереди внутри моста; адаптерный heartbeat держит поток Codex живым, turnTimeout отсчитывается от допуска. (3) После истечения пропускается ровно один пробный turn; остальные выходят только после того, как проба прошла effort_selection и была принята отправка, с интервалом не меньше 10 с между стартами. Предел параллельности адаптивный: после инцидента 1, затем +1 за каждое чистое завершение, до 5. (4) Всегда держать не меньше 3 с между открытиями новых Temporary Chat — это дёшево, эффект — гипотеза. (5) В Codex при входе в очередь выводится строка reasoning summary: когда ChatGPT попросил притормозить, во сколько уйдёт этот turn, позиция в очереди, что делать ничего не нужно. Если ожидание больше 15 мин или случилось 3 инцидента за 30 мин, turn завершается терминальной ошибкой (см. фикс о кодах ниже) с точным временем и следующим шагом. Никакого обхода: мост только ждёт.",
+    "tests": "Unit-тесты с фейковыми часами: 5 параллельных отказов одного инцидента дают паузу 60 с, а не 300; после истечения стартует одна проба, остальные ждут её; разнесённый выпуск; abort в очереди освобождает место; во время cooldown браузер не вызывается (spy). Harness index.ts: пока turn в очереди, heartbeat идут и ошибка в Codex не уходит. Регрессия по сценарию 17:34:23–36: три ожидающих turn не стартуют в одну секунду.",
+    "risk": "Долгое молчаливое ожидание воспринимается как зависание — нужны строка статуса в Codex и лаунчере. Возможен дедлок с compaction handoff или удержанием retained-вкладки: compaction должна идти через тот же шлюз, а владелец вкладки не должен блокировать собственную пробу. Требования 'не отменять идущие turn' шлюз не нарушает.",
+    "effort": "L"
+   },
+   {
+    "title": "Сохранять состояние cooldown между перезапусками",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/rate-limit-gate.ts",
+     "src/lib (atomicWriteFile)",
+     "~/.codex-chatgpt-web/state/chatgpt-rate-limit.json (новый файл состояния)"
+    ],
+    "behaviour": "Хранить {until, tier, incidentStartedAt, lastLimitAt} на аккаунт, писать атомарно на каждом переходе и читать при старте демона. until ограничивать сверху как now+300 с, чтобы сбитые часы или долгий простой не заблокировали работу. Бюджет повторов оставить в памяти процесса, как задумано в retry-continuation.ts.",
+    "tests": "record, затем новый экземпляр: допуск ждёт остаток. Битый JSON игнорируется. until далеко в будущем обрезается до 300 с. Регрессия по 14:52:18/14:53:09: после рестарта с остатком 110 с браузер не вызывается.",
+    "risk": "Устаревший файл задерживает первый turn максимум на 5 мин. Лог моста должен говорить, что ожидание взято из сохранённого состояния.",
+    "effort": "S"
+   },
+   {
+    "title": "Терминальные для моста ошибки должны быть терминальными и для Codex",
+    "priority": "P0",
+    "files": [
+     "src/bridge.ts (adapterFailureFromEvent 46–56, emit response.failed 652–672)",
+     "src/lib/errors.ts (classifyError, комментарий на 153)",
+     "src/adapters/chatgpt-web/index.ts (submittedTurnFailure 311–362)"
+    ],
+    "behaviour": "Если событие несёт retryable:false, а его код не входит в список Codex, который не повторяется, в response.failed ставить error.code='invalid_prompt' (Codex покажет сообщение как есть и не будет повторять). Исходный код сохранять в отдельном поле и в журнале запросов. Отказ по размеру отдавать как context_length_exceeded: Codex пометит контекст заполненным и сам сожмёт его перед следующим сообщением. RL с задержкой оставить как rate_limit_exceeded с 'Please try again in Ns.'. Все терминальные тексты формулировать так, чтобы было видно, что произойдёт дальше. Исправить ложный комментарий про server_is_overloaded. Путь draining перевести на поток с rate_limit_exceeded и 'try again in 10s', чтобы Codex подождал, а не показал 'at capacity'.",
+    "tests": "Табличный контрактный тест, повторяющий классификацию Codex 0.154.0 (is_retryable и try_parse_retry_after). Проверки: retryable:false не повторяется; RL с задержкой даёт delay; размер даёт ContextWindowExceeded. SSE-тест кадра response.failed. Регрессия: 'did not confirm that the prompt was sent' больше не даёт 5 повторов за 3 с.",
+    "risk": "Телеметрия Codex или Desktop может показать это как 'invalid prompt'. Классификация Codex может измениться — контрактный тест нужно перепроверять при обновлении codex-cli. Лаунчер и /api/logs должны читать исходный код, а не invalid_prompt.",
+    "effort": "S"
+   },
+   {
+    "title": "Отличать отказ по размеру от лимита: не отправлять тот же payload повторно, учиться на отказах",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (throwIfChatGptTerminalErrorAlert 941–958, выбор staging 1100–1190 и 4690–4720)",
+     "src/chatgpt-web-models.ts (resolveChatGptWebTransportLimits)",
+     "новое хранилище выученных лимитов на аккаунт и уровень effort",
+     "src/adapters/chatgpt-web/index.ts"
+    ],
+    "behaviour": "SWWR считать отказом по размеру (chatgpt_message_rejected), если генерация не стартовала (только пузырь ошибки, streamingStatusCount 0, turns.user 1) и сообщение или стадия не меньше 120k символов. Тогда: (a) записать выученный предел — 0.8 от наименьшего отвергнутого размера — и сохранить его; ослаблять на 10% после 20 успехов; (b) один раз переразложить стадии мельче; (c) если снова отказ, отдать context_length_exceeded с текстом: 'ChatGPT отклонил сообщение в N символов; Codex автоматически сожмёт разговор перед вашим следующим сообщением'. В эскалацию rate limit такой SWWR не включать, если не было диалога.",
+    "tests": "Классификатор на фикстурах в форме снимков diagnostics (без текста). Правило обучения. Регрессия по 643f: второй попытки с тем же 245k payload нет.",
+    "risk": "Ложная классификация транзиентного SWWR — страхует связка признаков 'размер + генерация не стартовала'. Больше стадий — больше сообщений, их нужно учитывать в шлюзе.",
+    "effort": "M"
+   },
+   {
+    "title": "Показывать состояние лимита ChatGPT Web в лаунчере и в Codex",
+    "priority": "P1",
+    "files": [
+     "src/server.ts (статус-роут: state, until, queue, lastIncident)",
+     "launcher/electron (опрос статуса)",
+     "launcher/src/App.tsx, launcher/src/i18n.ts, launcher/src/types.ts (в worktree сейчас незакоммиченные правки этих файлов — согласовать)"
+    ],
+    "behaviour": "В лаунчере — чип: 'ChatGPT попросил притормозить. Следующий turn в 14:54:10, в очереди 2', или 'Проверяем восстановление одним запросом'. В лог — структурное событие chatgpt.rate_limit_incident (время, tier, число в очереди; без текста). В Codex — строки статуса из шлюза.",
+    "tests": "Сериализация статуса. Снимок UI для состояний ok, cooling и probing. Проверка, что в событиях нет текста промптов.",
+    "risk": "Минимальный: только отображение.",
+    "effort": "M"
+   },
+   {
+    "title": "Опциональный автоматический fallback на другую модель с явным показом",
+    "priority": "P2",
+    "files": [
+     "src/server.ts (responseRequest: повторная отправка при решении шлюза 'fallback')",
+     "src/native-passthrough.ts (forwardNativeCodexRequest, scrubBridgeArtifactsForNative, endToEndHeaders)",
+     "src/cliproxy.ts (cliProxyRouteFor, forwardCliProxyResponses, scrubHistoryForCliProxy)",
+     "настройки лаунчера (i18n, App.tsx)"
+    ],
+    "behaviour": "Настройка 'Если ChatGPT Web просит притормозить': ждать (по умолчанию) / продолжить на native-модели через тот же вход Codex / продолжить на модели CLIProxyAPI. Срабатывает только при прогнозе ожидания больше 120 с или при отказе по размеру, который не удалось переразложить. Никогда — во время отправки, уже идущей в ChatGPT, и никогда из-за одного SWWR. Тело запроса переписывается на целевую модель с существующими scrub-функциями. Заголовки openai-model и x-openai-model из ответа удаляются: иначе Codex покажет ложное предупреждение о 'high-risk cyber activity'. Первым событием идёт reasoning summary: 'ChatGPT Web на паузе до 14:54; этот шаг выполнен на <модель> по вашей настройке; следующий шаг вернётся в ChatGPT Web автоматически'. Retained-разговор ChatGPT после этого снимается, чтобы следующий web-turn собрал полную историю. Запрещено: ротация аккаунтов и пулы других учёток OpenAI или ChatGPT в CLIProxyAPI — это был бы обход лимита.",
+    "tests": "Тесты server.ts с фейковыми upstream native и CLIProxy: заголовок снят, уведомление выведено, модель переписана, шифрованный reasoning моста вычищен. При настройке 'ждать' fallback не срабатывает. После принятой web-отправки fallback не срабатывает.",
+    "risk": "Здоровье native-маршрута сомнительно: 81 ошибка каталога на transport сегодня. Тратится квота другого продукта, отличаются качество и схема инструментов. Функция строго опциональная.",
+    "effort": "L"
+   },
+   {
+    "title": "Привязать состояние к аккаунту и приостанавливать действия идущих turn во время инцидента; не перезапускать демон при активных turn",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (forProvider 2330–2339)",
+     "src/adapters/chatgpt-web/browser-worker.ts (действия с сайтом в multipart attachment и send)",
+     "launcher/electron/source-update.cjs и путь перезапуска runtime"
+    ],
+    "behaviour": "Ключ cooldown — профиль или аккаунт, а не JSON resolved config. Во время cooldown выгрузка вложений multipart в уже идущих turn ставится на паузу; turn не отменяется, как в форке marcmy #48. Автообновление и перезапуск откладываются, пока есть активные turn или cooldown (сегодня 13 перезапусков отменили 45 turn).",
+    "tests": "Два config одного профиля делят одно состояние. Пауза действий снимается abort-сигналом. Перезапуск не начинается при active_browser_turns больше 0.",
+    "risk": "Эффект паузы действий — гипотеза. Отложенные обновления задерживают доставку фиксов.",
+    "effort": "M"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/547 — диалог 'Too many requests' закрывается, а Codex делает 5 повторов за секунды (наш RC1)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/562 — запрос на pacing, cooldown и hard-stop на уровне аккаунта (открыт, без реализации)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/230 — мейнтейнер: стабильной квоты нет, лимит при двух turn с разницей около 4 с; совет вручную ставить agents.max_concurrent_threads_per_session=1, circuit-breaker отложен как P3",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/556 — fallback compaction упирается в rate limit, 429 маскируется под compaction_handoff_timeout",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/541 — с 2026-09-16 ChatGPT отвергает крупные контексты ('message too long' или общий текст ошибки)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/364 — повтор того же oversized payload даёт 4 одинаковых SWWR (та же сигнатура: пузырь 124 символа)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/381 — замерить конкуренцию renderer до изменения планирования вкладок",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/30 — rate-limit диалог в effort_selection показывался как 'model at capacity'",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/563 — мульти-аккаунт (для обхода лимитов не использовать)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/554 — детект корейского диалога rate limit",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/553 — opt-in новый разговор на каждый turn (больше открытий разговоров — риск для лимита)",
+   "https://github.com/trukhinyuri/codex-superpower/commit/1ac9b616b2d40b2ec4b3fe43a4451324e411905d — наш фикс: задержка в формате 'Please try again in Ns' и cooldown",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/ac95c2f2686a9a7126a1c60f2adfaab7766ead29 — форк: фиксация инцидента, жёсткий cooldown 5 мин, затем интервалы 1/3/5/7/10 мин, serial gate, ожидание внутри моста с heartbeat",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/340bd1ca50ee79f1b4873b0a7f48a7f7e97d86eb — форк: гейт на каждое действие с сайтом во время восстановления",
+   "https://github.com/NightPlayProject/codex-chatgpt-web/commit/ff2ccbca48a957de21771af03ec3b696e6a1d896 — форк: circuit breaker на провайдера, параллельность 1 до успешной пробы после cooldown",
+   "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-api/src/sse/responses.rs — классификация response.failed и try_parse_retry_after",
+   "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/responses_retry.rs — цикл 'Reconnecting n/max', задержка = retry_delay или backoff",
+   "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/protocol/src/error.rs — is_retryable (ServerOverloaded и InvalidRequest не повторяются)",
+   "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-api/src/api_bridge.rs — HTTP 429/503: UsageLimitReached, RetryLimit, ServerOverloaded",
+   "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/session/mod.rs — maybe_warn_on_server_model_mismatch (ложное cyber-предупреждение при openai-model, отличном от запрошенного)"
+  ],
+  "unverified": [
+   "Реальное правило и окно лимитера ChatGPT неизвестны. Вывод о том, что первый инцидент не предсказывается нашим коротким всплеском, опирается на 8 эпизодов одного дня и одного аккаунта.",
+   "Текст ошибки на странице при SWWR не читался (приватность). Вывод об отказе по размеру опирается на структурную сигнатуру (генерация не стартовала, пузырь 124 символа) и на upstream #541 и #364.",
+   "Гипотеза о конкуренции renderer не подкреплена метриками CPU или renderer; есть только совпадение зависаний с крупными turn.",
+   "Отображение InvalidRequest (invalid_prompt) и ContextWindowExceeded проверено по исходнику codex-cli 0.154.0; как их рендерит Codex Desktop, не проверялось.",
+   "Механизм, при котором мост отвечает на повторы Codex сохранённым отказом, выведен из кода index.ts и из отсутствия нового browser.turn_started. Трассировка по отдельным запросам не делалась.",
+   "Кто инициировал 13 перезапусков, отменивших turn — пользователь или автообновление, — не сопоставлялось.",
+   "81 ошибка model_catalog_failed на stage transport (нативный каталог) не расследовалась, а от неё зависит здоровье native-fallback.",
+   "Из 765 форков просмотрены 70 последних по push. Реализации форков не запускались и не тестировались.",
+   "Сколько ключей worker (JSON resolved config) реально возникает на практике, не проверялось.",
+   "Что bodyTextChars около 547k на пустом Temporary Chat — это textContent со скриптами гидрации, а не видимый DOM, — предположение; на выводы не влияет.",
+   "Режим только чтения: код не менялся, тесты и приложение не запускались. Лог рос во время анализа, итоговые числа взяты по снимку до 17:38:28Z; более ранние выборки по Codex и диагностике — до 17:25–17:31Z."
+  ]
+ },
+ {
+  "class": "Сквозная проблема: как ошибки выходят наружу и почему не лечатся сами. Контракт повторов между мостом и Codex, подстройка под лимиты частоты и размер сообщений ChatGPT, наблюдаемость. Большая часть того, что сегодня видит пользователь, относится к классу (b): мост может вылечить это сам. К классу (c), где нужен человек, относятся только вход в ChatGPT, блокировка «unusual activity», настоящий лимит использования, отсутствующий коннектор и ручной режим Zero Risk.",
+  "evidence": [
+   "Базовая версия кода: HEAD 91a38989 = origin/main на момент старта. Во время работы другая сессия сдвинула worktree до 10a30a6b и оставила незакоммиченные правки тестов; я их не трогал. Срез логов: launcher.jsonl до ~17:25Z; Codex logs_2.sqlite с отсечкой ts<17:26:00Z. Сами логи живые: в 17:38Z был новый rate limit, в подсчёты он не вошёл.",
+   "Исходы browser-ходов сегодня. Запрос: jq 'select(.at>=\"2026-09-18\" and .event==\"browser.turn_ended\")|.detail.status' launcher.jsonl. Итог: completed 50, failed 117, aborted 22. Событие turn_ended несёт только status и traceId, без кода и стадии.",
+   "Классы отказов моста (grep -cE по 9551 строке runtime.daemon_stdout/stderr за сегодня; скрипт tally.sh): 'failed: ChatGPT rate limit' 51; 'not started: … cooling down' 16; \"failed: … 'Something went wrong'\" 21; 'displayed an error' 4; 'Stopped thinking' 4; checkpoint response-stalled 51; 'is rebinding' 18, из них rebound 12 и 6 закончились ошибкой viewport; 'operational viewport' (turn failed) 6; 'stage timed out: browser_page' 3, ': send' 1; 'locator.press: Timeout' 2; 'prompt attachment aborted' 10, из них 5 финальных; connector 'catalog is missing' 4 + 'exposed no row' 3 (все в 08 ч); model_catalog_failed: transport 72, catalog 7, request 2; 'structured context handoff failed' 13; 'trusted environment unavailable' 48 (09–11 ч).",
+   "Повторы Codex (logs_2.sqlite, file='core/src/responses_retry.rs' line=156, 00:00–17:26Z): всего 193, до 5/5 дошли 34. По тексту ошибки: rate_limit 42, из них 25 с задержкой <5 с, все в 10 ч, до коммита 1ac9b616; остальные с заявленной задержкой 60–300 с. 'Something went wrong' 38, все <5 с. missing cwd 35, все <5 с (09–11 ч). submission_ambiguous 19 и submitted_turn_failed 15, все <5 с, хотя мост пометил их retryable:false. connector 15 (<5 с). Локальный cooldown 10, все ≥5 с. Stopped thinking 10 (<5 с). stage timeout 3, regenerate 3, viewport 1.",
+   "Финальные ошибки ходов Codex (turn.rs:766 'Turn error', та же отсечка): 72. Из них 38 — лимит нативного Codex ('You've hit your usage limit', это не мост). От моста около 33: SWW 7 (из них 2 с исчерпанным бюджетом, 12–17 ч), missing cwd 7 (только 09–11 ч, дальше 0 после fbd3af42), rate limit с исчерпанным бюджетом 6 (10–12 ч), submission ambiguous 4, submitted turn failed 3, Stopped thinking 3 (14 ч), connector 3 (08 ч), плюс 1 context window.",
+   "SWW растёт с размером сообщения, а не с числом параллельных ходов. Метод: для каждой попытки брал maxMessageChars из строки 'opened (transport=…)' и сопоставлял с исходом (python по bridge-today.log). inline <50k символов: 19 попыток, SWW 0. 50–80k: 40, SWW 0. 80–100k: 45, SWW 2. 100–120k: 5, успехов 0, SWW 4. 120–150k: 11, успех 1, SWW 5. ≥200k: 10, успех 1, SWW 6. Multipart со стадией ≥200k: 31 попытка, 2 успеха, SWW 4, rate limit 13. Статический лимит composer для Medium/High — 1,048,572 символа (chatgpt-web-models.ts:39).",
+   "Rate limit растёт с параллельностью. Параллельность восстанавливал по turn_started/turn_ended со сбросом на daemon_started. Доля rate limit среди исходов: при ≤1 активном ходе 14% (9 из 64), при 2–3 ходах 42% (32 из 77), при 4–5 ходах 38% (10 из 26). Доля SWW от параллельности не зависит: 17%, 10%, 8%. Пик — 5 одновременных ходов (6 раз).",
+   "Инцидент 17:13–17:21Z. Пять ходов шли почти одновременно, четыре из них multipart-3 (estimatedInputTokens 202k–285k, стадии до 318,100 символов). 5a92fa75 и 29f86203 упали на финальном send с 'locator.press: Timeout 15000ms'. 0366feaa прервался на attachment через 0 мс. 0b8f3296: DOM stall, затем rebind, затем viewport timeout. В снимке 33-turn-failed.json у 0b8f3296 не удалось снять и state ('DOM observation did not respond within 5000ms'), то есть рендерер не отвечал. 643f8970 открывался 4 раза: исходная попытка и 3 повтора из бюджета моста. Все 4 раза SWW на подтверждении стадии 1, каждый раз заново отправлялось около 204k токенов. Повторы Codex шли с задержкой <5 с, в итоге 'Reconnecting 5/5' и ошибка '…remained unavailable after several attempts'.",
+   "Лечение rate limit работает, когда задержка названа. Трасса b397b327: rate limit после Send, Codex ждал ровно 120 с (14:10:54 → 14:12:54), затем снова rate limit с 300 с, ждал 300 с (14:13:28 → 14:18:28), после этого ход прошёл с tool calls. Эскалация cooldown: 60 → 120 → 240 → 300 с. 11 из 13 сбоев handoff при компакции вызваны rate limit и ушли в Codex как rate_limit_exceeded с задержкой. Оставшиеся два: viewport и compaction_handoff_timeout (300000 мс).",
+   "response-stalled-60s — это не отказ: из 47 ходов, дошедших до stall-чекпойнта и получивших исход, 37 завершились успешно. DOM-stall с rebind — наоборот: ни одна из 12 таких трасс не завершилась успешно (4 viewport, 4 SWW, 2 rate limit, 1 Stopped thinking, 1 multipart aborted).",
+   "Рестарты: runtime.daemon_started 32, launcher.window_created 21. Событие runtime.active_turns_cancelled было 17 раз и отменило 45 browser- и 3 HTTP-хода. После установки 86f2d311 в 16:58Z ('Ask before a quit stops turns in flight') выходов было 2, отменено 0. Причина выхода в логе не пишется.",
+   "Каталог моделей: /healthz с 17:01Z — 38 запросов, 29 успешных. Строки model_catalog_failed transport: медиана elapsedMs 27, p90 273, максимум 595. Ни в одной нет поля code: modelCatalogFailure берёт только строковый error.code (server.ts:428–431).",
+   "Коннектор при настройке: 8 событий connector.verification_failed с 08:27 по 08:40. Четыре раза 'exposed no row named \"Codex Native2\" after 3 … attempts; create a connector with that exact name', четыре раза 'personalization preflight exceeded its readiness deadline'. Проверка прошла только в 08:41:55, после 9 ручных запусков. После 09 ч ошибок коннектора нет, успешных выборов 86.",
+   "Сегодня настройки переключали вручную (runtime.operation_started): bigger-context setup три раза (--bigger-context ×2, --standard-context ×1), skill-attachments два раза (--inline-skills, --skill-attachments). TROUBLESHOOTING.md ('ChatGPT says the account is temporarily limited') предлагает руками править [agents] max_concurrent_threads_per_session в ~/.codex/config.toml. В таблице README 'Fewer parallel tasks and subagents help' — это тоже ручная настройка.",
+   "Отчёты о проблемах: в ~/Library/Application Support/Codex Web GPT/problem-reports.json consent='auto', reports={}. При 117 упавших ходах отчётов 0: KINDS покрывает только update-build-failed, update-install-failed, update-rolled-back и runtime-start-failed; STAGES — только build, install, startup, rollback (problem-report.cjs:16–36). Уведомление phase:'end' передаёт в лаунчер свободный текст message до 500 символов, а code и stage не передаёт (browser-worker.ts:4596–4615, control-server.cjs:313–325).",
+   "Экрана состояния нет. В лаунчере состояние cooldown показывается только для аккаунтов CLIProxyAPI (App.tsx:1693–1698). /healthz возвращает status, mode, uptime, accepting_turns, статистику каталога и active_*_turns, но не cooldown ChatGPT, не очередь и не последний отказ (server.ts:985–1000). Activity — сырой список событий через humanEvent, без причины отказа (App.tsx:1535–1577, 2750). В Doctor нет проверки здоровья ходов ChatGPT (doctor.ts). Cooldown живёт в памяти helper-процесса (browser-worker.ts:2348), а helper — дочерний процесс демона (launcher-helper-client.ts:391).",
+   "Как Codex обрабатывает ошибки (openai/codex: codex-rs/codex-api/src/sse/responses.rs:417–470, protocol/src/error.rs:374–416; сверено с тегом rust-v0.154.0). response.failed: поле retryable игнорируется. context_length_exceeded — ContextWindowExceeded; insufficient_quota и родственные — QuotaExceeded; invalid_prompt — InvalidRequest{message}, не повторяется, текст показывается как есть. server_is_overloaded — ServerOverloaded: не повторяется и показывает фиксированный текст 'Selected model is at capacity. Please try a different model.', текст моста теряется. rate_limit_exceeded и slow_down — ждёт 'try again in Ns'. Любой другой код — Retryable без задержки: до 5 повторов с backoff ~0.2–3 с. HTTP 503 с кодом server_is_overloaded в теле тоже превращается в ServerOverloaded (api_bridge.rs:76–81).",
+   "Инвентарь, общий объём: 42 места с `new ChatGptWebAdapterError` (browser-worker.ts 22, index.ts 10, adapter-error.ts 4, output-validation.ts 2, server.ts, retry-policy.ts, prompt.ts, launcher-helper-client.ts — по 1). Около 30 кодов моста. Плюс коды, которые lib/errors.ts classifyError выводит по ключевым словам из обычных Error: server_is_overloaded, upstream_server_error, invalid_request_error, invalid_api_key, permission_denied, subscription_required, insufficient_quota, rate_limit_exceeded, client_closed_request, origin_rejected. Обычных `new Error(` в src: turn-broker 121, browser-worker 83, launcher-helper-client 49 и далее. В launcher/electron около 480 throw-сайтов, наружу они выходят через ErrorToast, connector.verification_failed, Doctor и статус вкладки.",
+   "(a) Лечится автоматически уже сегодня. rate_limit_exceeded (диалог, локальный cooldown, SWW в течение 10 мин после лимита): Codex ждёт названную задержку 60–300 с, но ход падает после 3 попыток моста или 5 повторов Codex. Rate limit внутри handoff компакции (chatGptRateLimitCause). compaction_source_unavailable уходит в runFreshCompactionFallback (10 раз). SWW до отправки: бюджет 3 повтора, но без задержки. Rate limit после Send без tool calls остаётся retryable (616295fe). response stall 60 с — просто ожидание. DOM stall — rebind, частично. prompt_attachment_integrity — повторная проверка (f7b3fd7c). missing cwd исправлен в fbd3af42. client_cancelled, superseded, AbortError, codex_tool_timeout — сообщение пользователю не нужно.",
+   "(b) Можно лечить автоматически. SWW и 'message too long' на сообщениях ≥~90k символов. SWW, regenerate-error и Stopped responding после Send, если ни один tool call не был передан. chatgpt_submission_ambiguous и chatgpt_submitted_turn_failed ('Check the ChatGPT tab…', хотя вкладку обычно уже освободили: tab_released 144). Отказ из-за локального cooldown. 'ChatGPT model controls are unavailable. Reload ChatGPT…' (обычный Error, в Codex уходит как server_is_overloaded). chatgpt_subscription_unavailable ('Reload ChatGPT…'). connector_not_found с временной причиной (personalization preflight deadline, каталог ещё не подгрузился). Обычные Error viewport, browser_page, send и locator.press timeout. compaction_handoff_timeout, compaction_handoff_failed, compaction_control_unavailable ('Retry the task'). multipart_protocol_violation ('Disable Bigger Context or retry'). too_many_attachments ('disable Skills as files'). Потолок в 5 вкладок (обычный Error). 503 во время drain. browser_surface_bootstrap_timeout и helper_heartbeat_expired (504). structured_output_validation_failed. chatgpt_turn_retired (советует искать прокси). browser_interaction_mode_mismatch. cliproxy_unauthorized ('Check the key file…').",
+   "(c) Нужен человек: chatgpt_session_expired; unusual_activity_detected; chatgpt_stopped_thinking, когда это действительно лимит использования; connector_not_found, когда коннектора точно нет или он заблокирован; миграция legacy- и DEV-коннектора; context_length_exceeded для бюджета Luna в 28k и для вложений сверх лимитов; invalid_output_schema (ошибка на стороне Codex); manual_handoff_timeout, manual_turn_cancelled, manual_launcher_failed, manual_multipart_unsupported (Zero Risk — ручной режим по замыслу); лимит нативного Codex."
+  ],
+  "rootCauses": [
+   {
+    "cause": "Codex не учитывает retryable:false в response.failed. Любой код, которого нет в его коротком списке, он повторяет до 5 раз с задержкой меньше секунды. Поэтому ошибки, которые мост сделал терминальными, пользователь видит как 'Reconnecting 1/5…5/5'. А если мост пометил ошибку retryable:true, но не назвал задержку, повторы сразу снова бьют в ChatGPT.",
+    "status": "CONFIRMED",
+    "evidence": "Код Codex: responses.rs:459–469 (Retryable{delay:None}), error.rs:374–416. Логи Codex: submission_ambiguous 19 и submitted_turn_failed 15 повторов при retryable:false от моста; SWW 38 повторов, все <5 с; connector 15 и Stopped thinking 10 повторов, все <5 с."
+   },
+   {
+    "cause": "lib/errors.ts classifyError и inferHttpStatusFromAdapterMessage переводят любой 503, а также сообщение со словами 'unavailable', 'overloaded' или 'temporarily' в код server_is_overloaded. Codex на этот код сразу останавливается и показывает 'Selected model is at capacity. Please try a different model.' — совет, который к делу не относится. Так уходят: drain 503 (server.ts:1198–1236), 'Launcher browser host is unavailable', 'ChatGPT model controls are unavailable…', '…Temporary Chat surface is unavailable', '(api_tool unavailable)', 'turn broker unavailable'. Комментарий в errors.ts:153 о том, что Codex применяет retry-after backoff, для 0.154 неверен.",
+    "status": "CONFIRMED",
+    "evidence": "errors.ts:147–156 и 213–218; error.rs rust-v0.154.0: ServerOverloaded не повторяется, текст 'Selected model is at capacity'. Upstream #546 и #407. Сегодня этот путь не сработал: в логах Codex 0 совпадений 'at capacity'."
+   },
+   {
+    "cause": "'Something went wrong' вызывают большие сообщения. Мост на SWW повторяет тот же payload (бюджет 3, без задержки) и не уменьшает размер сообщения. Статические лимиты composer (1,048,572 символа для Medium/High, 1,045,000 и 1,635,000 для Pro) выше того, что ChatGPT сейчас принимает.",
+    "status": "CONFIRMED",
+    "evidence": "inline ≥100k символов: 26 попыток, 2 успеха, 15 SWW; <80k: 59 попыток, 0 SWW. 643f8970 повторил около 204k токенов 4 раза подряд. Сам механизм на стороне ChatGPT (изменение около 16.09) — гипотеза, основанная на upstream #541 и #441."
+   },
+   {
+    "cause": "Параллельность не подстраивается. Потолок жёсткий — 5 вкладок. После rate limit параллельность не снижается, лишние ходы получают обычный Error вместо очереди. Документация перекладывает ограничение на пользователя (ручная правка config.toml).",
+    "status": "CONFIRMED",
+    "evidence": "concurrency.ts:6; turn-execution.ts:529–534; browser-worker.ts:2409–2412. Доля rate limit: 14% при ≤1 ходе против 42% и 38% при 2–5. TROUBLESHOOTING.md, раздел 'temporarily limited'."
+   },
+   {
+    "cause": "Отказ из-за локального cooldown (ход в ChatGPT не отправлялся) расходует бюджет повторов моста (3) и повторы Codex (5), и ход падает, хотя ничего не отправлено. Состояние cooldown хранится в памяти helper-процесса: оно сбрасывается при каждом рестарте демона (сегодня 32 запуска) и нигде не видно.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:4641 (assertReady бросает retryable 429). Затем index.ts:1455–1460 recordRetryableFailure, retry-policy.ts:4 (MAX 3). 16 отказов 'not started', 10 повторов Codex по cooldown; 6 финальных ошибок rate limit с исчерпанным бюджетом. Что сброс при рестарте реально навредил сегодня — не доказано."
+   },
+   {
+    "cause": "Сборка до 1ac9b616 (выложена около 10:36Z) отдавала 'Try again in a few minutes' без числа секунд. Codex не смог разобрать задержку и повторял rate limit быстрее 5 с, создавая новые Temporary Chat во время лимита. Уже исправлено.",
+    "status": "CONFIRMED",
+    "evidence": "25 повторов rate limit <5 с, все в 10 ч. После 11 ч все повторы rate limit идут с задержкой ≥5 с. Upstream #547."
+   },
+   {
+    "cause": "DOM-stall, viewport timeout и locator.press timeout возникают из-за того, что рендерер не отвечает при конкуренции тяжёлых вкладок. Возможен и второй механизм: подключение CDP сбрасывает device emulation, а viewport в форке обновляется до подключения, а не после. Сериализации тяжёлых фаз, как в upstream PR #373, в форке нет.",
+    "status": "HYPOTHESIS",
+    "evidence": "Ни одна из 12 трасс с rebind не завершилась успешно. В снимке 0b8f3296 не удалось снять и state (DOM observation 5000ms). Отказы совпадают по времени с 4–5 параллельными multipart-ходами в 17:14–17:20. rebindLauncherPage (browser-worker.ts:4766–4822) обновляет viewport до connectLauncherBrowserHost; форк marcmy исправляет это после подключения (06a4ddca). grep по 'page-driving' и 'serialize heavy' в форке ничего не находит."
+   },
+   {
+    "cause": "Отчёты о проблемах в принципе не могут покрыть отказы ходов: закрытые списки kind, code и stage описывают только обновления и запуск runtime, а лаунчер получает свободный текст вместо кода и стадии.",
+    "status": "CONFIRMED",
+    "evidence": "problem-report.cjs:16–36; control-server.cjs:325 пишет только status; reports={} при consent=auto."
+   },
+   {
+    "cause": "В сообщениях об ошибках от человека требуют того, что мост может сделать сам, а советы часто невыполнимы: 'Check the ChatGPT tab', хотя вкладку уже освободили; 'Reload ChatGPT and retry'; 'Disable Bigger Context'; 'disable Skills as files'; 'check whether a proxy… closed the stream'; ручная правка config.toml. Отсюда ручные переключения настроек сегодня.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:199, 936, 948, 1815 (стр. 3815), 2272; adapter-error.ts:66–68; index.ts:325–327, 353–354, 1175; tab_released 144; bigger-context переключали 3 раза, skill-attachments 2 раза."
+   },
+   {
+    "cause": "Выходы из лаунчера отменяли ходы на лету. Уже исправлено коммитом 86f2d311 — после него отменено 0 ходов. Инициатор выхода не пишется в лог, поэтому причину нельзя атрибутировать (вероятно, рестарты во время разработки форка).",
+    "status": "HYPOTHESIS",
+    "evidence": "17 событий active_turns_cancelled: 45 browser- и 3 HTTP-хода до 16:58Z; 2 выхода после — 0 отменённых."
+   },
+   {
+    "cause": "model_catalog_failed stage=transport — в основном /v1/models, которые оборвал сам клиент (Codex), а не сетевые сбои. Их ошибочно считают отказами каталога.",
+    "status": "HYPOTHESIS",
+    "evidence": "72 случая, медиана 27 мс, ни у одного нет code (у DOMException AbortError код числовой, поэтому modelCatalogFailure его отбрасывает). Имя ошибки не логируется."
+   },
+   {
+    "cause": "Причина прерывания хода не логируется. 'prompt attachment aborted' через 0 мс после effort_selection и 13 случаев 'turn aborted' нельзя разделить на закрытый Codex-стрим, выход лаунчера и замену хода новым.",
+    "status": "CONFIRMED",
+    "evidence": "browser-worker.ts:1332 бросает AbortError без reason; в логе только текст. 5 финальных и 10 всего случаев 'prompt attachment aborted' с durationMs=0."
+   }
+  ],
+  "fixes": [
+   {
+    "title": "Сделать терминальные ошибки терминальными для Codex и убрать ложное 'Selected model is at capacity'",
+    "priority": "P0",
+    "files": [
+     "src/bridge.ts",
+     "src/lib/errors.ts",
+     "src/server.ts",
+     "tests/"
+    ],
+    "behaviour": "(1) adapterFailureFromEvent: если event.retryable===false и код не входит в список, который Codex уже считает терминальным (context_length_exceeded, insufficient_quota, …), в response.failed уходит error.code='invalid_prompt'. Codex превращает его в InvalidRequest: не повторяет и показывает текст как есть. Исходный код моста сохраняется в error.type и в тексте. Сейчас Codex делает 5 бесполезных повторов, которые мост лишь проигрывает заново. (2) Для локальных сообщений моста server_is_overloaded больше не выдаётся: 'unavailable' и 503 уходят как upstream_server_error с явной задержкой, либо получают явный adapter-код. (3) Во время drain /v1/responses не отвечает 503 сразу: запрос ждёт resume до 120 с с response.heartbeat, и только потом отдаёт 503 с кодом, отличным от server_is_overloaded.",
+    "tests": "Юнит-тесты classifyError: 'Launcher browser host is unavailable…', 'ChatGPT model controls are unavailable…' и сообщение drain никогда не дают server_is_overloaded. SSE-снапшот: ошибка с retryable:false даёт code invalid_prompt. Контрактный тест с копией таблицы правил responses.rs: если Codex её поменяет, CI упадёт. Тест на drain с последующим resume: запрос проходит без ошибки.",
+    "risk": "invalid_prompt используется не по прямому смыслу; будущий Codex может показывать его иначе (сейчас это CodexErrorInfo::Other). Пропадает строка 'Reconnecting' — но эти повторы и так лишь локальные.",
+    "effort": "S"
+   },
+   {
+    "title": "Во время локального cooldown ждать, а не отказывать; cooldown переживает рестарт и виден в лаунчере",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (ChatGptRateLimitCooldown, runBrowserTurn ~L4641)",
+     "src/adapters/chatgpt-web/index.ts (catch ~L1453–1486)",
+     "src/adapters/chatgpt-web/retry-policy.ts",
+     "launcher/electron/control-server.cjs",
+     "launcher/electron/state.cjs",
+     "src/server.ts (/healthz)"
+    ],
+    "behaviour": "assertReady заменяется на awaitReady(signal). Пока cooldown активен, ход ждёт: adapter-heartbeat и response.heartbeat уже держат стрим Codex; одной строкой reasoning-summary показывается 'ChatGPT попросил подождать, до HH:MM ничего не отправляется'. В ChatGPT ничего не уходит, бюджеты Codex и моста не расходуются. Ожидающие ходы после конца cooldown отпускаются по одному с интервалом. Для rate_limit бюджет считается по времени (например, до 30 мин суммарного ожидания), а не 3 попытками. Состояние cooldown (until, consecutive) хранит лаунчер с TTL, и оно переживает рестарт демона и helper. Лимиты не обходятся — это строгое их соблюдение.",
+    "tests": "Фейковые часы: cooldown 120 с, ход ждёт, 0 действий в браузере, потом завершается. Abort во время ожидания: AbortError без трафика. Рестарт демона посреди cooldown: состояние восстановлено. Отказ из-за локального cooldown не увеличивает счётчик retry-policy. Интервал heartbeat меньше половины stall timeout (300 с).",
+    "risk": "Ход минутами висит в состоянии 'working'. Если отпустить все ожидающие ходы разом, будет новый всплеск — нужен шаг выпуска. Если helper мёртв, состояние cooldown может устареть.",
+    "effort": "M"
+   },
+   {
+    "title": "Подстраивать границу размера сообщения по факту, а не повторять тот же payload после 'Something went wrong'",
+    "priority": "P0",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (assertChatGptWebInputWithinLimits ~L1020–1065, assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode ~L1161)",
+     "src/chatgpt-web-models.ts (L38–67)",
+     "src/adapters/chatgpt-web/prompt.ts (partitionMultipartContext ~L730–745)",
+     "src/adapters/chatgpt-web/index.ts",
+     "новое хранилище выученных лимитов в ~/.codex-chatgpt-web/state"
+    ],
+    "behaviour": "SWW или 'message too long' до завершения ответа на сообщении больше 80k символов записывается как размер отказа для пары аккаунт+режим. Действующий потолок = min(статический лимит, 0.8 × минимальный размер отказа), но не ниже максимального недавнего успеха. Повтор этого хода перепланируется: больше частей multipart поменьше или урезанная либо сжатая история; тот же payload повторно не отправляется. В Codex уходит код slow_down с 'Please try again in 30s', и Codex выдерживает паузу. После N успехов потолок медленно растёт обратно, но не выше статического. Multipart-транзакции идут строго по одной.",
+    "tests": "После SWW на 101,167 символа следующий план — все сообщения ≤~80k; одинаковый payload после SWW никогда не отправляется повторно; успех на 98k поднимает нижнюю границу; выученный потолок переживает рестарт; путь Luna не затронут.",
+    "risk": "Больше сообщений на ход — больше давление на лимиты частоты; поэтому идёт в паре с подстройкой параллельности. Ошибочно заниженный потолок сократит полезный объём — это смягчают рост потолка после успехов и верхняя граница.",
+    "effort": "M"
+   },
+   {
+    "title": "Подстраивать параллельность и ставить ходы в очередь вместо жёсткого потолка 5 и ручной правки config.toml; перенести из upstream PR #373 блокировку тяжёлых фаз",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/concurrency.ts",
+     "src/adapters/chatgpt-web/turn-execution.ts (getOrCreate ~L529–534)",
+     "src/adapters/chatgpt-web/browser-worker.ts (run ~L2405–2412, runStage)",
+     "TROUBLESHOOTING.md",
+     "README.md"
+    ],
+    "behaviour": "Тяжёлые фазы работы со страницей (prepare, attach, send, multipart-send, rebind) идут через FIFO-блокировку по одной на аккаунт. Число генерирующих ходов подстраивается: старт 3, после rate limit 1–2 на 10 минут, +1 за каждые 5 успехов, максимум 5. Сверх потолка ходы ждут в очереди с heartbeat, а не получают Error 'at most 5 simultaneous'. Ход, который ждёт результатов инструментов от Codex, не занимает слот отправки — поэтому родитель и сабагент не зависают друг на друге. Из документации убрать советы по ручной настройке.",
+    "tests": "Шесть одновременных ходов: шестой ждёт в очереди и стартует при освобождении слота. После rate limit потолок 2. Сабагент проходит, пока родитель ждёт tool result (сценарий upstream #397). Блокировка повторно входима и освобождается, если helper умер.",
+    "risk": "Растёт задержка. При ошибке в учёте слотов возможна взаимная блокировка. Параллельных ходов меньше.",
+    "effort": "M"
+   },
+   {
+    "title": "Разрешать неоднозначную отправку наблюдением и безопасно отправлять заново, если tool calls не было",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/index.ts (submittedTurnFailure ~L302–365, rateLimitStaysRetryableAfterSend ~L296)",
+     "src/adapters/chatgpt-web/browser-worker.ts (submission evidence, recoverPageObservation)"
+    ],
+    "behaviour": "Для chatgpt_submission_ambiguous, chatgpt_submitted_turn_failed, regenerate-error и SWW после Send, если !hasHandedToolCallsToCodex: сделать rebind или открыть свежую вкладку с тем же retained conversation и найти user turn. Если ответ ещё генерируется — продолжать наблюдать. Если его нет или он явно упал — вернуть retryable с задержкой (slow_down 30 с) и повторить на свежей поверхности в рамках общего бюджета. Если tool calls уже переданы — терминальная ошибка с текстом класса (c). Вместо 'Check the ChatGPT tab' в сообщение подставляется собственный текст алерта ChatGPT из DOM, с ограничением длины, и в лог он не пишется.",
+    "tests": "Фикстуры: принято, затем SWW без tools — retryable с задержкой и свежей поверхностью; с переданным tool call — терминальная; неоднозначная отправка при видимом user turn — наблюдение без повторной отправки.",
+    "risk": "Одно лишнее сообщение в ChatGPT (расход лимита). Нельзя нарушать гарантию 51656cda 'never resend a prompt ChatGPT already accepted': повторять можно только когда провал принятого хода доказан.",
+    "effort": "M"
+   },
+   {
+    "title": "Восстанавливать рендер: viewport после подключения CDP, свежая вкладка до отправки",
+    "priority": "P1",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (rebindLauncherPage ~L4766–4822, waitForOperationalChatGptViewport ~L1309)",
+     "launcher/electron/browser-host.cjs (heartbeatTurn refreshViewport, enableDeviceEmulation ~L1486–1521)",
+     "src/launcher-browser-host.ts"
+    ],
+    "behaviour": "После connectLauncherBrowserHost повторно выставлять device emulation, как в форке marcmy 06a4ddca, а не только до подключения. Если evaluate или state-capture тоже не отвечает (рендерер завис): до отправки — закрыть вкладку, открыть новую и повторить стадию, ChatGPT при этом ничего не получает; после отправки — открыть URL retained conversation в свежей вкладке и продолжить наблюдение без повторной отправки.",
+    "tests": "Фикстура, где подключение CDP сбрасывает emulation: rebind проходит. Зависший рендерер: открывается свежая вкладка. Зависание после отправки: переоткрытие без повторной отправки.",
+    "risk": "Больше открытий и закрытий вкладок; переоткрытие диалога — это лишний GET к ChatGPT.",
+    "effort": "M"
+   },
+   {
+    "title": "Строка состояния в лаунчере: что сейчас с ChatGPT и что будет дальше",
+    "priority": "P1",
+    "files": [
+     "src/server.ts (/healthz ~L985)",
+     "src/adapters/chatgpt-web/browser-worker.ts",
+     "launcher/electron/runtime-supervisor.cjs (~L570)",
+     "launcher/electron/main.cjs",
+     "launcher/src/App.tsx (~L583, ActivitySurface ~L1535)",
+     "launcher/src/i18n.ts",
+     "launcher/src/types.ts",
+     "src/doctor.ts"
+    ],
+    "behaviour": "/healthz.chatgpt = {state: normal|waiting|degraded|needs_you, cooldownUntil, queued, active, learnedCharCeiling, lastFailure:{code, stage, at}, last30m:{completed, failed}}. В лаунчере одна строка: 'ChatGPT: работает' / 'ChatGPT попросил подождать — отправка возобновится в 14:23, в очереди 2 задачи, ничего не отправляется' / 'Большие сообщения не проходят — делю их автоматически' / 'Нужно ваше действие: войдите в ChatGPT [Войти]'. В Doctor добавить проверку chatgpt-turn-health на тех же данных. В Activity у turn_ended показывать code и stage.",
+    "tests": "Схема /healthz; рендер App для каждого state; каждый новый ключ i18n есть во всех языках из languages.json.",
+    "risk": "Если helper мёртв, показывать 'неизвестно'; иначе состояние будет устаревшим.",
+    "effort": "M"
+   },
+   {
+    "title": "Автоотчёты о повторяющихся неизлеченных отказах ходов — по закрытым спискам, без пользовательских данных",
+    "priority": "P1",
+    "files": [
+     "launcher/electron/problem-report.cjs (KINDS, CODES, STAGES, buildProblemReport, fingerprint)",
+     "launcher/electron/control-server.cjs (~L313–325)",
+     "src/launcher-browser-host.ts (~L372–379)",
+     "src/adapters/chatgpt-web/browser-worker.ts (~L4596–4615)",
+     "launcher/electron/main.cjs (reportProblem ~L1296)"
+    ],
+    "behaviour": "phase:'end' передаёт code и нормализованный stage, лаунчер проверяет их по allowlist; свободный message в отчёт не идёт. В лаунчере скользящий FailureLedger. Новый kind 'turn-failures-repeated': код из закрытого списка кодов моста класса (b) и 'other'; stage из закрытого списка (browser_page, temporary_chat_preparation, effort_selection, prompt_attachment, file_attachment, send, multipart_stage_send, multipart_stage_ack, response, rebind, compaction_handoff); transport ∈ {inline, multipart}; sizeBucket ∈ {<50k, 50–100k, 100–200k, >200k}. Условие: одна и та же комбинация в ≥3 разных трассах за 60 минут уже после исчерпания лечения в мосте, и доля успехов в этой корзине <30%. Второй kind 'retry-storm': ≥3 повтора одного хода за 10 с — значит, задержка не соблюдена. Никогда не отправляются: rate_limit_exceeded, unusual_activity_detected, chatgpt_session_expired, chatgpt_subscription_unavailable, client_cancelled, manual_*, context_length_exceeded — это состояние аккаунта, и issue публичный под GitHub-аккаунтом пользователя. Fingerprint = kind|code|stage|transport, без commit: один issue на один дефект, версия идёт в комментарий не чаще раза в сутки. Лимит 5 новых issue в день остаётся.",
+    "tests": "Fuzz buildProblemReport: текст ошибки, e-mail, путь, строки вида ключа в любом поле отбрасываются. Ledger: 2 трассы — отчёта нет, 3 — есть. Коды состояния аккаунта не отправляются никогда. В теле отчёта только поля из allowlist. Retry-storm ловится на синтетических временах повторов.",
+    "risk": "Даже грубые корзины в публичном issue раскрывают картину использования; во время сбоя ChatGPT возможны ложные срабатывания — смягчают условие по доле успехов и дедупликация в пределах суток.",
+    "effort": "M"
+   },
+   {
+    "title": "Автоматическая перепроверка коннектора и разделение временных и постоянных отказов",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (chatGptConnectorUnavailableError ~L190–751, сообщение ~L3300–3310)",
+     "launcher/electron/main.cjs (connector verification)",
+     "launcher/src/i18n.ts"
+    ],
+    "behaviour": "После 'Connect harness' проверять коннектор автоматически с нарастающей паузой (10 с, 30 с, 60 с, 2 мин), без кликов. Сегодня понадобилось 9 ручных запусков Verify. Ошибка 'personalization preflight exceeded its readiness deadline' получает временный код connector_transient: одна перезагрузка страницы и повтор. Сообщение класса (c) показывать только если коннектора нет около 5 минут подряд. Опционально — создание коннектора одной кнопкой во встроенном браузере, только по явному нажатию пользователя.",
+    "tests": "Фейковый каталог появляется на третьем опросе: проверка проходит без действий пользователя. Временный дедлайн: ровно один повтор.",
+    "risk": "Автоматизация настроек аккаунта ChatGPT требует явного согласия; UI ChatGPT может поменяться.",
+    "effort": "M"
+   },
+   {
+    "title": "Компакция: автоматически переходить на свежую компакцию при timeout и viewport, а не выдавать 'Retry the task'",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/index.ts (~L917–925, ~L1110–1180 runFreshCompactionFallback)"
+    ],
+    "behaviour": "Для compaction_handoff_timeout, viewport или DOM stall во время handoff и для compaction_control_unavailable запускать тот же runFreshCompactionFallback, что уже работает для source_unavailable, в рамках бюджета. Если ограничивает rate limit — ждать по его правилам.",
+    "tests": "Handoff timeout: fallback запускается один раз и результат возвращается в Codex. Rate limit во время fallback: ожидание, не отказ.",
+    "risk": "Лишнее сообщение в ChatGPT на каждый fallback.",
+    "effort": "S"
+   },
+   {
+    "title": "Тексты класса (c): что произойдёт дальше и одно действие",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (~L929–975, 2271, 3308, 3814)",
+     "src/adapters/chatgpt-web/adapter-error.ts (~L63–78)",
+     "src/adapters/chatgpt-web/index.ts (~L324–361, 917, 1175)",
+     "src/cliproxy.ts (~L361)",
+     "README.md",
+     "TROUBLESHOOTING.md"
+    ],
+    "behaviour": "Шаблоны. session_expired: 'ChatGPT вышел из аккаунта на этом Mac. Окно входа в Codex Superpower уже открыто — войдите там; задача продолжится сама в течение 10 минут после входа'. Для этого нужно держать ход; иначе — 'задача остановлена, после входа отправьте её снова'. unusual_activity: 'ChatGPT приостановил аккаунт из-за необычной активности. До HH:MM в ChatGPT ничего не отправляется; эта задача остановлена. Откройте chatgpt.com в обычном браузере и выполните проверку ChatGPT' — плюс локальный стоп на весь аккаунт, не только на этот ход. stopped_thinking: '<собственный текст ChatGPT о лимите и времени сброса>. Задача остановлена; отправьте её снова после HH:MM'. connector_missing: 'В ChatGPT нет коннектора \"Codex Native2\", поэтому ChatGPT не может запускать локальные инструменты. Задача остановлена. Нажмите «Создать коннектор» в Codex Superpower → Setup'. Luna context: 'Задача больше, чем Luna может прочитать (N > 28,000 токенов). Задача остановлена; выполните /compact'. cliproxy_unauthorized: 'CLIProxyAPI отклонил ключ моста; запрос остановлен. В разделе CLIProxyAPI нажмите «Переподключить»'. Из всех сообщений убрать 'Check the ChatGPT tab', 'Reload ChatGPT', 'Disable Bigger Context', 'disable Skills as files' и 'check whether a proxy…' — эти случаи лечатся автоматически по пунктам выше.",
+    "tests": "Снапшот-тест каждого текста. Lint-тест: ни одно сообщение адаптера не содержит 'Check the ChatGPT tab' или 'retry the task' без названного следующего шага.",
+    "risk": "Низкий. Тексты должны оставаться верными, когда включается автоматическое лечение.",
+    "effort": "S"
+   },
+   {
+    "title": "Диагностика: причина прерывания хода, имя ошибки каталога и причина выхода лаунчера",
+    "priority": "P2",
+    "files": [
+     "src/adapters/chatgpt-web/browser-worker.ts (~L1332, строки 'failed:')",
+     "src/adapters/chatgpt-web/adapter-error.ts (chatGptTurnAbortError)",
+     "src/server.ts (modelCatalogFailure ~L428–431, /v1/models)",
+     "launcher/electron/main.cjs (quit)"
+    ],
+    "behaviour": "Логировать класс причины прерывания (codex_stream_closed, launcher_quit, superseded, tab_closed, compaction_accepted) вместо голого 'aborted'. В model_catalog писать error.name; если req.signal.aborted — считать это client_aborted (499), а не отказом. У active_turns_cancelled добавить поле reason: user_quit, update, signal.",
+    "tests": "Юнит-тест: abort с reason передаёт класс в строку лога и в turn_ended. /v1/models, оборванный клиентом, не увеличивает счётчик отказов и не пишет model_catalog_failed.",
+    "risk": "Низкий.",
+    "effort": "S"
+   }
+  ],
+  "upstreamRefs": [
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/562 — предложение: пейсинг, cooldown и жёсткие ограничители для безопасности аккаунта",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/547 — после 'Too many requests' Codex делает 5 повторов за секунды; в форке исправлено коммитами 1ac9b616 и 09fea697",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/556 — rate limit при компакции маскируется под handoff timeout; в форке покрыто chatGptRateLimitCause",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/541 — с 2026-09-16 ChatGPT отклоняет большие payload",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/441 — 'Something went wrong' на длинном контексте и первом подтверждении",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/546 — 'Selected model is at capacity'",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/407",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/564 — Extra High падает на prompt attachment (composer rejected)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/557 — missing cwd",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/397 — взаимная блокировка при захвате страницы (важно для очереди)",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/381 — измерение конкуренции за рендерер",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/364 — повторять большие ходы с урезанной историей, а не тем же payload",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/312",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/317",
+   "https://github.com/miuuyy/codex-chatgpt-web/issues/425 — нельзя заменить старый коннектор",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/373 — сериализация тяжёлых фаз работы со страницей (в форк не перенесено)",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/355 — ограниченные повторы viewport без повторной отправки",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/432 — дата сброса лимита Pro в тексте ошибки",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/453 — разбиение слишком больших частей Bigger Context",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/460 — большой контекст файлом TXT",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/472 — большой контекст через MCP-мост",
+   "https://github.com/miuuyy/codex-chatgpt-web/pull/559 — rebind продолжения",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/ac95c2f2686a9a7126a1c60f2adfaab7766ead29 — rate-limit recovery backoff; ходы лаунчера держатся живыми во время восстановления",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/340bd1ca50ee79f1b4873b0a7f48a7f7e97d86eb — все действия на сайте притормаживаются на время восстановления после rate limit",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/06a4ddca4cb90d18440261d2a697c88e74dfb876 — повторная установка viewport после подключения CDP",
+   "https://github.com/marcmy/codex-chatgpt-web/commit/4dbe4bfbae912a81ac5d388b447791d33a0090ca",
+   "https://github.com/NightPlayProject/codex-chatgpt-web/commit/ff2ccbca48a957de21771af03ec3b696e6a1d896 — стабилизация восстановления после rate limit",
+   "https://github.com/NightPlayProject/codex-chatgpt-web/commit/de97bedac5c92e704ae4b1b65734fd2d6685528f",
+   "https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/sse/responses.rs — как Codex разбирает response.failed",
+   "https://github.com/openai/codex/blob/main/codex-rs/protocol/src/error.rs — is_retryable и текст ServerOverloaded",
+   "https://github.com/openai/codex/blob/main/codex-rs/core/src/responses_retry.rs — повторы и 'Reconnecting N/M'"
+  ],
+  "unverified": [
+   "Точная сборка встроенного в Codex Desktop app-server (client_version 26.915.31029; в URL моделей client_version 0.154.0 и 0.155.0). Правила Codex я сверил только для rust-v0.154.0 и main.",
+   "Проигрывает ли мост локально (без трафика в ChatGPT) повторы Codex для ошибок с retryable:false. Так утверждает комментарий в index.ts; из логов это не доказать, потому что в логах Codex нет traceId.",
+   "Механизм SWW на сообщениях ≥~90–100k символов (изменение на стороне ChatGPT). Есть только корреляция и отчёты upstream; порог точно не измерен.",
+   "Что вызывает DOM-stall и viewport timeout: конкуренция за рендерер или сброс emulation при подключении CDP. Посмотрел один сохранённый снимок, в каталоге diagnostics хранится только 11 трасс. Модель процессов рендерера в Electron (общий процесс для вкладок одного сайта) не проверял.",
+   "Кто инициировал 17 выходов из лаунчера — в логе нет поля reason.",
+   "Причина model_catalog_failed stage=transport (обрыв клиентом или сеть) — имя ошибки не логируется.",
+   "Причина 'prompt attachment aborted' через 0 мс (Codex закрыл запрос через 1–2 с после старта) — reason не логируется.",
+   "Состояние после 17:25Z не учтено: в 17:38Z был новый rate limit с повтором компакции через 84 с.",
+   "401 'invalidated oauth token' при обновлении нативных моделей Codex в 00–08 ч (175 раз) — это вход самого Codex, не мост; не разбирал.",
+   "Тесты, установщик и предложенные изменения не запускал (исследование только на чтение). Держит ли Codex стрим минутами при удержании хода во время cooldown, я вывел из кода (response.heartbeat) и из 37 ходов со stall больше 60 с, которые завершились успешно; целевым тестом это не проверено.",
+   "Пользовательские тексты промптов и ответов не читал. Выводы построены на названиях событий, кодах, стадиях, размерах и временах."
+  ]
+ }
+]

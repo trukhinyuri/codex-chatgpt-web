@@ -12,9 +12,14 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { updateButtonState } from "./update-button";
+import { CLIPROXY_LOGIN_PROVIDERS } from "./types";
 import type {
   BrowserInteractionMode,
   BrowserState,
+  CliProxyAccount,
+  CliProxyLoginProvider,
+  CliProxyStatus,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -364,8 +369,8 @@ function LauncherShell({
     && snapshot.state.codexCatalogVerified === true
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
-  const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
+  const updateButton = updateButtonState(snapshot.update, copy);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
 
   useEffect(() => {
@@ -603,6 +608,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "cliproxy"} icon="globe" label="CLIProxyAPI" onClick={() => navigateSurface("cliproxy")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
               </SidebarGroup>
             </nav>
@@ -611,10 +617,11 @@ function LauncherShell({
               {updateVisible ? (
                 <SidebarItem
                   active={false}
-                  disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
+                  disabled={updateButton.disabled || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
+                  label={updateButton.label ?? `${copy.updateAvailable} v${updateVersion}`}
                   onClick={() => void installUpdate()}
+                  title={updateButton.title}
                   tone="update"
                 />
               ) : null}
@@ -682,6 +689,7 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
+            {surface === "cliproxy" ? <CliProxySurface copy={copy} setError={setError} /> : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
             ) : null}
@@ -772,6 +780,7 @@ function SidebarItem({
   icon,
   label,
   onClick,
+  title,
   tone,
 }: {
   active: boolean;
@@ -780,6 +789,7 @@ function SidebarItem({
   icon: IconName;
   label: string;
   onClick: () => void;
+  title?: string;
   tone?: "update";
 }) {
   return (
@@ -788,6 +798,7 @@ function SidebarItem({
       className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
       disabled={disabled}
       onClick={onClick}
+      title={title}
       type="button"
     >
       {icon === "mcp" ? <McpMark /> : <Icon name={icon} />}
@@ -1565,6 +1576,179 @@ function ActivitySurface({
   );
 }
 
+const CLIPROXY_PROVIDER_LABELS: Record<CliProxyLoginProvider, string> = {
+  claude: "Claude",
+  codex: "OpenAI Codex",
+  antigravity: "Antigravity",
+  kimi: "Kimi",
+  xai: "xAI",
+  devin: "Devin",
+  meta: "Meta",
+};
+
+/**
+ * Models from a local CLIProxyAPI: connect it, add its management key, and sign accounts in or out.
+ * Every action runs the runtime's `cliproxy` command, the same one agents use; keys go to it on
+ * standard input and the fields are cleared as soon as they are sent.
+ */
+function CliProxySurface({ copy, setError }: { copy: Copy; setError: (error: string | null) => void }) {
+  const [status, setStatus] = useState<CliProxyStatus | null>(null);
+  const [accounts, setAccounts] = useState<CliProxyAccount[] | null>(null);
+  const [managementReady, setManagementReady] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8317");
+  const [apiKey, setApiKey] = useState("");
+  const [managementKey, setManagementKey] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await api!.cliproxy("status");
+      setStatus(next);
+      if (!next.enabled) {
+        setAccounts(null);
+        setManagementReady(false);
+        return;
+      }
+      try {
+        setAccounts((await api!.cliproxy("accounts")).accounts);
+        setManagementReady(true);
+      } catch {
+        setAccounts(null);
+        setManagementReady(false);
+      }
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  }, [setError]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const act = async (name: string, action: () => Promise<unknown>) => {
+    setBusy(name);
+    setError(null);
+    try {
+      await action();
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const connected = status?.enabled === true;
+  return (
+    <ContentSurface subtitle={copy.cliproxySubtitle} title={copy.cliproxyTitle}>
+      <SectionHeading label={copy.cliproxyConnection} meta={connected ? status?.baseUrl ?? undefined : undefined} />
+      {connected ? (
+        <div className="setting-row">
+          <div>
+            <strong>{status?.reachable ? copy.cliproxyReachable : copy.cliproxyUnreachable}</strong>
+            <p>
+              {status?.reachable
+                ? copy.cliproxyModelCount.replace("{count}", String(status?.proxyModels ?? 0))
+                : status?.error ?? copy.cliproxyUnreachableBody}
+            </p>
+          </div>
+          <div className="button-row">
+            <SecondaryButton disabled={busy !== null} icon="reload" onClick={() => void act("refresh", async () => {})}>
+              {copy.cliproxyRefresh}
+            </SecondaryButton>
+            <SecondaryButton disabled={busy !== null} onClick={() => void act("disconnect", () => api!.cliproxy("disconnect"))}>
+              {copy.cliproxyDisconnect}
+            </SecondaryButton>
+          </div>
+        </div>
+      ) : (
+        <div className="cliproxy-form">
+          <p className="surface-note">{copy.cliproxyConnectBody}</p>
+          <FieldRow label={copy.cliproxyBaseUrl}>
+            <input autoCapitalize="none" autoCorrect="off" onChange={(event) => setBaseUrl(event.target.value)} spellCheck={false} value={baseUrl} />
+          </FieldRow>
+          <FieldRow label={copy.cliproxyApiKey}>
+            <input autoCapitalize="none" autoCorrect="off" onChange={(event) => setApiKey(event.target.value)} spellCheck={false} type="password" value={apiKey} />
+          </FieldRow>
+          <PrimaryButton
+            disabled={busy !== null || !apiKey.trim()}
+            onClick={() => void act("connect", async () => {
+              const key = apiKey;
+              setApiKey("");
+              await api!.cliproxy("connect", { baseUrl, apiKey: key });
+            })}
+          >
+            {busy === "connect" ? copy.cliproxyWorking : copy.cliproxyConnect}
+          </PrimaryButton>
+        </div>
+      )}
+
+      {connected ? (
+        <>
+          <SectionHeading label={copy.cliproxyAccounts} spaced />
+          {managementReady ? (
+            <>
+              {accounts && accounts.length > 0 ? (
+                <div className="activity-table">
+                  {accounts.map((account) => (
+                    <div className="activity-row" key={account.ref}>
+                      <StateDot state={account.disabled ? "idle" : account.coolingDown ? "busy" : "ready"} />
+                      <div>
+                        <strong>{account.label || account.name}</strong>
+                        <span>
+                          {account.provider}
+                          {account.disabled ? ` · ${copy.cliproxyDisabled}` : account.coolingDown ? ` · ${copy.cliproxyCoolingDown}` : ""}
+                        </span>
+                      </div>
+                      <button
+                        className="text-button"
+                        disabled={busy !== null}
+                        onClick={() => void act(`remove:${account.ref}`, () => api!.cliproxy("remove", account.ref))}
+                        type="button"
+                      >
+                        {copy.cliproxyRemove}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="surface-note">{copy.cliproxyNoAccounts}</p>
+              )}
+              <p className="surface-note">{busy?.startsWith("login:") ? copy.cliproxySigningIn : copy.cliproxyAddAccountBody}</p>
+              <div className="button-row">
+                {CLIPROXY_LOGIN_PROVIDERS.map((provider) => (
+                  <SecondaryButton
+                    disabled={busy !== null}
+                    key={provider}
+                    onClick={() => void act(`login:${provider}`, () => api!.cliproxy("login", provider))}
+                  >
+                    {CLIPROXY_PROVIDER_LABELS[provider]}
+                  </SecondaryButton>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="cliproxy-form">
+              <p className="surface-note">{copy.cliproxyManagementBody}</p>
+              <FieldRow label={copy.cliproxyManagementKey}>
+                <input autoCapitalize="none" autoCorrect="off" onChange={(event) => setManagementKey(event.target.value)} spellCheck={false} type="password" value={managementKey} />
+              </FieldRow>
+              <PrimaryButton
+                disabled={busy !== null || !managementKey.trim()}
+                onClick={() => void act("management-key", async () => {
+                  const key = managementKey;
+                  setManagementKey("");
+                  await api!.cliproxy("management-key", key);
+                })}
+              >
+                {busy === "management-key" ? copy.cliproxyWorking : copy.cliproxySaveKey}
+              </PrimaryButton>
+            </div>
+          )}
+        </>
+      ) : null}
+    </ContentSurface>
+  );
+}
+
 function SettingsSurface({
   configureInteractionMode,
   copy,
@@ -1586,6 +1770,7 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const [problemReports, setProblemReports] = useState(snapshot.problemReports);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1693,6 +1878,22 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {problemReports !== "unavailable" ? <SettingRow body={copy.problemReportsBody} label={copy.problemReports}>
+          <Switch
+            checked={problemReports === "auto"}
+            onChange={(checked) => void api!.setProblemReports(checked)
+              .then(setProblemReports)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
+        {snapshot.packaged && !devProfile ? <SettingRow body={copy.automaticUpdatesBody} label={copy.automaticUpdates}>
+          <Switch
+            checked={snapshot.state.automaticUpdates}
+            onChange={(checked) => void api!.setPreference("automaticUpdates", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}
@@ -2506,7 +2707,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Codex Web GPT</h1>
+      <h1>Codex Superpower</h1>
       <p>{message}</p>
     </main>
   );

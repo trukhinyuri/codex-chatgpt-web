@@ -1,9 +1,10 @@
 # Contributing
 
-Codex Web GPT was created and is primarily developed and maintained by
-[@miuuyy](https://github.com/miuuyy). Product direction, core architecture, and release decisions
-remain with the creator. Other contributors listed by GitHub have provided focused external fixes
-rather than shared product or architectural ownership.
+Codex Superpower is maintained by Yuri Trukhin ([@trukhinyuri](https://github.com/trukhinyuri)),
+<yuri@trukhin.com>. It is based on Codex Web GPT, created and primarily developed by
+[@miuuyy](https://github.com/miuuyy) with focused fixes from its contributors. Product direction,
+core architecture, and release decisions for this fork remain with its maintainer; fixes meant for
+the original project go upstream as separate pull requests.
 
 External contributions are welcome, but this is an intentionally maintainer-led project. Pull
 requests are expected to be small, focused, and easy to review and verify. Good contributions
@@ -11,7 +12,8 @@ include isolated bug fixes, regression tests, documentation corrections, and nar
 platform-specific fixes.
 
 Before opening a bug report, work through [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and use the
-structured issue form. Reproduce once on the latest release and attach the privacy-safe export from
+structured issue form. Reproduce once on the latest build of `main`, give the version from
+**Codex Superpower → About** (for example `5.0.8 (abc1234)`), and attach the privacy-safe export from
 **Activity → Export safe log**; never upload raw browser state, credentials, or unredacted logs.
 
 Large feature branches, broad refactors, rewrites, new providers, and changes to core behavior or

@@ -48,7 +48,7 @@ function replaceToolsetLibnotify(toolsetRoot, source) {
 
 async function main() {
   if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error("Codex Web GPT AppImage tool preparation requires Linux x64");
+    throw new Error("Codex Superpower AppImage tool preparation requires Linux x64");
   }
   const source = process.env.CODEX_WEB_GPT_LINUX_LIBNOTIFY?.trim();
   if (!source || !path.isAbsolute(source) || !fs.statSync(source, { throwIfNoEntry: false })?.isFile()) {

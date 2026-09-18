@@ -6,12 +6,18 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
-import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import {
+  ChatGptWebAdapterError,
+  chatGptStoppedThinkingError,
+  chatGptTurnAbortError,
+  chatGptTurnRetiredError,
+  isChatGptTurnRetired,
+} from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
-import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, rateLimitStaysRetryableAfterSend } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
@@ -1159,6 +1165,97 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  // Mutation authority must outrank retryability: the browser guards that raise structured
+  // retryable 429/5xx errors (rate-limit dialog, "Something went wrong") run after the send press
+  // as well as before it, so a structured `retryable: true` raised past the mutation boundary must
+  // never authorize another write. Before this fix, `submittedTurnFailure()` returned an existing
+  // ChatGptWebAdapterError before ever checking the submission phase, so this matrix resent an
+  // already-accepted prompt (two browser starts instead of one).
+  for (
+    const submitted of [
+      { phase: "send_activated", accept: false },
+      { phase: "accepted", accept: true },
+    ] as const
+  ) {
+    for (
+      const upstream of [
+        {
+          label: "a rate-limit dialog",
+          error: () => new ChatGptWebAdapterError("ChatGPT rate limit: too many requests. Try again in a few minutes.", {
+            status: 429,
+            errorType: "rate_limit_error",
+            code: "rate_limit_exceeded",
+            retryable: true,
+          }),
+        },
+        {
+          label: "'Something went wrong'",
+          error: () => new ChatGptWebAdapterError("ChatGPT ended the turn with 'Something went wrong'. Retry the turn.", {
+            status: 502,
+            errorType: "server_error",
+            code: "upstream_server_error",
+            retryable: true,
+          }),
+        },
+      ] as const
+    ) {
+      test(`${upstream.label} raised after ${submitted.phase} never resends the Web prompt`, async () => {
+        const provider: CodexProviderConfig = {
+          adapter: "chatgpt-web",
+          baseUrl: `browser://chatgpt-${submitted.phase}-${upstream.error().code}-${Date.now()}`,
+          chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+        };
+        const worker = ChatGptBrowserWorker.forProvider(provider);
+        const originalRun = worker.run.bind(worker);
+        let browserStarts = 0;
+        (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+          browserStarts += 1;
+          turn.onSendActivated?.();
+          if (submitted.accept) turn.onSubmitted?.();
+          throw upstream.error();
+        };
+
+        try {
+          const adapter = createChatGptWebAdapter(provider);
+          const rateLimit = upstream.error().code === "rate_limit_exceeded";
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const events: AdapterEvent[] = [];
+            await adapter.runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
+            const error = events.at(-1) as Extract<AdapterEvent, { type: "error" }> | undefined;
+            // The structured error keeps its own code/message (still diagnosable). Past the send
+            // phase it stops being retryable, except a rate limit before any tool call reached
+            // Codex: resending that repeats no local work, and Codex must wait out the delay.
+            expect(error).toMatchObject({
+              type: "error",
+              code: upstream.error().code,
+              retryable: rateLimit,
+            });
+            if (!rateLimit) expect(error!.message).toBe(upstream.error().message);
+          }
+          // A rate-limited turn starts again on a fresh surface; anything else is never resent.
+          expect(browserStarts).toBe(rateLimit ? 2 : 1);
+        } finally {
+          (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+        }
+      });
+    }
+  }
+
+  test("only a rate limit with no tool call handed to Codex stays retryable after Send", () => {
+    const limit = new ChatGptWebAdapterError("ChatGPT rate limit: too many requests. Please try again in 60s.", {
+      status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true,
+    });
+    const serverError = new ChatGptWebAdapterError("ChatGPT ended the turn with 'Something went wrong'.", {
+      status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true,
+    });
+    expect(rateLimitStaysRetryableAfterSend(limit, false)).toBe(true);
+    expect(rateLimitStaysRetryableAfterSend(limit, true)).toBe(false);
+    expect(rateLimitStaysRetryableAfterSend(serverError, false)).toBe(false);
+    expect(rateLimitStaysRetryableAfterSend(new ChatGptWebAdapterError(limit.message, {
+      status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
+    }), false)).toBe(false);
+  });
+
   test("an unclassified browser failure retires its session before the next native retry", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h4-error-retry-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -1240,9 +1337,13 @@ describe("ChatGPT outer-native harness v4", () => {
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
     let browserStarts = 0;
-    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    // The rate-limit dialog is also raised while opening the model/effort picker, well before the
+    // send press. A pre-write 429 has no upstream prompt to duplicate, so it keeps its own retry
+    // semantics and the budget still bounds how many sends one native turn may attempt. (Once Send
+    // has been activated, `submittedTurnFailure()` forces this same error to `retryable: false`
+    // instead — see the "never resends the Web prompt" cases above.)
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
       browserStarts += 1;
-      turn.onSendActivated?.();
       throw new ChatGptWebAdapterError("ChatGPT rate limit: too many requests. Try again in a few minutes.", {
         status: 429,
         errorType: "rate_limit_error",
@@ -1508,6 +1609,99 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(serialized).toContain("current contract");
     expect(serialized).toContain("current catalog");
     expect(serialized).toContain("current request");
+  });
+
+  test("dedupes exact replayed images while preserving every historical attachment reference", () => {
+    const replayedImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
+    const newerImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56m0fAAAAFElEQVR4nGP4z8DwH4QZGBgY/jMAAFcMCPV4CsNQAAAAAElFTkSuQmCC";
+    const request = parsed();
+    request.context.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "First copy" },
+          { type: "image", imageUrl: replayedImage, detail: "high" },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Consumed first copy" }],
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Replayed copy" },
+          { type: "image", imageUrl: replayedImage, detail: "high" },
+          { type: "image", imageUrl: newerImage, detail: "high" },
+        ],
+        timestamp: 3,
+      },
+    ];
+
+    const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
+    expect(compiled.images.map(image => image.imageUrl)).toEqual([replayedImage, newerImage]);
+
+    const contextJson = compiled.text.match(/<codex_context_json>\n([\s\S]*?)\n<\/codex_context_json>/)?.[1];
+    expect(contextJson).toBeDefined();
+    const envelope = JSON.parse(contextJson!);
+    expect(envelope.messages[0].content.at(-1)).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-1",
+      detail: "high",
+    });
+    expect(envelope.messages[2].content[1]).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-1",
+      detail: "high",
+    });
+    expect(envelope.messages[2].content[2]).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-2",
+      detail: "high",
+    });
+    expect(chatGptPromptFilePayloads(compiled).map(file => file.name)).toEqual([
+      "codex-input-image-1.png",
+      "codex-input-image-2.png",
+    ]);
+  });
+
+  test("duplicate image replays do not consume unique-image attachment budget", () => {
+    const duplicate = "data:image/png;base64,duplicate-image";
+    const request = parsed();
+    request.context.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "old duplicate" },
+          { type: "image", imageUrl: duplicate, detail: "high" },
+        ],
+        timestamp: 1,
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: `unique-${index}` },
+          { type: "image" as const, imageUrl: `data:image/png;base64,unique-${index}`, detail: "high" as const },
+        ],
+        timestamp: index + 2,
+      })),
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "new duplicate" },
+          { type: "image", imageUrl: duplicate, detail: "high" },
+        ],
+        timestamp: 20,
+      },
+    ];
+
+    const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
+    expect(compiled.images).toHaveLength(10);
+    expect(compiled.images.filter(image => image.imageUrl === duplicate)).toHaveLength(1);
+    expect(compiled.images.some(image => image.imageUrl === "data:image/png;base64,unique-0")).toBeFalse();
+    expect(compiled.images.some(image => image.imageUrl === "data:image/png;base64,unique-9")).toBeTrue();
   });
 
   test("keeps a large context inline and uploads only its referenced images", () => {
@@ -3119,6 +3313,23 @@ describe("ChatGPT outer-native harness v4", () => {
       broker.completeTool(token, writeRequest!.callId, toolResult({ output: "continued" }));
       expect((await write).structuredContent).toEqual({ output: "continued" });
 
+      const longWrite = call("codex_write_stdin", {
+        turn_token: token,
+        session_id: 42,
+        yield_time_ms: 300_000,
+      });
+      const [longWriteRequest] = await broker.nextToolBatch(token);
+      expect(longWriteRequest).toEqual(expect.objectContaining({
+        wireName: "write_stdin",
+        freeform: false,
+        arguments: {
+          session_id: 42,
+          yield_time_ms: 60_000,
+        },
+      }));
+      broker.completeTool(token, longWriteRequest!.callId, toolResult({ output: "still running", session_id: 42 }));
+      expect((await longWrite).structuredContent).toMatchObject({ output: "still running", session_id: 42 });
+
       const patch = "*** Begin Patch\n*** Add File: direct-token.txt\n+ok\n*** End Patch";
       const apply = call("codex_apply_patch", { turn_token: token, patch });
       const [applyRequest] = await broker.nextToolBatch(token);
@@ -3294,7 +3505,7 @@ describe("ChatGPT outer-native harness v4", () => {
       abort.abort(new Error("synthetic MCP client cancellation"));
       await expect(abandoned).rejects.toBeDefined();
 
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 30_000;
       let abandonedError: unknown;
       do {
         try {
@@ -3483,10 +3694,12 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(retiredProgress?.activeToolCalls).toBe(0);
       expect(lateAcknowledgementError?.message).toContain("retired the turn binding");
       expect(events.some(event => event.type === "tool_call_start")).toBeFalse();
-      expect(events.at(-1)).toMatchObject({
-        type: "error",
-        code: "chatgpt_submitted_turn_failed",
-      });
+      // The Codex side retired this binding, so the turn must not be reported as ChatGPT going
+      // quiet: that generic message would send the user to the one component that was still working.
+      const failure = events.at(-1) as { type: string; code: string; message: string };
+      expect(failure).toMatchObject({ type: "error", code: "chatgpt_turn_retired" });
+      expect(failure.message).toContain("The Codex request for this turn ended");
+      expect(failure.message).not.toContain("ChatGPT stopped responding");
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       chatGptTurnSessions.clear();
@@ -3921,4 +4134,41 @@ describe("adapter liveness covers every path through a turn", () => {
     expect(heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(heartbeats.at(-1)).toBeGreaterThanOrEqual(CHATGPT_WEB_ADAPTER_HEARTBEAT_MS);
   }, 40_000);
+});
+
+describe("an abort carries its reason instead of always blaming ChatGPT", () => {
+  // Every abort path used to throw a fresh DOMException and drop `signal.reason`, so a turn the
+  // Codex side retired reached `submittedTurnFailure()` identical to one ChatGPT genuinely
+  // abandoned. Carrying the reason as `cause` lets the reporter tell them apart without disturbing
+  // the "ChatGPT web turn aborted" message or the AbortError name the abort contract depends on.
+  test("an abort carries its reason, so a retired turn is not reported as ChatGPT going quiet", () => {
+    const controller = new AbortController();
+    const retirement = chatGptTurnRetiredError("Codex Native retired the turn binding before its tool work completed");
+    controller.abort(retirement);
+
+    const aborted = chatGptTurnAbortError(controller.signal);
+    expect(aborted.name).toBe("AbortError");
+    expect(aborted.message).toBe("ChatGPT web turn aborted");
+    expect((aborted as { cause?: unknown }).cause).toBe(retirement);
+
+    expect(isChatGptTurnRetired(aborted)).toBe(true);
+    expect(isChatGptTurnRetired(new Error("wrapped", { cause: aborted }))).toBe(true);
+    expect(isChatGptTurnRetired(new Error("an ordinary browser failure"))).toBe(false);
+  });
+
+  test("an abort with no reason of its own stays an ordinary abort", () => {
+    const controller = new AbortController();
+    controller.abort();
+    const aborted = chatGptTurnAbortError(controller.signal);
+    expect(aborted.name).toBe("AbortError");
+    expect(isChatGptTurnRetired(aborted)).toBe(false);
+    expect(isChatGptTurnRetired(chatGptTurnAbortError(undefined))).toBe(false);
+  });
+
+  test("a cyclic cause chain cannot trap the retirement check", () => {
+    const first = new Error("first");
+    const second = new Error("second", { cause: first });
+    (first as { cause?: unknown }).cause = second;
+    expect(isChatGptTurnRetired(first)).toBe(false);
+  });
 });

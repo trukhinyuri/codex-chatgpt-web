@@ -157,8 +157,30 @@ export function withoutRetiredTurnHandles(contextJson: string): string {
   // Match decoded string values: in serialized JSON a newline's `n` is a word character
   // immediately before the handle. Leave structural keys and native tool-call IDs intact.
   return JSON.stringify(JSON.parse(contextJson, (_key, value: unknown) => typeof value === "string"
-    ? value.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`)
+    ? scrubRetiredTurnHandleText(value)
     : value));
+}
+
+/**
+ * A replayed tool result can itself be a JSON-encoded blob (for example a previous tool call's own
+ * output) carried as one plain-text value. Left alone, that inner layer is still raw serialized
+ * JSON: a handle right after one of its own escaped newlines reintroduces the same word-character
+ * boundary gap the outer decode above already closed. Decode one layer deeper first so the scrub
+ * always runs against real characters, not the fragile literal `\n` text of an un-decoded escape.
+ */
+function scrubRetiredTurnHandleText(value: string): string {
+  const trimmed = value.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const nested: unknown = JSON.parse(value);
+      if (nested !== null && typeof nested === "object") {
+        return withoutRetiredTurnHandles(JSON.stringify(nested));
+      }
+    } catch {
+      // Not actually JSON-encoded; fall through and scrub it as plain text below.
+    }
+  }
+  return value.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`);
 }
 
 /** ChatGPT accepts at most this many attachments on one message. */
@@ -190,8 +212,31 @@ const DROPPED_IMAGE_NOTE =
  * survive.
  */
 interface ImageBudget {
-  seen: number;
-  dropped: number;
+  allowed: Set<string>;
+  refs: Map<string, string>;
+}
+
+function imageIdentity(part: Extract<CodexContentPart, { type: "image" }>): string {
+  // Detail changes the model-facing interpretation of an image attachment, so only exact
+  // image+detail replays share one physical upload/ref.
+  return `${part.detail ?? ""}\0${part.imageUrl}`;
+}
+
+function newestChatGptContextImageIdentities(
+  messages: readonly CodexMessage[],
+  limit = CHATGPT_MAX_INPUT_IMAGES,
+): Set<string> {
+  const selected = new Set<string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0 && selected.size < limit; messageIndex -= 1) {
+    const message = messages[messageIndex]!;
+    if (message.role === "assistant" || typeof message.content === "string") continue;
+    for (let partIndex = message.content.length - 1; partIndex >= 0 && selected.size < limit; partIndex -= 1) {
+      const part = message.content[partIndex]!;
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl)) continue;
+      selected.add(imageIdentity(part));
+    }
+  }
+  return selected;
 }
 
 function inputContent(
@@ -208,10 +253,14 @@ function inputContent(
   }
   return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
-    budget.seen += 1;
-    if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
-    const ref = `codex-input-image-${images.length + 1}`;
-    images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
+    const identity = imageIdentity(part);
+    if (!budget.allowed.has(identity)) return { type: "text", text: DROPPED_IMAGE_NOTE };
+    let ref = budget.refs.get(identity);
+    if (!ref) {
+      ref = `codex-input-image-${images.length + 1}`;
+      budget.refs.set(identity, ref);
+      images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
+    }
     return { type: "image_attachment", attachment_ref: ref, ...(part.detail ? { detail: part.detail } : {}) };
   });
 }
@@ -225,6 +274,35 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
     }
   }
   return total;
+}
+
+/**
+ * The images a non-compaction turn will actually attach, in the same order `messageEnvelope`
+ * assigns them `codex-input-image-N` refs: one-pixel PNG placeholders never attach, and — mirroring
+ * the `ImageBudget` overflow rule in `build()` below — only the newest `CHATGPT_MAX_INPUT_IMAGES`
+ * real images across the whole (model-switch-deduplicated) context survive; older overflow becomes
+ * a text note instead of an attachment. Lets the HTTP boundary validate real attachments up front
+ * without running the full compiler, so an image the compiler will correctly drop is never
+ * rejected. Compaction requests further trim history by a JSON byte budget that this does not
+ * replicate, so callers should only rely on this for ordinary (non-compaction) turns.
+ */
+export function chatGptWebAttachedInputImages(
+  messages: readonly CodexMessage[],
+): Array<{ imageUrl: string; role: CodexMessage["role"] }> {
+  const sourceMessages = withoutSupersededModelSwitchContracts(messages);
+  const dropped = Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES);
+  const attached: Array<{ imageUrl: string; role: CodexMessage["role"] }> = [];
+  let seen = 0;
+  for (const message of sourceMessages) {
+    if (message.role === "assistant" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl)) continue;
+      seen += 1;
+      if (seen <= dropped) continue;
+      attached.push({ imageUrl: part.imageUrl, role: message.role });
+    }
+  }
+  return attached;
 }
 
 function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
@@ -418,7 +496,7 @@ export function chatGptReadOnlyContextWarning(
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   const browserOnlyGuidance = !capabilities.localToolsEnabled
-    ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
+    ? "\n>\n> **Action:** Open `MCP` in `Codex Superpower` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
     : "";
   if (hasLocalEvidence) {
     return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
@@ -511,6 +589,8 @@ export function compileChatGptWebPrompt(
       "Use actual Codex Native results as evidence for local observations and effects.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
+      "If ChatGPT stops a Codex Native call before it runs, that call never reached Codex: nothing ran and there is no result. Say that ChatGPT stopped it before execution and name the operation. Do not attribute it to Codex approvals, auto-review, the sandbox, or the target service, and do not conclude that a service, account, or connector is unavailable without an actual result from it.",
+      "Do not repeat an identical call that ChatGPT stopped. If the operation is still required, state it as one clear, single-purpose call; if ChatGPT stops it again, tell the user which operation did not run.",
       "Continue using the available tools until the requested work is complete and verified.",
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
     ]
@@ -592,8 +672,8 @@ export function compileChatGptWebPrompt(
   const build = (sourceMessages: readonly CodexMessage[], omittedMessages = 0): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
     const budget: ImageBudget = {
-      seen: 0,
-      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES),
+      allowed: newestChatGptContextImageIdentities(sourceMessages),
+      refs: new Map(),
     };
     const skillFiles: ChatGptSkillFile[] = [];
     const messages = sourceMessages.map(message => {
@@ -642,7 +722,8 @@ export function compileChatGptWebPrompt(
       const transactionId = `ctx_${"0".repeat(32)}`;
       const budgets = multipart.parts.map((payload, index) => {
         const final = index === multipart.parts.length - 1;
-        const effort = final ? mode.effort : capabilities.proAvailable ? "max" : "medium";
+        // Stages run in the selected mode too, so they get the same per-message limits.
+        const effort = mode.effort;
         const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
         const tokenLimit = resolveChatGptWebMessageTokenBudget(
           CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? imageTokens + skillFileTokens(skillFiles, parsed.modelId) : 0,

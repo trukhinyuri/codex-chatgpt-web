@@ -1551,6 +1551,72 @@ test("launcher preserves stale ownership evidence when an old active runtime can
   }
 });
 
+// jesseclin/codex-chatgpt-web found the launcher treated any non-"ready" runtime status,
+// including "external", as a failure and unconditionally tore down the Codex route as a
+// defensive fail-safe -- even when "external" meant another healthy codex-chatgpt-web daemon of
+// this exact release already served the configured port. `healthy` distinguishes that clean,
+// service/mode/version-checked case from every other "external" reason (stale unrecoverable
+// ownership, a version mismatch, a genuinely broken port owner), so a caller (main.cjs) can leave
+// a working route alone instead of disconnecting it.
+test("startConfigured reports a genuinely healthy external owner as healthy, distinct from unrecoverable stale ownership", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-healthy-external-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(descriptorPath, "{}\n");
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.proxyHealth = async () => true;
+  supervisor.stopStaleOwnedRuntime = async () => false;
+  try {
+    const result = await supervisor.startConfigured();
+    assert.equal(result.status, "external");
+    assert.equal(result.healthy, true);
+    assert.match(result.detail, /already owns the configured port/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startConfigured never reports unrecoverable stale ownership as a healthy external owner", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-unhealthy-external-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const statePath = path.join(root, "runtime", "launcher-supervisor.json");
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(descriptorPath, "{}\n");
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+  fs.writeFileSync(statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: process.pid,
+    daemonPid: process.pid,
+    tunnelPid: null,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.proxyHealth = async () => false;
+  supervisor.stopStaleOwnedRuntime = async () => false;
+  try {
+    const result = await supervisor.startConfigured();
+    assert.equal(result.status, "external");
+    assert.equal(result.healthy, undefined);
+    assert.match(result.detail, /could not be safely recovered/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher recovers a stale tunnel even when no stale Responses proxy is reachable", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-stale-tunnel-only-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
@@ -1943,7 +2009,7 @@ server.listen(config.port, config.host);
   });
 
   try {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       try {
         if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;

@@ -3,7 +3,7 @@ import languages from "../electron/languages.json";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "cliproxy" | "activity" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -13,6 +13,7 @@ export interface LauncherState {
   xOpened: boolean;
   autoStart: boolean;
   keepRunningOnClose: boolean;
+  automaticUpdates: boolean;
   showBrowserDuringTurns: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
@@ -75,12 +76,15 @@ export interface DoctorCheck {
   status: "ok" | "warning" | "error";
   message: string;
   detail?: string;
+  unprovenLocally?: boolean;
 }
 
 export interface DoctorReport {
   ok: boolean;
   mode?: "browser-only" | "full";
   checks: DoctorCheck[];
+  /** Runtime-produced reports include locally unproven checks; launcher-synthesized reports may not. */
+  unproven?: string[];
 }
 
 export interface OperationState {
@@ -91,7 +95,22 @@ export interface OperationState {
 
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
-  | { status: "available" | "downloading" | "installing"; version: string }
+  | {
+    status: "available" | "downloading" | "installing";
+    version: string;
+    /** This update may install by itself (fast-forward of main, CI passed, never failed here). */
+    automatic?: boolean;
+    blocked?: string;
+    /** Built, tested and staged; waiting until Codex has no active turns. */
+    waitingForIdle?: boolean;
+    /** Build progress while status is "downloading". */
+    step?: number;
+    steps?: number;
+    /** The user asked to install this update: it installs 30 s after Codex's tasks finish. */
+    requested?: boolean;
+    /** Codex tasks the staged update is waiting for. */
+    activeTurns?: number;
+  }
   | { status: "error"; message: string };
 
 export interface LauncherSnapshot {
@@ -120,7 +139,37 @@ export interface LauncherSnapshot {
   smokePassed: boolean;
   operation: OperationState | null;
   update: UpdateState;
+  /** Consent for GitHub problem reports; "unavailable" outside installed builds of this fork. */
+  problemReports: ProblemReportConsent;
 }
+
+export type ProblemReportConsent = "unknown" | "auto" | "never" | "unavailable";
+
+export interface CliProxyStatus {
+  configured: boolean;
+  enabled: boolean;
+  baseUrl: string | null;
+  reachable?: boolean;
+  proxyModels?: number | null;
+  error?: string;
+  modelsInLastCodexCatalog: number | null;
+}
+
+export interface CliProxyAccount {
+  /** Short reference used to remove the account; the file name may contain the e-mail. */
+  ref: string;
+  /** Masked like the label. */
+  name: string;
+  provider: string;
+  /** E-mail addresses arrive masked. */
+  label: string;
+  disabled: boolean;
+  status: string;
+  coolingDown: boolean;
+}
+
+export const CLIPROXY_LOGIN_PROVIDERS = ["claude", "codex", "antigravity", "kimi", "xai", "devin", "meta"] as const;
+export type CliProxyLoginProvider = (typeof CLIPROXY_LOGIN_PROVIDERS)[number];
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
@@ -166,13 +215,21 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "automaticUpdates",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
+  setProblemReports(enabled: boolean): Promise<ProblemReportConsent>;
+  cliproxy(action: "status"): Promise<CliProxyStatus>;
+  cliproxy(action: "connect", payload: { baseUrl: string; apiKey: string }): Promise<{ connected: true; proxyModels: number }>;
+  cliproxy(action: "disconnect"): Promise<{ connected: false }>;
+  cliproxy(action: "management-key", payload: string): Promise<{ management: true; accounts: number }>;
+  cliproxy(action: "accounts"): Promise<{ accounts: CliProxyAccount[] }>;
+  cliproxy(action: "login", payload: CliProxyLoginProvider): Promise<{ signedIn: true }>;
+  cliproxy(action: "remove", payload: string): Promise<{ removed: string }>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;

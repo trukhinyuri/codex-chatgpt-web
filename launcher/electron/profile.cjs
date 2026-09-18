@@ -26,12 +26,17 @@ function resolveLauncherProfile({
     const coreHome = env.CODEX_CHATGPT_WEB_HOME?.trim()
       ? resolveUserPath(env.CODEX_CHATGPT_WEB_HOME.trim(), homeDir)
       : path.join(homeDir, ".codex-chatgpt-web");
+    // The visible name changed to Codex Superpower; the folders, the browser partition and the core
+    // home keep the Codex Web GPT identities so the ChatGPT sign-in, update state and rollback copies
+    // survive the rename (an installed updater also reads its health file from this folder).
     const userData = env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim()
       ? resolveUserPath(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR.trim(), homeDir)
       : path.join(appData, "Codex Web GPT");
     return {
       kind: PRODUCTION_PROFILE,
-      displayName: "Codex Web GPT",
+      displayName: "Codex Superpower",
+      // The app name in the embedded browser's User-Agent (user-agent.cjs): the one it always sent.
+      userAgentName: "Codex Web GPT",
       coreHome,
       codexHome: env.CODEX_HOME?.trim()
         ? resolveUserPath(env.CODEX_HOME.trim(), homeDir)
@@ -52,7 +57,8 @@ function resolveLauncherProfile({
   }
   return {
     kind: DEVELOPMENT_PROFILE,
-    displayName: "Codex Web GPT DEV",
+    displayName: "Codex Superpower DEV",
+    userAgentName: "Codex Web GPT DEV",
     coreHome,
     codexHome: path.join(coreHome, "codex-home"),
     userData: path.join(coreHome, "launcher"),

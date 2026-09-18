@@ -30,6 +30,7 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
+import { CLIPROXY_HELP, cliproxyCommand } from "./cliproxy-command";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -42,6 +43,7 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
+${CLIPROXY_HELP}
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
@@ -229,7 +231,7 @@ async function loginCommand(args: string[]): Promise<void> {
     assertNoArgs(args);
     const config = loadConfig();
     if (config.browserHost === "launcher") {
-      throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
+      throw new Error("ChatGPT login is owned by the launcher; open Codex Superpower and use its Sign in step");
     }
     const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
@@ -524,7 +526,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
   if (config?.browserHost === "launcher" && !launcherControl) {
     throw new Error(
-      "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
+      "Launcher-owned integration must be removed from Codex Superpower Settings so the active runtime can be drained safely.",
     );
   }
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
@@ -564,6 +566,7 @@ async function main(): Promise<void> {
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
   else if (command === "subagents") await subagentsCommand(args);
+  else if (command === "cliproxy") await cliproxyCommand(args);
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);
@@ -584,7 +587,8 @@ async function main(): Promise<void> {
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
-    const server = startServer(config);
+    // Models from a local CLIProxyAPI join when <home>/cliproxy.json enables them.
+    const server = startServer(config, { cliProxy: { home: getConfigDir() } });
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
