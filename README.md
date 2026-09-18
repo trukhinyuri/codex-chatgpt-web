@@ -84,6 +84,17 @@ sequenceDiagram
 4. In Full harness mode, ChatGPT calls Codex tools through the **Codex Native2** connector. The call reaches your Mac through an outbound tunnel, so no port is opened.
 5. The bridge turns the call into a native Codex tool call. Codex runs it with its own sandbox and approvals and sends the result back into the same ChatGPT response.
 
+Every model Codex lists goes through the same local bridge, and the bridge sends each turn to the service that owns the model. Codex keeps its built-in OpenAI provider and your sign-in, so none of its features change:
+
+```mermaid
+flowchart LR
+    C[Codex app or CLI] --> B[Local bridge<br/>127.0.0.1:17841]
+    B -- "chatgpt-web/…" --> W[ChatGPT web<br/>in the launcher's browser]
+    B -- "OpenAI models" --> O[OpenAI<br/>with your Codex sign-in]
+    B -- "models of a local CLIProxyAPI" --> P[CLIProxyAPI<br/>127.0.0.1:8317]
+    P --> X[Claude, Gemini, GLM and others]
+```
+
 Browser-only mode stops after step 3 and has no local tools. Zero Risk mode lets you paste and send each prompt yourself. Details: [architecture](docs/architecture.md) and [security model](docs/security-model.md).
 
 ## Models from CLIProxyAPI
