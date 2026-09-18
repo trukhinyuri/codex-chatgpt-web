@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FLAKY_GO_TESTS, atLeast, goTestFailures, parseGoVersion, requiredGoVersion } from "../scripts/verify-cliproxyapi";
+import { FLAKY_GO_TESTS, atLeast, goTestFailures, looksLikeBuildFailure, parseGoVersion, requiredGoVersion } from "../scripts/verify-cliproxyapi";
 
 const component = join(import.meta.dir, "..", "cliproxyapi");
 
@@ -42,6 +42,23 @@ describe("CLIProxyAPI verification", () => {
     const failures = goTestFailures(lines);
     expect([...failures.tests.get("p/a")!]).toEqual(["TestOne", "TestTwo"]);
     expect([...failures.packages]).toEqual(["p/c"]);
+  });
+
+  test("a silent package failure looks like a timing fluke; a compiler diagnostic never does", () => {
+    // The real Windows incident this distinguishes from a build error: internal/runtime/executor
+    // failed three times in CI with only this bare summary line, no compiler diagnostic, no goroutine
+    // dump (https://github.com/trukhinyuri/codex-superpower/actions/runs/35394177013/job/105759101078).
+    const silentTimeout = 'FAIL\tgithub.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor\t600.124s\n';
+    expect(looksLikeBuildFailure(silentTimeout)).toBe(false);
+
+    const compileError = '# github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor\n./codex_executor.go:42:2: undefined: notARealSymbol\nFAIL\tgithub.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor [build failed]\n';
+    expect(looksLikeBuildFailure(compileError)).toBe(true);
+
+    const importCycle = 'import cycle not allowed\npackage github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor\n';
+    expect(looksLikeBuildFailure(importCycle)).toBe(true);
+
+    const missingPackage = 'cannot find package "github.com/does/not/exist" in any module\n';
+    expect(looksLikeBuildFailure(missingPackage)).toBe(true);
   });
 
   test("the component keeps the upstream module path so subtree syncs apply cleanly", () => {
