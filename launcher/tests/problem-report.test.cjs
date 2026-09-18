@@ -205,6 +205,14 @@ test("the updater reports build failures where they happen and worker outcomes o
 test("the launcher asks before reporting, shows the exact report, and reports runtime start failures", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
   assert.match(main, /detail: `\$\{copy\.reportDetail\}\\n\\n\$\{report\.body\}`/);
+  // The public issue carries the reporter's GitHub account; every language says so and none
+  // claims that no account data is sent.
+  for (const language of ["en", "zh-CN", "zh-TW", "ja", "ko"]) {
+    const detail = main.match(new RegExp(`"${language}": Object\\.freeze\\(\\{[\\s\\S]*?reportDetail: "([^"]+)"`))?.[1] ?? "";
+    assert.ok(detail, `${language} reportDetail`);
+    assert.doesNotMatch(detail, /account data|账户数据|帳號資料|アカウントデータ|계정 데이터/, language);
+    assert.match(detail, /GitHub (account|账户|帳號|アカウント|계정)/, language);
+  }
   assert.match(main, /buttons: \[copy\.reportAlways, copy\.reportOnce, copy\.reportNotNow, copy\.reportNever\]/);
   assert.match(main, /reportProblem\(\{ kind: "runtime-start-failed", code: `runtime-\$\{runtime\.status\}`, stage: "startup" \}\)/);
   assert.match(main, /app\.isPackaged && !IS_DEV_PROFILE && SOURCE_COMMIT\.test/);
