@@ -5,7 +5,6 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } f
 import { tmpdir } from "node:os";
 import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-  CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
@@ -83,11 +82,8 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   extraHighAvailable?: boolean;
-  proAvailable: boolean;
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
-  /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
-  zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   autoApproveToolCalls: boolean;
@@ -218,10 +214,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     headed: true,
     solAvailable: true,
     extraHighAvailable: false,
-    proAvailable: false,
     experimentalBiggerContext: false,
     experimentalSkillAttachments: false,
-    zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
@@ -492,9 +486,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.extraHighAvailable !== undefined && typeof parsed.extraHighAvailable !== "boolean") {
     throw new Error(`Invalid extraHighAvailable in ${path}`);
   }
-  if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
-    throw new Error(`Invalid proAvailable in ${path}`);
-  }
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
@@ -502,15 +493,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && typeof parsed.experimentalBiggerContext !== "boolean") {
     throw new Error(`Invalid experimentalBiggerContext in ${path}`);
   }
-  if (parsed.zeroRiskProEnabled !== undefined && typeof parsed.zeroRiskProEnabled !== "boolean") {
-    throw new Error(`Invalid zeroRiskProEnabled in ${path}`);
-  }
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
   }
   const solAvailable = parsed.solAvailable !== false;
-  const proAvailable = parsed.proAvailable === true;
+  // ChatGPT Web — Pro is retired (docs/incidents/2026-09-18-account-lock.md). A configuration
+  // written by an older build still carries these keys; they are dropped, never honoured, and a
+  // file that holds them stays loadable so nobody has to edit a file by hand (R1.2).
+  delete (parsed as Record<string, unknown>).proAvailable;
+  delete (parsed as Record<string, unknown>).zeroRiskProEnabled;
   if (parsed.experimentalSkillAttachments !== undefined && typeof parsed.experimentalSkillAttachments !== "boolean") {
     throw new Error(`Invalid experimentalSkillAttachments in ${path}`);
   }
@@ -519,15 +511,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
-  const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
   }
   if (parsed.extraHighAvailable === true && !solAvailable) {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Extra High requires Sol`);
-  }
-  if (proAvailable && !solAvailable) {
-    throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
   }
   return {
     ...parsed,
@@ -537,10 +525,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
     browserInteractionMode,
     subagentProtocol,
     solAvailable,
-    proAvailable,
     experimentalBiggerContext,
     experimentalSkillAttachments,
-    zeroRiskProEnabled,
   } as AppConfig;
 }
 
@@ -555,16 +541,11 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
   const model = manual
     ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
     : config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
-  const models = manual
-    ? [
-      CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-      ...(config.zeroRiskProEnabled ? [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL] : []),
-    ]
-    : [model];
+  const models = manual ? [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL] : [model];
   const efforts = manual
     ? ["low"]
     : config.solAvailable
-    ? ["low", "medium", "high", ...(config.extraHighAvailable === true ? ["xhigh"] : []), ...(config.proAvailable ? ["max"] : [])]
+    ? ["low", "medium", "high", ...(config.extraHighAvailable === true ? ["xhigh"] : [])]
     : ["low", "medium"];
   return {
     adapter: "chatgpt-web",
@@ -593,7 +574,6 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       extraHighAvailable: !manual && config.extraHighAvailable === true,
-      proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),

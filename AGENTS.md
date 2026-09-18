@@ -75,7 +75,7 @@ Run every check and report each as passed or failed.
    ```
 
    Expect `READY`.
-4. **Mode (Computer Use).** While a test turn runs, screenshot the launcher's **Browser** view. The mode control next to the ChatGPT composer must show the mode of the chosen model, for example **High** or **Pro**. With Bigger Context, every message of a large turn uses that mode.
+4. **Mode (Computer Use).** While a test turn runs, screenshot the launcher's **Browser** view. The mode control next to the ChatGPT composer must show the mode of the chosen model, for example **High** or **Extra High** (Pro is retired; see [docs/incidents/2026-09-18-account-lock.md](docs/incidents/2026-09-18-account-lock.md)). With Bigger Context, every message of a large turn uses that mode.
 5. **Tools.** In a Codex task that uses a ChatGPT Web model, ask it to run `pwd`. Expect the task folder, printed from a real Codex tool call.
 6. **CLIProxyAPI (if connected).** `codex-chatgpt-web cliproxy status` reports `"reachable": true`; `codex exec --skip-git-repo-check -m <proxy model> "Reply with exactly: READY"` answers `READY`.
 

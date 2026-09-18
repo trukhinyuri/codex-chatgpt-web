@@ -67,7 +67,7 @@ test("a turn held by a ChatGPT cooldown keeps Codex alive with heartbeats, shows
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://chatgpt-admission-heartbeat-${Date.now()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as WorkerInternals;
   const clock = new FakeGateClock(Date.now());
@@ -119,7 +119,7 @@ test("a ChatGPT rate limit before Send is waited out inside the bridge: Codex se
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://chatgpt-admission-requeue-${Date.now()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as WorkerInternals;
   const clock = new FakeGateClock(Date.now());
@@ -170,7 +170,7 @@ test("a tool-capable turn relays the gate's status line to Codex before its capa
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://chatgpt-admission-relay-${Date.now()}`,
-    chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as WorkerInternals;
   const originalRun = worker.run;

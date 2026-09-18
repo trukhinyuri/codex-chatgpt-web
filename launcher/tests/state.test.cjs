@@ -28,7 +28,6 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
-      zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -56,7 +55,6 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
-      zeroRiskProEnabled: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
@@ -134,7 +132,6 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
-      zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -155,16 +152,13 @@ test("browser interaction defaults to Automatic and preserves a completed onboar
     assert.equal(store.read().browserInteractionMode, "automatic");
     store.update({ browserInteractionMode: "manual", onboardingComplete: true });
     assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
-    assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
-    store.update({ coreSetupComplete: true, zeroRiskProEnabled: true });
-    assert.equal(createStateStore(file).read().zeroRiskProEnabled, true);
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
       browserInteractionMode: "manual",
-      zeroRiskProEnabled: true,
     }));
     assert.equal(createStateStore(file).read().browserInteractionMode, "automatic");
-    assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
+    // A state file written by an older build still names the retired toggle; it is dropped.
+    assert.equal(createStateStore(file).read().zeroRiskProEnabled, undefined);
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
       onboardingComplete: true,

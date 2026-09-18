@@ -120,7 +120,7 @@ test("one browser conversation spans native turns and rotates only at compaction
   expect(chatGptConversationKey(nextTurn, "provider")).toBe(chatGptConversationKey(before, "provider"));
   expect(chatGptConversationKey(afterCompact, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
   const otherModel = structuredClone(before);
-  otherModel.modelId = "chatgpt-web/pro";
+  otherModel.modelId = "chatgpt-web/extra-high";
   expect(chatGptConversationKey(otherModel, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
   const otherEffort = structuredClone(before);
   otherEffort.options.reasoning = "medium";
@@ -339,7 +339,7 @@ test("a completed retained agent returns an exact checkpoint and its browser is 
     request(true),
     source,
     broker,
-    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
     "trace_handoff",
     undefined,
     60 * 60_000,
@@ -383,7 +383,7 @@ test("completed retained compaction never treats ordinary assistant text as a ha
     request(true),
     source,
     broker,
-    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
     "trace_no_text_fallback",
   )).rejects.toThrow("structured handoff missing");
 });
@@ -418,7 +418,7 @@ test("retained compaction deadline bounds browser settlement after the control h
     request(true),
     source,
     broker,
-    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
     "trace_deadline",
     undefined,
     25,
@@ -1026,8 +1026,7 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
       appName: "Codex Native DEV",
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1130,8 +1129,7 @@ test("a retained compaction re-arms its deadline after the source settles, so a 
       appName: "Codex Native DEV",
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1223,8 +1221,7 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
       appName: "Codex Native DEV",
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1320,8 +1317,7 @@ test.each([false, true])("structured compact rebuilds canonical context when its
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
@@ -1377,8 +1373,7 @@ test("fresh multipart compaction gives each acknowledged phase its own handoff b
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      turnTimeoutMs: 40,
+      extraHighAvailable: true, turnTimeoutMs: 40,
     },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1426,8 +1421,7 @@ test("cancel-all waits for physical settlement of a fresh compaction fallback", 
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
@@ -1479,8 +1473,7 @@ test("a timed-out fresh compaction retains its owner until helper cleanup comple
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      turnTimeoutMs: 40,
+      extraHighAvailable: true, turnTimeoutMs: 40,
     },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1552,8 +1545,7 @@ test("structured compact rebuilds canonical context when its retained browser di
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);
@@ -1611,8 +1603,7 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      turnTimeoutMs: 25,
+      extraHighAvailable: true, turnTimeoutMs: 25,
     },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1678,8 +1669,7 @@ test("a rate-limited compaction handoff keeps the rate-limit code and retry dela
       brokerSocketPath: defaultBrokerEndpoint(root),
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-    },
+      extraHighAvailable: true, },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);

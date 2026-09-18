@@ -20,7 +20,7 @@ if (bundled.status !== 0) {
 }
 
 const config = defaultConfig("browser-only");
-config.proAvailable = true;
+config.extraHighAvailable = true;
 const catalog = augmentNativeModelCatalog(JSON.parse(bundled.stdout), config);
 const root = join(tmpdir(), `codex-chatgpt-web-cancel-${process.pid}-${Date.now()}`);
 const codexHome = join(root, "codex");

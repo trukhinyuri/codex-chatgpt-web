@@ -1,10 +1,10 @@
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
+
 export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
-/** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
-export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pro";
 
 export type ChatGptWebAutomaticBackendModel =
   | typeof CHATGPT_WEB_BACKEND_MODEL
@@ -12,12 +12,44 @@ export type ChatGptWebAutomaticBackendModel =
 export type ChatGptWebBackendModel =
   | ChatGptWebAutomaticBackendModel
   | ChatGptWebZeroRiskBackendModel;
-export type ChatGptWebZeroRiskBackendModel =
-  | typeof CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
-  | typeof CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL;
+export type ChatGptWebZeroRiskBackendModel = typeof CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL;
 
-export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
-export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
+/**
+ * The ChatGPT Pro mode is retired. On 18 September 2026 a day of Pro-sized turns through the bridge
+ * ended with ChatGPT holding the owner's account for suspicious activity: Pro carried the largest
+ * single messages and the longest generations, which is the traffic an account check reacts to
+ * first. The highest mode the product offers is Extra High, and Codex's `ultra` protocol effort is
+ * no longer produced or accepted. See docs/incidents/2026-09-18-account-lock.md.
+ */
+export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh";
+export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh";
+
+/** Model rows this product used to publish and never publishes again. */
+export const CHATGPT_WEB_RETIRED_MODEL_SLUGS: readonly string[] = [
+  "chatgpt-web/pro",
+  "chatgpt-web/zero-risk-pro",
+];
+
+/**
+ * One terminal error with exactly one action, for a Codex thread still pinned to a retired Pro row
+ * (R2.3). It is `invalid_prompt` because Codex retries everything else it does not know.
+ */
+export function chatGptWebRetiredProModelError(modelId: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `${modelId} is no longer available: ChatGPT Web — Pro was removed because Pro-sized traffic is what gets an account held for suspicious activity. `
+    + "Select ChatGPT Web — Extra High for this thread.",
+    {
+      status: 400,
+      errorType: "chatgpt_model_retired",
+      code: "invalid_prompt",
+      retryable: false,
+    },
+  );
+}
+
+export function isChatGptWebRetiredProModel(modelId: string): boolean {
+  return CHATGPT_WEB_RETIRED_MODEL_SLUGS.includes(modelId);
+}
 
 /**
  * Measured Plus browser transport windows, including the fixed hidden ChatGPT platform reserve.
@@ -43,28 +75,6 @@ export const CHATGPT_WEB_PLATFORM_RESERVE_TOKENS = 8_192;
 export function chatGptWebImageTokenReserve(detail?: string): number {
   return detail === "original" ? 8_192 : 4_096;
 }
-/** Pro-account usable browser windows and separately measured one-message boundaries. */
-export const CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT = 95_000;
-export const CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT = 103_000;
-export const CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT = 104_000;
-// Browser message maxima are inclusive, while the context preflight treats its ceiling as an
-// exclusive upper bound. The extra token preserves the last accepted payload exactly.
-export const CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW =
-  CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
-export const CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW =
-  CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
-/**
- * Zero Risk Pro keeps the same three-turn manual conversation budget as the default profile, but
- * sizes each turn from the measured ChatGPT Pro boundary. The launcher cannot verify that the user
- * actually selected Pro, so this profile is exposed only through an explicit user setting.
- */
-export const CHATGPT_WEB_ZERO_RISK_PRO_CONTEXT_WINDOW =
-  CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW * 3;
-export const CHATGPT_WEB_ZERO_RISK_PRO_AUTO_COMPACT_TOKEN_LIMIT =
-  CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT * 3;
-export const CHATGPT_WEB_PRO_INSTANT_COMPOSER_CHAR_LIMIT = 545_000;
-export const CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT = 1_045_000;
-export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
 /**
  * The underlying Luna model owns this context window. ChatGPT Free's much smaller browser request
  * envelope is enforced separately at the browser boundary; rolling checkpoints keep completed
@@ -87,8 +97,7 @@ export interface ChatGptWebTransportLimits {
 export function isChatGptWebZeroRiskBackendModel(
   model: string,
 ): model is ChatGptWebZeroRiskBackendModel {
-  return model === CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
-    || model === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL;
+  return model === CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL;
 }
 
 function contextLimits(
@@ -114,12 +123,6 @@ export function resolveChatGptWebContextLimits(
     if (capabilities.experimentalBiggerContext) {
       throw new Error("Zero Risk does not support Bigger Context");
     }
-    if (backendModel === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL) {
-      return contextLimits(
-        CHATGPT_WEB_ZERO_RISK_PRO_CONTEXT_WINDOW,
-        CHATGPT_WEB_ZERO_RISK_PRO_AUTO_COMPACT_TOKEN_LIMIT,
-      );
-    }
     return contextLimits(
       CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
       CHATGPT_WEB_ZERO_RISK_AUTO_COMPACT_TOKEN_LIMIT,
@@ -133,14 +136,7 @@ export function resolveChatGptWebContextLimits(
   }
 
   let limits: ChatGptWebContextLimits;
-  if (capabilities.proAvailable) {
-    const contextWindow = effort === "low"
-      ? CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW
-      : effort === "max"
-        ? CHATGPT_WEB_PRO_MODEL_CONTEXT_WINDOW
-        : CHATGPT_WEB_PRO_STANDARD_CONTEXT_WINDOW;
-    limits = contextLimits(contextWindow, CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT);
-  } else if (effort === "low") {
+  if (effort === "low") {
     limits = contextLimits(
       CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
       CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT,
@@ -168,31 +164,13 @@ export function resolveChatGptWebTransportLimits(
 ): ChatGptWebTransportLimits {
   if (isChatGptWebZeroRiskBackendModel(backendModel)) return {};
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
-  if (!capabilities.proAvailable) {
-    if (effort === "low") {
-      return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
-    }
-    if (effort === "medium" || effort === "high" || (effort === "xhigh" && capabilities.extraHighAvailable)) {
-      return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
-    }
-    throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
-  }
   if (effort === "low") {
-    return {
-      browserMessageTokenLimit: CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT,
-      browserComposerCharLimit: CHATGPT_WEB_PRO_INSTANT_COMPOSER_CHAR_LIMIT,
-    };
+    return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
   }
-  if (effort === "max") {
-    return {
-      browserMessageTokenLimit: CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT,
-      browserComposerCharLimit: CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT,
-    };
+  if (effort === "medium" || effort === "high" || (effort === "xhigh" && capabilities.extraHighAvailable)) {
+    return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
   }
-  return {
-    browserMessageTokenLimit: CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT,
-    browserComposerCharLimit: CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT,
-  };
+  throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
 }
 
 /**
@@ -221,7 +199,6 @@ interface ChatGptWebModelRouteBase {
   displayName: string;
   description: string;
   codexEffort: ChatGptWebCodexEffort;
-  requiresPro: boolean;
   requiresExtraHigh?: boolean;
 }
 
@@ -244,10 +221,8 @@ export interface ChatGptWebAccountCapabilities {
   solAvailable: boolean;
   /** Missing in older saved observations; setup must probe before exposing Extra High. */
   extraHighAvailable?: boolean;
-  proAvailable: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
-  zeroRiskProEnabled?: boolean;
 }
 
 export const CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
@@ -258,18 +233,6 @@ export const CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
   backendModel: CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   codexEffort: "low",
   adapterEffort: "low",
-  requiresPro: false,
-};
-
-export const CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
-  slug: "chatgpt-web/zero-risk-pro",
-  displayName: "ChatGPT Web — Zero Risk Pro",
-  description: "Explicit Pro-sized Zero Risk context; select ChatGPT Pro manually for every turn.",
-  interactionMode: "manual",
-  backendModel: CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
-  codexEffort: "low",
-  adapterEffort: "low",
-  requiresPro: true,
 };
 
 export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
@@ -280,7 +243,6 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
   codexEffort: "low",
   adapterEffort: "low",
-  requiresPro: false,
 };
 
 export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
@@ -293,7 +255,6 @@ export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
   // The backend model remains Luna. This internal adapter effort distinguishes the explicit
   // Think route after Codex has selected its separate catalog row.
   adapterEffort: "medium",
-  requiresPro: false,
 };
 
 export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
@@ -304,8 +265,7 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
 /**
  * The selected Codex model is the authoritative ChatGPT browser mode. Codex's signed desktop UI
  * always renders an Effort row, so every routed model advertises exactly one immutable protocol
- * effort. Pro uses Codex's `ultra` protocol value but binds explicitly to ChatGPT Pro (`max`) at
- * the adapter boundary.
+ * effort. Extra High is the top of the list; Pro is retired (see the incident referenced above).
  */
 export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
   {
@@ -316,7 +276,6 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "low",
     adapterEffort: "low",
-    requiresPro: false,
   },
   {
     slug: "chatgpt-web/medium",
@@ -326,7 +285,6 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "medium",
     adapterEffort: "medium",
-    requiresPro: false,
   },
   {
     slug: "chatgpt-web/high",
@@ -336,7 +294,6 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "high",
     adapterEffort: "high",
-    requiresPro: false,
   },
   {
     slug: "chatgpt-web/extra-high",
@@ -346,25 +303,13 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "xhigh",
     adapterEffort: "xhigh",
-    requiresPro: false,
     requiresExtraHigh: true,
-  },
-  {
-    slug: "chatgpt-web/pro",
-    displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
-    interactionMode: "automatic",
-    backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "ultra",
-    adapterEffort: "max",
-    requiresPro: true,
   },
 ];
 
 const routesBySlug = new Map(
   [
     CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-    CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
     ...CHATGPT_WEB_LUNA_MODEL_ROUTES,
     ...CHATGPT_WEB_MODEL_ROUTES,
   ]
@@ -382,14 +327,11 @@ export function availableChatGptWebModelRoutes(
     if (capabilities.experimentalBiggerContext) {
       throw new Error("Zero Risk does not support Bigger Context");
     }
-    return capabilities.zeroRiskProEnabled
-      ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
-      : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
+    return [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
   return CHATGPT_WEB_MODEL_ROUTES.filter(route =>
-    (!route.requiresPro || capabilities.proAvailable)
-    && (!route.requiresExtraHigh || capabilities.extraHighAvailable));
+    !route.requiresExtraHigh || capabilities.extraHighAvailable);
 }
 
 export function requireChatGptWebModelRoute(
@@ -399,14 +341,12 @@ export function requireChatGptWebModelRoute(
   if (capabilities.browserInteractionMode === "manual" && capabilities.experimentalBiggerContext) {
     throw new Error("Zero Risk does not support Bigger Context");
   }
+  if (isChatGptWebRetiredProModel(modelId)) throw chatGptWebRetiredProModelError(modelId);
   const route = routesBySlug.get(modelId);
   if (!route) throw new Error(`ChatGPT web model is not enabled: ${modelId}`);
   if (capabilities.browserInteractionMode === "manual") {
     if (route.interactionMode !== "manual") {
       throw new Error(`${route.displayName} is not available while Zero Risk is enabled`);
-    }
-    if (route === CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE && !capabilities.zeroRiskProEnabled) {
-      throw new Error(`${route.displayName} is not enabled in Zero Risk model settings`);
     }
     return route;
   }
@@ -422,8 +362,7 @@ export function requireChatGptWebModelRoute(
   if (!capabilities.solAvailable) {
     throw new Error(`${route.displayName} is not available for this Luna-only account`);
   }
-  if ((route.requiresPro && !capabilities.proAvailable)
-    || (route.requiresExtraHigh && !capabilities.extraHighAvailable)) {
+  if (route.requiresExtraHigh && !capabilities.extraHighAvailable) {
     throw new Error(`${route.displayName} is not available for this account`);
   }
   return route;

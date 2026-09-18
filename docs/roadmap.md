@@ -31,6 +31,15 @@ Every branch named here is on GitHub. To continue one without earlier conversati
 
 ## Next
 
+- **Account safety.** On 18.09 ChatGPT held the owner's account for suspicious activity after a day
+  of parallel bridge traffic ([postmortem](incidents/2026-09-18-account-lock.md)). Landed in
+  `fork/account-safety`: ChatGPT Web — Pro retired everywhere (Extra High is the top mode, a Pro
+  thread gets one action), a security-hold detector that stops automatic turns for a held account
+  until a person secures it, and an account-wide pause after any ChatGPT-side failure (60 s,
+  doubling to 5 minutes). Still open: the launcher does not show a held account yet (reliability
+  wave 2, plan 2.3), and recovery still needs the Codex Native connector to be created again when
+  the password changed (`fork/rel-connector`).
+
 - **Anonymous problem reports.** Today a report is opened through the user's own GitHub CLI login, so the public issue shows the user's GitHub account, and users without `gh` cannot report at all. Send reports through a small relay that files them under the project's own identity, with the same closed allowlists, rate limits and deduplication; ask for consent once at setup. Until the relay exists, the consent dialog says plainly that the issue appears under the user's GitHub account.
 - **Autonomous maintainer runs.** The work queue fills itself (problem reports, the daily watch), but an agent works through it only when someone says "continue". Run the [agent playbook](agent-playbook.md) on a schedule in CI with a model API key stored as a repository secret: it fixes, opens pull requests, and merges only what passes every check, released through staged rollout with the kill switch. Default until a key is provided: off; maintainers' own agents run the playbook.
 - **Staged rollout and a kill switch** (practice gap): every installation now takes a new `main` within about an hour, so one bad release reaches everyone at once. Give each installation a stable random bucket, widen the eligible share with the age of the commit, halt a release through a file in the repository, and halt automatically when problem reports for the new commit rise.

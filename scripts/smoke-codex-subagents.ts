@@ -26,7 +26,7 @@ if (bundled.status !== 0) {
 const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
 const catalogConfig = defaultConfig("browser-only");
 catalogConfig.solAvailable = true;
-catalogConfig.proAvailable = true;
+catalogConfig.extraHighAvailable = true;
 catalogConfig.subagentProtocol = protocol === "v1" ? "compatibility-v1" : "native";
 const catalog = augmentNativeModelCatalog(sourceCatalog, catalogConfig);
 

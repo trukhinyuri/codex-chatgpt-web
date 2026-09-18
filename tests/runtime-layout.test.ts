@@ -23,7 +23,6 @@ import { removeLegacyRuntimeArtifacts } from "../src/service";
 import { processRunning } from "../src/process";
 import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-  CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "../src/chatgpt-web-models";
 
 const roots: string[] = [];
@@ -98,7 +97,6 @@ test("default setup uses the fixed production connector identities", () => {
   expect(defaultConfig("full").manualAppName).toBe(ZERO_RISK_CHATGPT_CONNECTOR_NAME);
   expect(defaultConfig("full").subagentProtocol).toBe("compatibility-v1");
   expect(defaultConfig("full").browserInteractionMode).toBe("automatic");
-  expect(defaultConfig("full").zeroRiskProEnabled).toBe(false);
 });
 
 test.each([
@@ -152,8 +150,7 @@ test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", 
     storageStatePath: join(root, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(root),
     headed: true,
-    extraHighAvailable: true, proAvailable: true,
-    autoApproveToolCalls: false,
+    extraHighAvailable: true, autoApproveToolCalls: false,
     controlToken: "config-migration-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
   })}\n`);
@@ -176,13 +173,9 @@ test("existing v3 configurations deterministically retain automatic browser inte
   mkdirSync(root, { recursive: true });
   const legacyV3: Record<string, unknown> = { ...defaultConfig("browser-only") };
   delete legacyV3.browserInteractionMode;
-  delete legacyV3.zeroRiskProEnabled;
   writeFileSync(join(root, "config.json"), `${JSON.stringify(legacyV3)}\n`);
 
-  expect(loadConfig()).toMatchObject({
-    browserInteractionMode: "automatic",
-    zeroRiskProEnabled: false,
-  });
+  expect(loadConfig()).toMatchObject({ browserInteractionMode: "automatic" });
   expect(loadConfigForSetup()).toMatchObject({
     appName: CHATGPT_CONNECTOR_NAME,
     automaticAppName: CHATGPT_CONNECTOR_NAME,
@@ -245,7 +238,7 @@ test("Luna-only provider configuration exposes only the Luna backend", () => {
   expect(provider.models).toEqual(["gpt-5.6-luna"]);
   expect(provider.defaultModel).toBe("gpt-5.6-luna");
   expect(provider.modelReasoningEfforts).toEqual({ "gpt-5.6-luna": ["low", "medium"] });
-  expect(provider.chatgptWeb).toMatchObject({ solAvailable: false, extraHighAvailable: false, proAvailable: false });
+  expect(provider.chatgptWeb).toMatchObject({ solAvailable: false, extraHighAvailable: false });
 });
 
 test("manual provider configuration preserves a distinct backend without guessing a ChatGPT model", () => {
@@ -253,7 +246,7 @@ test("manual provider configuration preserves a distinct backend without guessin
   config.browserInteractionMode = "manual";
   config.solAvailable = true;
   config.extraHighAvailable = true;
-  config.proAvailable = true;
+  config.extraHighAvailable = true;
   const provider = providerConfig(config);
 
   expect(provider.models).toEqual([CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]);
@@ -265,19 +258,15 @@ test("manual provider configuration preserves a distinct backend without guessin
     appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
     browserInteractionMode: "manual",
     solAvailable: false,
-    extraHighAvailable: false, proAvailable: false,
-    experimentalBiggerContext: false,
+    extraHighAvailable: false, experimentalBiggerContext: false,
   });
 
-  config.zeroRiskProEnabled = true;
-  const proProvider = providerConfig(config);
-  expect(proProvider.models).toEqual([
-    CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-    CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
-  ]);
-  expect(proProvider.modelReasoningEfforts).toEqual({
+  // A saved configuration that still asks for the retired Zero Risk Pro row loads and is ignored.
+  const legacyPro = { ...(config as unknown as Record<string, unknown>), zeroRiskProEnabled: true };
+  const legacyProvider = providerConfig(legacyPro as never);
+  expect(legacyProvider.models).toEqual([CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]);
+  expect(legacyProvider.modelReasoningEfforts).toEqual({
     [CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL]: ["low"],
-    [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL]: ["low"],
   });
 });
 
