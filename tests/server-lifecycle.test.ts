@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,7 +10,25 @@ import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/a
 import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig, providerConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
+import { flushResponseState } from "../src/responses/state";
 import { compactRequest, HttpTurnCounter, responseRequest, routeChatGptWebRequest, startServer } from "../src/server";
+
+// responseRequest persists previous_response_id state to responses-state.json, and the server
+// paths below also read the Codex integration journal and compaction checkpoints, all under
+// defaultConfig()'s config directory. Without this isolation that directory resolves from
+// CODEX_CHATGPT_WEB_HOME (or the real ~/.codex-chatgpt-web when unset), and these tests would
+// load and rewrite the live response-state snapshot. The snapshot write is debounced, so flush it
+// before removing the directory; a late write would otherwise recreate it after cleanup.
+let lifecycleHomeRoot: string;
+beforeEach(() => {
+  lifecycleHomeRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-server-lifecycle-test-"));
+  process.env.CODEX_CHATGPT_WEB_HOME = lifecycleHomeRoot;
+});
+afterEach(() => {
+  flushResponseState();
+  delete process.env.CODEX_CHATGPT_WEB_HOME;
+  rmSync(lifecycleHomeRoot, { recursive: true, force: true });
+});
 
 test("DEV harness configuration cannot bind a Responses listener", () => {
   const config = { ...defaultConfig("browser-only"), purpose: "dev-harness" as const, port: 0 };
