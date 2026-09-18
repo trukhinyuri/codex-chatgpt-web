@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, CHATGPT_SEND_ACTION_TIMEOUT_MS, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, CHATGPT_SEND_ACTION_TIMEOUT_MS, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -162,11 +162,49 @@ test("assistant tracking rebinds only one proven replacement after React detache
     "conversation-turn-2",
     ["conversation-turn-1", "conversation-turn-3"],
   )).toBe("conversation-turn-3");
-  expect(() => chatGptReboundTurnIdentity(
+  // ChatGPT can open more than one new shell for a single submitted message (e.g. a transient
+  // shell followed by the real answer shell); the bridge must follow the latest one instead of
+  // failing the turn, so this returns the last-added identity rather than throwing.
+  expect(chatGptReboundTurnIdentity(
     ["conversation-turn-1"],
     "conversation-turn-2",
     ["conversation-turn-1", "conversation-turn-3", "conversation-turn-4"],
+  )).toBe("conversation-turn-4");
+});
+
+test("a long tool turn follows later assistant bubbles instead of failing the first shell", () => {
+  const initial = ["user-1"];
+  const bound = "assistant-tool-shell";
+  const current = ["assistant-tool-shell", "assistant-progress", "assistant-final"];
+  expect(chatGptReboundTurnIdentity(initial, bound, current)).toBe("assistant-final");
+  expect(chatGptLatestNewTurnIdentity(initial, current)).toBe("assistant-final");
+  expect(chatGptSubmissionEvidence({
+    initialTurnIdentities: initial,
+    userIdentities: ["user-1"],
+    responseIdentities: current,
+    generationRunning: false,
+  })).toBe("assistant_turn");
+  // chatGptNewTurnIdentity itself keeps failing loudly for callers that require exactly one new
+  // turn (e.g. the user-turn check above never expects ChatGPT to open two user turns at once).
+  expect(() => chatGptNewTurnIdentity(
+    ["user-1"],
+    ["user-1", "user-2", "user-3"],
   )).toThrow("2 new conversation turns");
+});
+
+test("assistant observation keeps reconciling for later sibling turns even while the first shell remains", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  // The historic bug: a bound-count of exactly 1 short-circuited before a newer sibling shell was
+  // ever considered, so a later assistant bubble for the same submission was silently ignored.
+  expect(workerSource).not.toMatch(/if \(boundCount === 1\) return binding;/);
+  const mainLoop = workerSource.slice(
+    workerSource.indexOf("let completionFenceRevision"),
+    workerSource.indexOf("waiting for completed-turn evidence"),
+  );
+  const reconcileIndex = mainLoop.indexOf("this.reconcileAssistantTurnBinding(");
+  const snapshotIndex = mainLoop.indexOf("snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);");
+  expect(reconcileIndex).toBeGreaterThanOrEqual(0);
+  expect(snapshotIndex).toBeGreaterThan(reconcileIndex);
 });
 
 test("assistant tracking accepts a replacement turn during proven MCP continuation", async () => {
@@ -4171,7 +4209,12 @@ test("multipart observation surfaces Stopped thinking on its first observation e
     acknowledgeToolBatch: async () => { acknowledged = true; },
   };
   const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
-  await expect(observe.call({ responseDomSnapshot: async () => { observations += 1; return snapshot; } },
+  await expect(observe.call({
+    responseDomSnapshot: async () => { observations += 1; return snapshot; },
+    // reconcileAssistantTurnBinding now runs unconditionally every iteration (not only when the
+    // response looks absent), so this stub `this` needs one too; it just confirms the same binding.
+    reconcileAssistantTurnBinding: async (_page: unknown, _baseline: unknown, current: unknown) => current,
+  },
     page, binding, {}, {}, Date.now() + 1_000, undefined, progress,
   )).rejects.toMatchObject({ code: "chatgpt_stopped_thinking", retryable: false });
   expect(observations).toBe(1);
@@ -4383,6 +4426,32 @@ test("Full mode has no fixed post-tool final-answer deadline", () => {
   expect(tracker.update({
     ...finalAnswer,
   }, 3_100 + CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
+});
+
+test("rebinding to a later assistant bubble forgets the previous post-tool answer boundary", () => {
+  const tracker = new ChatGptCompletionTracker(500, 1_000);
+  const emptyShell = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    currentHtml: "",
+    completionActionVisible: true,
+  };
+  // Record a pending post-tool answer boundary against the abandoned shell.
+  expect(tracker.observeToolBatch(1, emptyShell.currentText)).toBe(true);
+  // Without resetAnswerWindow(), the tracker would keep judging the new shell against the old
+  // shell's empty baseline and eventually throw "completed without a final answer" even though
+  // the later shell already carries a real one.
+  tracker.resetAnswerWindow();
+  const finalAnswer = {
+    responsePresent: true,
+    running: false,
+    currentText: "complete final answer",
+    currentHtml: "<p>complete final answer</p>",
+    completionActionVisible: true,
+  };
+  expect(tracker.update(finalAnswer, 1_000)).toBe(false);
+  expect(tracker.update(finalAnswer, 1_500)).toBe(true);
 });
 
 test("Full mode fails closed when ChatGPT exposes completion without a post-tool final answer", () => {
