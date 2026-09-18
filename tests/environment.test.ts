@@ -478,6 +478,94 @@ describe("trusted current Codex environment envelope", () => {
     expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ sandbox: "read-only" }))).toThrow("missing cwd");
   });
 
+  test("labelled non-Git skill recovery rejects an environment part a user could have typed", () => {
+    const request = nonGitSkillWire();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    body.input[0]!.internal_chat_message_metadata_passthrough = {
+      turn_id: "turn_current", content_item_kinds: ["app.context", "user.text"],
+    };
+    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+  });
+
+  // Codex binds `workspaces` metadata only to the Git repository that contains the cwd. A project
+  // with several folders therefore declares more roots than metadata can bind, and a skill turn may
+  // carry them only when Codex itself labelled the environment part and every skill item.
+  const siblingRoot = resolve(root, "..", "sibling-project");
+  function multiRootSkillWire(
+    options: {
+      environmentKinds?: string[]; skillKinds?: string[]; labels?: boolean; cwd?: string; sandbox?: string;
+      instruction?: string;
+    } = {},
+  ): CodexParsedRequest {
+    const environment = `<environment_context>
+  <cwd>${options.cwd ?? root}</cwd>
+  <filesystem><workspace_roots><root>${root}</root><root>${siblingRoot}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>`;
+    const request = currentWire({ environmentXml: environment, ...(options.sandbox ? { sandbox: options.sandbox } : {}) });
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const labels = options.labels !== false;
+    const label = (kinds: string[]) => labels ? { content_item_kinds: kinds } : {};
+    body.input[0]!.internal_chat_message_metadata_passthrough = {
+      turn_id: "turn_current", ...label(options.environmentKinds ?? ["app.context", "environments.environment_context"]),
+    };
+    body.input[1]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_current", ...label(["user.text"]) };
+    if (options.instruction) {
+      (body.input[1]!.content as Array<{ text: string }>)[0]!.text = options.instruction;
+    }
+    body.input.push({
+      type: "message",
+      id: "msg_skill",
+      role: "user",
+      content: [{ type: "input_text", text: "<skill>\n<name>spider</name>\nUse this skill.\n</skill>" }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: "turn_current", ...label(options.skillKinds ?? ["skills.selected_skill_instructions"]),
+      },
+    });
+    return request;
+  }
+
+  test("recovers a skill turn in a multi-folder project whose extra roots Codex labelled", () => {
+    expect(extractChatGptTurnEnvironment(multiRootSkillWire())).toMatchObject({
+      cwd: root,
+      roots: [root, siblingRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+    // Codex Desktop prefixes the instruction with ambient in-app browser state; it is still user text.
+    const ambient = "\n<in-app-browser-context source=\"ambient-ui-state\">\nAmbient UI state.\n</in-app-browser-context>\n\nReview the blockers";
+    expect(extractChatGptTurnEnvironment(multiRootSkillWire({ instruction: ambient }))).toMatchObject({
+      cwd: root,
+      roots: [root, siblingRoot],
+    });
+  });
+
+  test("multi-folder skill recovery keeps the metadata-bound rule without Codex labels", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ labels: false }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery rejects an environment part a user could have typed", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ environmentKinds: ["app.context", "user.text"] })))
+      .toThrow("missing cwd");
+    // Labels must align with content parts; a shifted or truncated list authenticates nothing.
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ environmentKinds: ["environments.environment_context"] })))
+      .toThrow("missing cwd");
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({
+      environmentKinds: ["environments.environment_context", "app.context"],
+    }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery requires Codex's label on every skill item", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ skillKinds: ["user.text"] }))).toThrow("missing cwd");
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ skillKinds: [] }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery keeps the cwd inside canonical Git metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ cwd: siblingRoot }))).toThrow("missing cwd");
+  });
+
+  test("multi-folder skill recovery still requires the envelope to match canonical sandbox metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(multiRootSkillWire({ sandbox: "read-only" }))).toThrow("missing cwd");
+  });
+
   test("accepts Codex auxiliary roots that are intentionally absent from git workspace metadata", () => {
     const auxiliary = resolve(root, "auxiliary-output");
     const projectEnvironment = `<environment_context>
