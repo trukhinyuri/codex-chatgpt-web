@@ -37,12 +37,38 @@ export class CompactionTransactionStore {
       handoffId: opaqueId("handoff"),
       traceId,
     };
+    this.armExpiry(transaction, ttlMs);
+    this.transactions.set(transaction.token, transaction);
+    return { token: transaction.token, handoffId: transaction.handoffId };
+  }
+
+  /**
+   * Stops the expiry clock while the browser turn that will deliver this handoff waits at the
+   * account's admission gate: nothing can be submitted before that turn starts.
+   */
+  pause(token: string): void {
+    const transaction = this.transactions.get(token);
+    if (!transaction || transaction.summary !== undefined) return;
+    if (transaction.timer) clearTimeout(transaction.timer);
+    transaction.timer = undefined;
+  }
+
+  /** Restarts the expiry clock with a full budget once the delivering turn is admitted. */
+  resume(token: string, ttlMs: number): void {
+    const transaction = this.transactions.get(token);
+    if (!transaction || transaction.summary !== undefined) return;
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw new Error("compaction transaction TTL must be a positive finite number");
+    }
+    this.armExpiry(transaction, ttlMs);
+  }
+
+  private armExpiry(transaction: CompactionTransaction, ttlMs: number): void {
+    if (transaction.timer) clearTimeout(transaction.timer);
     transaction.timer = setTimeout(() => {
       this.finishError(transaction, new Error("compaction transaction timed out"));
     }, ttlMs);
     transaction.timer.unref?.();
-    this.transactions.set(transaction.token, transaction);
-    return { token: transaction.token, handoffId: transaction.handoffId };
   }
 
   submit(token: string, handoffId: string, summary: string): void {

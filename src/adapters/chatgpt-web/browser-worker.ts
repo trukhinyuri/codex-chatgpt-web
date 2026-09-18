@@ -78,7 +78,26 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { ChatGptSuspensionClock, chatGptSuspensionClock } from "./suspension-clock";
+import {
+  chatGptAccountBrowserLocks,
+  isChatGptHeavyBrowserStage,
+  isChatGptTemporaryChatOpeningStage,
+  type ChatGptAccountBrowserLocks,
+  type ChatGptLockHold,
+} from "./concurrency";
+import {
+  CHATGPT_ADMISSION_OPEN_SPACING_MS,
+  CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS,
+  chatGptAccountKey,
+  chatGptAdmissionGateFor,
+  chatGptRateLimitError,
+  formatChatGptAdmissionStatus,
+  withChatGptRetryDelay,
+  type ChatGptAdmissionGate,
+  type ChatGptAdmissionStatus,
+  type ChatGptAdmissionTicket,
+} from "./rate-limit-gate";
 import {
   ChatGptCompactionHandoffAccepted,
   ChatGptWebAdapterError,
@@ -100,8 +119,98 @@ import type {
 } from "./turn-progress";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+export { ChatGptSuspensionClock, chatGptSuspensionClock } from "./suspension-clock";
+export {
+  CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS,
+  CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS,
+} from "./rate-limit-gate";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+
+// Keyed by trace id, which is unique among the turns a process runs at once. Module-level so the
+// stage runner can find them however the worker object was built.
+const chatGptTurnSignals = new Map<string, AbortSignal>();
+const chatGptOpeningHolds = new Map<string, ChatGptLockHold>();
+
+/** The account-wide browser locks for a resolved configuration, when it names an account. */
+function accountBrowserLocksFor(config: ResolvedBrowserConfig | undefined): ChatGptAccountBrowserLocks | undefined {
+  if (!config) return undefined;
+  if (config.browserHost === "launcher" ? !config.browserHostDescriptorPath : !config.storageStatePath) return undefined;
+  return chatGptAccountBrowserLocks(chatGptAccountKey(config));
+}
+
+async function acquireHeavyBrowserPhase(
+  locks: ChatGptAccountBrowserLocks,
+  traceId: string,
+  phase: string,
+): Promise<ChatGptLockHold> {
+  const hold = await locks.heavy.acquire(traceId, chatGptTurnSignals.get(traceId));
+  if (hold.waitedMs >= 1) {
+    console.info(
+      `[chatgpt-web] browser turn ${traceId} stage=${phase} waited for the account's heavy-phase lock`
+      + ` lockWaitMs=${Math.round(hold.waitedMs)} queuedAhead=${hold.queuedAhead}`,
+    );
+  }
+  return hold;
+}
+
+function releaseChatGptOpeningHold(traceId: string): void {
+  const hold = chatGptOpeningHolds.get(traceId);
+  chatGptOpeningHolds.delete(traceId);
+  hold?.release();
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+  return new Promise<void>((resolveDelay, rejectDelay) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectDelay(new DOMException("ChatGPT web turn aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Keeps at least a few seconds between two Temporary Chat openings on one account. */
+async function spaceTemporaryChatOpening(
+  locks: ChatGptAccountBrowserLocks,
+  traceId: string,
+  stage: string,
+): Promise<void> {
+  const waitMs = locks.lastTemporaryChatOpeningAt + CHATGPT_ADMISSION_OPEN_SPACING_MS - Date.now();
+  if (waitMs > 0) {
+    console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} spacing Temporary Chat openings waitMs=${Math.round(waitMs)}`);
+    await abortableDelay(waitMs, chatGptTurnSignals.get(traceId));
+  }
+  locks.lastTemporaryChatOpeningAt = Date.now();
+}
+
+/**
+ * Mirrors "this turn waits for Codex tool results" into its admission ticket. Such a turn sends
+ * nothing to ChatGPT, so it must not hold a send slot that its own subagent needs (#397).
+ */
+function watchChatGptToolWaits(
+  progress: ChatGptTurnProgressReader | undefined,
+  ticket: ChatGptAdmissionTicket,
+): () => void {
+  if (!progress) return () => {};
+  const stop = new AbortController();
+  const initial = progress.snapshot();
+  ticket.setWaitingForTools(chatGptExternalToolCallsAreInFlight(initial));
+  void (async () => {
+    let revision = initial.revision;
+    for (;;) {
+      const snapshot = await progress.waitForChange(revision, stop.signal);
+      revision = snapshot.revision;
+      ticket.setWaitingForTools(chatGptExternalToolCallsAreInFlight(snapshot));
+    }
+  })().catch(() => {});
+  return () => stop.abort();
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -774,105 +883,9 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
   .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます|요청을 너무 빠르게|요청이 너무 많습니다|너무 많은 요청/i })
   .last();
 
-// ChatGPT answers a burst with a "Too many requests" dialog and asks to wait a few minutes. Codex
-// retries a rate-limited stream five times with sub-second backoff unless the error names a delay
-// as "Please try again in <n>s.", so every retry opened a fresh Temporary Chat and hit the same
-// account limit again. Name a concrete delay, grow it while limits repeat, and keep new turns off
-// ChatGPT until it expires. A prompt that ChatGPT accepts proves the limit has cleared.
-export const CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS = 60_000;
-export const CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS = 300_000;
-const CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS = 10 * 60_000;
-const CHATGPT_RATE_LIMIT_RETRY_DELAY = /\s*Please try again in \d+s\.$/;
-
-function chatGptRateLimitError(message: string, cause?: unknown): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(message, {
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: true,
-    ...(cause === undefined ? {} : { cause }),
-  });
-}
-
-function withChatGptRetryDelay(message: string, seconds: number): string {
-  return `${message.replace(CHATGPT_RATE_LIMIT_RETRY_DELAY, "")} Please try again in ${seconds}s.`;
-}
-
-function isChatGptRateLimitError(error: unknown): error is ChatGptWebAdapterError {
-  return error instanceof ChatGptWebAdapterError && error.code === "rate_limit_exceeded";
-}
-
-/** Account-wide cooldown shared by every browser turn of one ChatGPT profile. */
-export class ChatGptRateLimitCooldown {
-  private until = 0;
-  private consecutive = 0;
-  private lastLimitAt = 0;
-
-  constructor(private readonly now: () => number = Date.now) {}
-
-  /** Records one ChatGPT rate-limit response and returns the whole seconds left to wait. */
-  record(): number {
-    const now = this.now();
-    if (this.consecutive > 0 && now - this.lastLimitAt > CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS + CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS) {
-      this.consecutive = 0;
-    }
-    this.consecutive += 1;
-    this.lastLimitAt = now;
-    const delay = Math.min(
-      CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS * 2 ** (this.consecutive - 1),
-      CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS,
-    );
-    this.until = Math.max(this.until, now + delay);
-    return Math.ceil((this.until - now) / 1_000);
-  }
-
-  /** Refuses a new browser turn locally while the account is cooling down. */
-  assertReady(): void {
-    const remainingMs = this.until - this.now();
-    if (remainingMs <= 0) return;
-    throw chatGptRateLimitError(withChatGptRetryDelay(
-      "ChatGPT rate limit: cooling down after a \"Too many requests\" response; this turn was not sent to ChatGPT.",
-      Math.ceil(remainingMs / 1_000),
-    ));
-  }
-
-  /**
-   * Records a rate-limit failure and restates it with the escalated delay. While the account is still
-   * throttled, ChatGPT often answers the next attempts with a generic "Something went wrong" instead
-   * of the dialog; within the escalation window that answer is the same limit, so Codex must wait
-   * rather than retry at once. Other errors pass through unchanged.
-   */
-  escalate<E>(error: E): E | ChatGptWebAdapterError {
-    if (isChatGptRateLimitError(error)) {
-      return chatGptRateLimitError(withChatGptRetryDelay(error.message, this.record()), error);
-    }
-    if (isChatGptUpstreamServerError(error) && this.throttledRecently()) {
-      return chatGptRateLimitError(withChatGptRetryDelay(
-        "ChatGPT rate limit: ChatGPT reported an error while this account was still throttled after \"Too many requests\".",
-        this.record(),
-      ), error);
-    }
-    return error;
-  }
-
-  /**
-   * A completed ChatGPT response proves the account is being served again, so the escalation starts
-   * over. An accepted submission proves nothing: ChatGPT can still fail it while throttled. A pause
-   * that was already announced to Codex runs out on its own.
-   */
-  recordResponse(): void {
-    this.consecutive = 0;
-    this.lastLimitAt = 0;
-  }
-
-  private throttledRecently(): boolean {
-    return this.lastLimitAt > 0 && this.now() - this.lastLimitAt <= CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS;
-  }
-}
-
-function isChatGptUpstreamServerError(error: unknown): error is ChatGptWebAdapterError {
-  return error instanceof ChatGptWebAdapterError && error.code === "upstream_server_error";
-}
+// ChatGPT answers a burst with a "Too many requests" dialog and asks to wait a few minutes. The
+// dialog becomes a structured 429 here; the daemon's admission gate (rate-limit-gate.ts) owns the
+// cooldown, its escalation per incident, and keeping new turns off ChatGPT until it expires.
 
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   const dialog = chatGptRateLimitDialog(page);
@@ -1216,44 +1229,6 @@ export const browserStageTimeouts = {
   multipartStageAcknowledgement: CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
 } as const;
 
-/**
- * Detects that this process was suspended (system sleep) by watching for gaps in a steady tick.
- * On Apple Silicon the monotonic clock keeps advancing through sleep, so elapsed time alone cannot
- * distinguish "the stage really took 15 minutes" from "the machine slept for 14 of them" — and a
- * stage budget charged for slept time cancels turns that never got their budget awake.
- */
-export class ChatGptSuspensionClock {
-  private suspendedTotalMs = 0;
-  private lastTickAt: number;
-  private timer: ReturnType<typeof setInterval> | undefined;
-
-  constructor(
-    private readonly tickIntervalMs = 1_000,
-    private readonly gapThresholdMs = 5_000,
-  ) {
-    this.lastTickAt = Date.now();
-  }
-
-  start(): void {
-    if (this.timer) return;
-    this.lastTickAt = Date.now();
-    this.timer = setInterval(() => this.tick(Date.now()), this.tickIntervalMs);
-    this.timer.unref?.();
-  }
-
-  /** Exposed for tests; production ticks come from the interval above. */
-  tick(now: number): void {
-    const gap = now - this.lastTickAt;
-    this.lastTickAt = now;
-    if (gap >= this.gapThresholdMs) this.suspendedTotalMs += gap - this.tickIntervalMs;
-  }
-
-  suspendedMs(): number {
-    return this.suspendedTotalMs;
-  }
-}
-
-export const chatGptSuspensionClock = new ChatGptSuspensionClock();
 
 /**
  * How much of a stage budget remains once slept time is refunded. Zero means the stage really
@@ -1358,6 +1333,13 @@ export interface BrowserTurn {
   conversationKey?: string;
   onPreparedSelected?: (reused: boolean) => void | Promise<void>;
   abortSignal?: AbortSignal;
+  /**
+   * The account's admission gate holds this turn before any browser work: a cooldown, the probe
+   * after an incident, or a full concurrency ceiling. Deadlines of the caller should not run now.
+   */
+  onAdmissionWait?: (status: ChatGptAdmissionStatus) => void;
+  /** The gate admitted this turn; browser work starts now. Called again after a requeue. */
+  onAdmitted?: () => void;
   onHeartbeat?: () => void;
   /** Send activation is the ambiguity boundary after which a fresh surface must not replay this prompt. */
   onSendActivated?: () => void | Promise<void>;
@@ -2327,6 +2309,11 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
 }
 
 export class ChatGptBrowserWorker {
+  /**
+   * One worker per resolved configuration, because the configuration decides how a turn runs. What
+   * belongs to the ChatGPT account — admission, cooldown and the browser locks — is looked up by
+   * the account behind the configuration, so two configurations of one profile share it.
+   */
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
     const key = JSON.stringify(config);
@@ -2345,9 +2332,15 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
-  private readonly rateLimitCooldown = new ChatGptRateLimitCooldown();
+  private admission?: ChatGptAdmissionGate;
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
+
+  /** The daemon-wide admission gate of this worker's ChatGPT account. */
+  private admissionGate(): ChatGptAdmissionGate {
+    this.admission ??= chatGptAdmissionGateFor(chatGptAccountKey(this.config));
+    return this.admission;
+  }
 
   /**
    * ChatGPT's rich-text composer may render an ASCII space as NBSP (Lexical's whitespace
@@ -2406,21 +2399,87 @@ export class ChatGptBrowserWorker {
     if (this.activeRuns.has(turn.traceId)) {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
-    if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
-      return Promise.reject(new Error(
-        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
-      ));
-    }
-    const useHelper = this.config.browserHost === "launcher" && process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS !== "1";
+    const helperProcess = process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS === "1";
+    const useHelper = this.config.browserHost === "launcher" && !helperProcess;
     if (useHelper) {
       this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
     }
-    const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+    const execute = (attempt: BrowserTurn): Promise<string> => (
+      useHelper ? this.launcherHelper!.run(attempt) : this.runExclusive(attempt)
+    );
+    // Admission belongs to the daemon. The launcher helper process runs only what it was sent,
+    // after the daemon admitted it, so it must not queue or count the same turn a second time.
+    const run = Promise.resolve().then(() => helperProcess ? execute(turn) : this.runAdmitted(turn, execute));
     this.activeRuns.set(turn.traceId, run);
     void run.finally(() => {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
     }).catch(() => {});
     return run;
+  }
+
+  /**
+   * Waits at the account's admission gate, then runs the turn. Beyond the concurrency ceiling, and
+   * during a cooldown, the turn queues here instead of failing; the caller's heartbeat keeps Codex
+   * waiting. A rate limit ChatGPT reports before this turn activated Send left nothing that a new
+   * attempt could repeat, so the turn goes back to its place in the queue and starts again on a
+   * fresh surface once the account may send again. After Send activation the limit is returned to
+   * the caller with the remaining pause, because only the caller may decide about a resend.
+   */
+  private async runAdmitted(turn: BrowserTurn, execute: (attempt: BrowserTurn) => Promise<string>): Promise<string> {
+    const gate = this.admissionGate();
+    let previous: ChatGptAdmissionTicket | undefined;
+    for (;;) {
+      const ticket = await gate.awaitReady({
+        traceId: turn.traceId,
+        ...(turn.abortSignal ? { signal: turn.abortSignal } : {}),
+        ...(previous ? { requeueOf: previous } : {}),
+        onStatus: status => {
+          turn.onAdmissionWait?.(status);
+          const line = formatChatGptAdmissionStatus(status);
+          if (line) turn.onReasoningSummary?.(line);
+        },
+      });
+      let sendActivated = false;
+      const stopWatchingToolWaits = watchChatGptToolWaits(turn.externalProgress, ticket);
+      const attempt: BrowserTurn = {
+        ...turn,
+        onSendActivated: async () => {
+          sendActivated = true;
+          await turn.onSendActivated?.();
+        },
+        onSubmitted: () => {
+          ticket.submissionAccepted();
+          turn.onSubmitted?.();
+        },
+      };
+      try {
+        turn.onAdmitted?.();
+        const text = await execute(attempt);
+        ticket.finish("clean");
+        return text;
+      } catch (error) {
+        if (error instanceof ChatGptCompactionHandoffAccepted) {
+          ticket.finish("clean");
+          throw error;
+        }
+        const aborted = turn.abortSignal?.aborted === true
+          || (error instanceof DOMException && error.name === "AbortError");
+        const limited = aborted ? undefined : gate.classifyFailure(error, ticket);
+        if (limited && !sendActivated) {
+          ticket.finish("rate_limited");
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} met a ChatGPT rate limit before Send;`
+            + " it waits in the bridge and starts again on a fresh tab when the account may send",
+          );
+          previous = ticket;
+          continue;
+        }
+        ticket.finish(aborted ? "aborted" : limited ? "rate_limited" : "failed");
+        throw limited ?? error;
+      } finally {
+        stopWatchingToolWaits();
+      }
+    }
   }
 
   verifyConnector(traceId = `verify_${randomUUID().replaceAll("-", "")}`): Promise<string> {
@@ -2483,12 +2542,24 @@ export class ChatGptBrowserWorker {
     suspensionClock: Pick<ChatGptSuspensionClock, "suspendedMs"> = chatGptSuspensionClock,
     awaitAbortedActionSettlement = false,
   ): Promise<T> {
+    // Heavy page phases of one account take turns. The wait happens before the stage clock starts,
+    // so queueing behind other tabs never spends this stage's budget.
+    const locks = isChatGptHeavyBrowserStage(stage)
+      ? accountBrowserLocksFor((this as unknown as { config?: ResolvedBrowserConfig } | undefined)?.config)
+      : undefined;
+    const heavyHold = locks ? await acquireHeavyBrowserPhase(locks, traceId, stage) : undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (locks && isChatGptTemporaryChatOpeningStage(stage)) await spaceTemporaryChatOpening(locks, traceId, stage);
+    } catch (error) {
+      heavyHold?.release();
+      throw error;
+    }
     chatGptSuspensionClock.start();
     const startedAt = performance.now();
     const suspendedAtStart = suspensionClock.suspendedMs();
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let stageTimedOut = false;
     let actionPromise: Promise<T> | undefined;
     try {
@@ -2527,6 +2598,7 @@ export class ChatGptBrowserWorker {
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);
+      heavyHold?.release();
     }
   }
 
@@ -3981,6 +4053,8 @@ export class ChatGptBrowserWorker {
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
+    // A smoke test sends a real message; it must not reach ChatGPT while the account cools down.
+    this.admissionGate().assertMaintenanceAllowed("smoke test");
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
     const account = await detectChatGptAccountCapabilities(page);
@@ -4536,7 +4610,22 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+    if (turn.abortSignal) chatGptTurnSignals.set(turn.traceId, turn.abortSignal);
+    try {
+      if (this.config.browserHost !== "launcher") return await this.runBrowserTurn(turn);
+      return await this.runLauncherTurn(turn);
+    } finally {
+      releaseChatGptOpeningHold(turn.traceId);
+      if (chatGptTurnSignals.get(turn.traceId) === turn.abortSignal) chatGptTurnSignals.delete(turn.traceId);
+    }
+  }
+
+  private async runLauncherTurn(turn: BrowserTurn): Promise<string> {
+    // A leased tab must reach ChatGPT within the launcher's bootstrap window, so the whole opening
+    // — lease, page binding and Temporary Chat preparation — runs as one uninterrupted heavy phase
+    // and waits for its place before the tab exists. runBrowserTurn releases it once the page is open.
+    const locks = accountBrowserLocksFor(this.config);
+    if (locks) chatGptOpeningHolds.set(turn.traceId, await acquireHeavyBrowserPhase(locks, turn.traceId, "turn_opening"));
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
@@ -4637,12 +4726,6 @@ export class ChatGptBrowserWorker {
     reuseConversation = false,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    try {
-      this.rateLimitCooldown.assertReady();
-    } catch (error) {
-      console.error(`[chatgpt-web] browser turn ${turn.traceId} not started: ${error instanceof Error ? error.message : String(error)}`);
-      throw error;
-    }
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
@@ -4667,6 +4750,7 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    let multipartHold: ChatGptLockHold | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       // Validate only the selected physical message, not canonical history used for usage estimates.
@@ -4887,6 +4971,22 @@ export class ChatGptBrowserWorker {
           ),
         );
       }
+      // The page is open: other tabs may take their heavy phases again.
+      releaseChatGptOpeningHold(turn.traceId);
+      if (prepared.multipart) {
+        // One Bigger Context transaction at a time per account. Waiting here holds no heavy-phase
+        // lock, so the transaction in progress can finish its own stages.
+        const locks = accountBrowserLocksFor(this.config);
+        if (locks) {
+          multipartHold = await locks.multipart.acquire(turn.traceId, turn.abortSignal);
+          if (multipartHold.waitedMs >= 1) {
+            console.info(
+              `[chatgpt-web] browser turn ${turn.traceId} waited for the account's Bigger Context transaction lock`
+              + ` lockWaitMs=${Math.round(multipartHold.waitedMs)} queuedAhead=${multipartHold.queuedAhead}`,
+            );
+          }
+        }
+      }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
       let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
@@ -5091,6 +5191,7 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+      multipartHold?.release();
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5417,7 +5518,6 @@ export class ChatGptBrowserWorker {
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
       await diagnostics.capture(page, "turn-completed");
-      this.rateLimitCooldown.recordResponse();
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} completed`
         + ` (markdownChars=${finalText.length}, domFullScans=${responseDomCache.fullScans ?? 0}, domCacheHits=${responseDomCache.cacheHits ?? 0})`,
@@ -5432,7 +5532,7 @@ export class ChatGptBrowserWorker {
         }
         throw turn.abortSignal.reason;
       }
-      const surfaced = this.rateLimitCooldown.escalate(error);
+      const surfaced = error;
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(surfaced instanceof Error ? surfaced.message : String(surfaced))}`,
@@ -5442,6 +5542,7 @@ export class ChatGptBrowserWorker {
       }
       throw surfaced;
     } finally {
+      multipartHold?.release();
       prepared.release();
       if (turnConnection) {
         await turnConnection.close().catch(error => {
