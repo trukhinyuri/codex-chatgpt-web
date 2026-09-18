@@ -20,7 +20,7 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptRateLimitCause } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -1094,6 +1094,22 @@ export function createChatGptWebAdapter(
               }
               const handoffError = error instanceof Error ? error : new Error(String(error));
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
+              const rateLimit = chatGptRateLimitCause(handoffError);
+              if (rateLimit) {
+                // A throttled handoff did not break the context. Keep the rate-limit code and its
+                // retry delay so Codex waits before rebuilding the checkpoint instead of replaying
+                // it into the same cooldown; the shared retry budget still bounds the attempts.
+                const surfaced = chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, rateLimit);
+                emit({
+                  type: "error",
+                  message: surfaced.message,
+                  status: surfaced.status,
+                  errorType: surfaced.errorType,
+                  code: surfaced.code,
+                  retryable: surfaced.retryable,
+                });
+                return;
+              }
               emit({
                 type: "error",
                 message: "ChatGPT did not complete the context handoff. Retry the task.",

@@ -22,6 +22,22 @@ export class ChatGptWebAdapterError extends Error {
   }
 }
 
+/**
+ * Finds a ChatGPT rate limit behind a wrapped failure. Compaction reports its own handoff error,
+ * but a throttled handoff must keep the rate-limit code and retry delay so Codex waits it out.
+ */
+export function chatGptRateLimitCause(error: unknown, depth = 0): ChatGptWebAdapterError | undefined {
+  if (depth > 4 || !(error instanceof Error)) return undefined;
+  if (error instanceof ChatGptWebAdapterError && error.code === "rate_limit_exceeded") return error;
+  if (error instanceof AggregateError) {
+    for (const inner of error.errors) {
+      const found = chatGptRateLimitCause(inner, depth + 1);
+      if (found) return found;
+    }
+  }
+  return chatGptRateLimitCause(error.cause, depth + 1);
+}
+
 // Only the compaction owner may signal this after the broker accepts its one-shot handoff.
 // It cancels browser observation, while the accepted summary remains the native result.
 export class ChatGptCompactionHandoffAccepted extends DOMException {
