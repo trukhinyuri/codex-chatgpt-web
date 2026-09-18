@@ -15,6 +15,43 @@ test("the public launcher command uses the Electron bootstrap", () => {
   assert.equal(repositoryManifest.scripts.launcher, repositoryManifest.scripts.app);
 });
 
+// nativeImage only decodes PNG/JPEG data (Electron's documented image support), never SVG, so a
+// macOS tray icon built from an `image/svg+xml` data URL silently produces an empty image and a
+// blank menu-bar icon. main.cjs must load a real PNG asset instead, and electron-builder's `files`
+// allowlist (it does not glob the whole assets/ directory) must actually ship it.
+test("the macOS tray icon is a packaged PNG asset, not an SVG data URL nativeImage cannot decode", () => {
+  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+  assert.doesNotMatch(main, /image\/svg\+xml/);
+  assert.match(main, /trayTemplate\.png/);
+  assert.match(main, /nativeImage\.createFromPath\(TRAY_ICON_PATH\)/);
+  assert.ok(manifest.build.files.includes("assets/trayTemplate.png"));
+  assert.ok(manifest.build.files.includes("assets/trayTemplate@2x.png"));
+  for (const [name, expectedSize] of [["trayTemplate.png", 18], ["trayTemplate@2x.png", 36]]) {
+    const assetPath = path.join(launcherRoot, "assets", name);
+    assert.ok(fs.existsSync(assetPath), `${name} must exist`);
+    const buffer = fs.readFileSync(assetPath);
+    assert.deepEqual([...buffer.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${name} must be a real PNG`);
+    assert.equal(buffer.readUInt32BE(16), expectedSize, `${name} width`);
+    assert.equal(buffer.readUInt32BE(20), expectedSize, `${name} height`);
+    // Color type 6 is RGBA -- an opaque fallback (e.g. a flattened screenshot) would not carry the
+    // transparency a macOS template tray icon depends on.
+    assert.equal(buffer[25], 6, `${name} must carry an alpha channel`);
+  }
+});
+
+// setLoginItemSettings({ args }) is Windows-only, so "--hidden" never reaches process.argv on a
+// real macOS login launch; main.cjs's startHidden computation must fall back to
+// openedAtLoginOnMac (see tests/autostart.test.cjs for that helper's own behavior), or a macOS
+// user who enabled "start hidden at login" gets a visible window at every login instead.
+test("macOS hidden-at-login start does not depend solely on the --hidden argv flag", () => {
+  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+  assert.match(main, /openedAtLoginOnMac/);
+  const startHiddenLine = main.match(/const startHidden = \(([\s\S]*?)\)\s*\n\s*&&/);
+  assert.ok(startHiddenLine, "startHidden must be computed from more than one condition");
+  assert.match(startHiddenLine[1], /process\.argv\.includes\("--hidden"\)/);
+  assert.match(startHiddenLine[1], /openedAtLoginOnMac\(app\)/);
+});
+
 test("the full verification gate audits launcher dependencies", () => {
   const verify = fs.readFileSync(path.join(repositoryRoot, "scripts", "verify.ts"), "utf8");
   assert.equal(manifest.scripts.audit, "bun audit");

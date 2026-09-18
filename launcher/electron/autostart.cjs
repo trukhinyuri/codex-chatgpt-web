@@ -45,6 +45,20 @@ function linuxAutostartMatches(app) {
   }
 }
 
+/**
+ * `app.setLoginItemSettings({ args })` is Windows-only (Electron's documented behavior); macOS
+ * ignores `args` entirely, so the `--hidden` flag this launcher's autostart relies on to start in
+ * the background never reaches `process.argv` on a real macOS login launch. `openAsHidden` is a
+ * separate, legacy macOS-only hidden-checkbox setting that stopped working on macOS 13 -- this
+ * fork's own minimum supported version (launcher/package.json build.mac.minimumSystemVersion).
+ * `wasOpenedAtLogin` is Electron's macOS-only, still-functional signal that the OS itself launched
+ * this app as a login item (regardless of any hidden flag), which this launcher's autostart always
+ * intends to mean "start hidden" -- it never registers a non-hidden autostart entry.
+ */
+function openedAtLoginOnMac(app) {
+  return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
+}
+
 function requireAutostartState(result, desired) {
   if (result.supported && result.enabled !== Boolean(desired)) {
     throw new Error(`The operating system did not ${desired ? "enable" : "disable"} launcher autostart`);
@@ -100,6 +114,7 @@ module.exports = {
   linuxAutostartMatches,
   linuxDesktopEntry,
   linuxDesktopPath,
+  openedAtLoginOnMac,
   requireAutostartState,
   setAutostart,
 };

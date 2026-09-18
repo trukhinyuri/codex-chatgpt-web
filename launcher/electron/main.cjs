@@ -19,7 +19,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
-const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { getAutostart, openedAtLoginOnMac, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -77,6 +77,7 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+const TRAY_ICON_PATH = path.join(__dirname, "..", "assets", "trayTemplate.png");
 
 const launchEnvironment = {
   CODEX_CHATGPT_WEB_HOME: process.env.CODEX_CHATGPT_WEB_HOME,
@@ -230,8 +231,11 @@ function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+  // nativeImage only decodes PNG/JPEG data, never SVG (Electron's documented image support), so an
+  // inline SVG data URL silently produces an empty image and a blank tray icon. Load the
+  // pre-rendered PNG asset instead; Electron/macOS pick up the sibling trayTemplate@2x.png
+  // automatically for Retina displays because it shares the same base filename.
+  const image = nativeImage.createFromPath(TRAY_ICON_PATH);
   image.setTemplateImage(true);
   return image;
 }
@@ -1248,7 +1252,10 @@ async function start() {
       logger,
     });
   }
-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  // On macOS, a real login-item launch never carries "--hidden" in argv (setLoginItemSettings's
+  // `args` is Windows-only); openedAtLoginOnMac reads the OS's own record of that launch instead.
+  const startHidden = (process.argv.includes("--hidden") || openedAtLoginOnMac(app))
+    && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
     logger,
