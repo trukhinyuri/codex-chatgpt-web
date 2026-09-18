@@ -22,6 +22,7 @@ Then, in the launcher:
 2. Press **Install models**, restart Codex once, and choose a **ChatGPT Web — …** model (Instant, Medium, High, Extra High or Pro, as your plan allows).
 3. For file, terminal and patch tools, open **MCP**: create a Tunnel and an API key in the OpenAI platform, press **Connect harness**, enable ChatGPT Developer Mode, add a Tunnel connector named exactly **Codex Native2** (Authentication: None, Allow all actions), then press **Verify runtime**.
 4. For long tasks, turn on **Settings → Bigger Context** and restart Codex. The Pro window grows to 336,579 tokens, with compaction at 285,000.
+5. Optional: [add the models of a local CLIProxyAPI](#models-from-cliproxyapi) (Claude, Gemini, GLM and others) to the same model list.
 
 ## Set up with an AI agent
 
@@ -85,6 +86,20 @@ sequenceDiagram
 
 Browser-only mode stops after step 3 and has no local tools. Zero Risk mode lets you paste and send each prompt yourself. Details: [architecture](docs/architecture.md) and [security model](docs/security-model.md).
 
+## Models from CLIProxyAPI
+
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) serves models from other subscriptions and API keys (Claude, Gemini, GLM and more) through one local, OpenAI-compatible endpoint. Connect a CLIProxyAPI that runs on this Mac, and its models join the Codex model list next to the OpenAI and ChatGPT Web models:
+
+```bash
+printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" cliproxy connect --api-key-stdin
+```
+
+- The key is read from standard input, checked against the proxy, and stored in `~/.codex-chatgpt-web/secrets/cliproxy-api-key` (owner-only). Add `--base-url http://127.0.0.1:PORT` if the proxy does not listen on 8317; only addresses on this Mac are accepted.
+- Codex keeps its own OpenAI provider and ChatGPT sign-in, so its features stay on. Turns of a proxy model go to CLIProxyAPI with the proxy's key; your ChatGPT credentials never reach it. A model that OpenAI also serves stays on your own Codex sign-in.
+- Compaction works for proxy models too: the bridge asks the model for the same summary Codex's own compaction would.
+- `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
+- `cliproxyapi/` in this repository holds the CLIProxyAPI source; for now you build and run the proxy yourself (`go build ./cmd/server` in `cliproxyapi/`, see its README).
+
 ## What this fork changes
 
 | Area | Upstream 5.0.8 | This fork |
@@ -97,6 +112,7 @@ Browser-only mode stops after step 3 and has no local tools. Zero Risk mode lets
 | A tool call that ChatGPT stops before it runs | The model may blame Codex auto-review or the target service | The model reports that ChatGPT stopped the call and that it never reached Codex |
 | Updates | Offers upstream release packages | Installs this repository's `main` automatically after the full test suite passes, only while Codex is idle, and restores the previous build if the new one does not start cleanly |
 | Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
+| Other models | — | [Models from a local CLIProxyAPI](#models-from-cliproxyapi) join the same Codex model list, with Codex's own sign-in and features intact |
 | AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
 
 Each fix meant for upstream lives in its own `fix/…` branch with a regression test.

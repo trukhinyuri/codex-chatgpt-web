@@ -49,6 +49,15 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import {
+  augmentCatalogWithCliProxy,
+  cliProxyRouteFor,
+  compactViaCliProxy,
+  compactionTurnViaCliProxy,
+  forwardCliProxyResponses,
+  type CliProxyConnection,
+  type CliProxyFetch,
+} from "./cliproxy";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -360,6 +369,13 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Route CLIProxyAPI models; the running server passes its home, direct callers opt in explicitly. */
+  cliProxy?: CliProxyWiring;
+}
+
+export interface CliProxyWiring {
+  home: string;
+  fetchImpl?: CliProxyFetch;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -389,6 +405,7 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
   onFailure?: (failure: ModelCatalogFailure) => void,
+  cliProxy?: CliProxyWiring,
 ): Promise<Response> {
   let upstream: Response;
   let sent = false;
@@ -412,6 +429,8 @@ export async function modelsRequest(
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
+  // CLIProxyAPI models join after the native and ChatGPT Web rows; a proxy failure never costs Codex its catalog.
+  if (cliProxy) catalog = await augmentCatalogWithCliProxy(catalog, req, cliProxy);
   const body = JSON.stringify(catalog);
   const headers = new Headers(upstream.headers);
   headers.delete("content-encoding");
@@ -464,6 +483,42 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
+/** The CLIProxyAPI connection for a proxy model, null for any other model, or an error response. */
+function cliProxyConnectionFor(model: string, wiring: CliProxyWiring | undefined): CliProxyConnection | null | Response {
+  if (!wiring) return null;
+  try {
+    return cliProxyRouteFor(model, wiring.home);
+  } catch (error) {
+    return formatErrorResponse(
+      500,
+      "server_error",
+      `The CLIProxyAPI connection is misconfigured: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function cliProxyResponse(
+  model: string,
+  raw: unknown,
+  request: Request,
+  wiring: CliProxyWiring | undefined,
+): Promise<Response | null> {
+  const proxy = cliProxyConnectionFor(model, wiring);
+  const fetchImpl = wiring?.fetchImpl;
+  if (proxy instanceof Response) return proxy;
+  if (!proxy || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const body = raw as Record<string, unknown>;
+  try {
+    const tail = Array.isArray(body.input) ? body.input.at(-1) : undefined;
+    if (tail && typeof tail === "object" && (tail as { type?: unknown }).type === "compaction_trigger") {
+      return await compactionTurnViaCliProxy(request, body, proxy, fetchImpl);
+    }
+    return await forwardCliProxyResponses(request, body, proxy, fetchImpl);
+  } catch (error) {
+    return formatErrorResponse(502, "upstream_error", `CLIProxyAPI: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export async function responseRequest(
   req: Request,
   config: AppConfig,
@@ -493,6 +548,8 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    const proxied = await cliProxyResponse(requestedModel, raw, nativeRequest, options.cliProxy);
+    if (proxied) return proxied;
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -675,7 +732,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "cliProxy"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -718,6 +775,15 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    const proxy = cliProxyConnectionFor(raw.model, options.cliProxy);
+    if (proxy instanceof Response) return proxy;
+    if (proxy) {
+      try {
+        return await compactViaCliProxy(nativeRequest, raw, proxy, options.cliProxy?.fetchImpl);
+      } catch (error) {
+        return formatErrorResponse(502, "upstream_error", `CLIProxyAPI compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -790,11 +856,17 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    adapterFactory?: ChatGptWebAdapterFactory;
+    cliProxy?: CliProxyWiring;
+  } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
+  // The service entry point wires CLIProxyAPI routing to its home; embedded servers opt in.
+  const cliProxy = dependencies.cliProxy ?? undefined;
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
@@ -1026,6 +1098,7 @@ export function startServer(
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
             value => { failure = value; },
+            cliProxy,
           );
           if (response.ok) {
             successfulModelCatalogRequests += 1;
@@ -1047,7 +1120,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, cliProxy },
           ),
           req.signal,
           process.platform,
@@ -1061,7 +1134,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, cliProxy },
           ),
           req.signal,
           process.platform,

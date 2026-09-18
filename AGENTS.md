@@ -38,6 +38,16 @@ Open **Codex Web GPT**. The human performs sign-in and pastes secrets; you drive
 4. **Tools (Full harness).** Open **MCP**. The human creates a Tunnel at <https://platform.openai.com/settings/organization/tunnels> and an API key at <https://platform.openai.com/settings/organization/api-keys> and pastes both. Press **Connect harness**. The human enables ChatGPT Developer Mode ([help article](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)) and creates a Tunnel connector named exactly `Codex Native2` with **Authentication: None** and **Allow all actions**. Press **Verify runtime** and wait for success.
 5. **Long tasks (optional).** In **Settings**, turn on **Bigger Context**, then ask the human to restart Codex.
 
+## Connect CLIProxyAPI (optional)
+
+When the human runs [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) on this Mac, add its models to Codex. Ask the human where its client API key is; never print it. Pipe it in:
+
+```bash
+printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" cliproxy connect --api-key-stdin
+```
+
+Expect `"connected": true` with the number of proxy models. Then ask the human to restart Codex and check that the model list shows the proxy's models. `cliproxy status` reports the connection; `cliproxy disconnect` turns it off. Codex keeps its OpenAI provider; do not add a separate `model_provider` for the proxy, which would switch off Codex features tied to that provider.
+
 ## Verify
 
 Run every check and report each as passed or failed.
@@ -59,6 +69,7 @@ Run every check and report each as passed or failed.
    Expect `READY`.
 4. **Mode (Computer Use).** While a test turn runs, screenshot the launcher's **Browser** view. The mode control next to the ChatGPT composer must show the mode of the chosen model, for example **High** or **Pro**. With Bigger Context, every message of a large turn uses that mode.
 5. **Tools.** In a Codex task that uses a ChatGPT Web model, ask it to run `pwd`. Expect the task folder, printed from a real Codex tool call.
+6. **CLIProxyAPI (if connected).** `codex-chatgpt-web cliproxy status` reports `"reachable": true`; `codex exec --skip-git-repo-check -m <proxy model> "Reply with exactly: READY"` answers `READY`.
 
 ## Update
 
