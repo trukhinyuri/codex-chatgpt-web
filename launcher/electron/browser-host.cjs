@@ -2277,13 +2277,26 @@ class BrowserHost {
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
     }
-    const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
+    const conversationCandidates = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
       tab.interactionMode === "automatic"
       && tab.status === "ready"
       && tab.conversationKey === conversationKey
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)
     )) : [];
+    const retainedMatches = [];
+    for (const tab of conversationCandidates) {
+      if (tab.view.webContents.isDestroyed()) {
+        // The Electron window that hosted this retained tab was closed long ago; its record must
+        // not be handed back to a later "Continue" as reusable (upstream PR #256). Evict it here,
+        // synchronously and only from this lookup, rather than through a standing `destroyed`
+        // listener: the maintainer found that pattern can fire during BrowserHost shutdown and
+        // recreate the tab descriptor right after teardown already removed it.
+        this.removeTurnTab(tab, false);
+        continue;
+      }
+      retainedMatches.push(tab);
+    }
     if (retainedMatches.length > 1) {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
     }
