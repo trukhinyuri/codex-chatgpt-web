@@ -3672,8 +3672,9 @@ test("Bigger Context stages run in the selected mode and fail closed when it can
     .toThrow("The selected ChatGPT Instant mode cannot carry a Bigger Context stage");
   expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_001, 1_000))
     .toThrow("The selected ChatGPT Pro mode cannot carry a Bigger Context stage");
-  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "max", 1_000, 1_000))
-    .toThrow("ChatGPT Pro effort is not available for this account");
+  // An account without Pro runs the staged turn at High instead of failing it (upstream #564).
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "max", 1_000, 1_000))
+    .toMatchObject({ effort: "high", degradedFrom: "max" });
   expect(() => resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
     { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },

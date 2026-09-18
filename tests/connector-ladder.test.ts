@@ -10,6 +10,7 @@ import {
   ChatGptConnectorCatalogStaleError,
   ChatGptRateLimitCooldown,
   chatGptConnectorMentionKind,
+  chatGptConnectorRegistryFailure,
 } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
@@ -31,11 +32,17 @@ const sent = new Error("fixture reached send");
 
 type TunnelAnswer = Partial<LauncherConnectorTunnelStatus> | undefined;
 
-function tunnel(readyz: boolean | null, contact: "observed" | "not-observed" | "unknown", restart = "not-requested"): TunnelAnswer {
+function tunnel(
+  readyz: boolean | null,
+  contact: "observed" | "not-observed" | "unknown",
+  restart = "not-requested",
+  registry: LauncherConnectorTunnelStatus["registry"] = { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "match" },
+): TunnelAnswer {
   return {
     tunnelReady: readyz,
     readyz,
     contact: { status: contact, at: contact === "observed" ? "2026-09-18T08:27:03.000Z" : null },
+    registry,
     restart,
   };
 }
@@ -315,6 +322,7 @@ test("the helper asks the launcher about the tunnel with its control token and r
     tunnelReady: true,
     readyz: true,
     contact: { status: "observed", at: "2026-09-18T08:27:03.000Z" },
+    registry: { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "match", extra: "ignored" },
     restart: "not-requested",
     extra: "ignored",
   }));
@@ -328,6 +336,7 @@ test("the helper asks the launcher about the tunnel with its control token and r
       tunnelReady: true,
       readyz: true,
       contact: { status: "observed", at: "2026-09-18T08:27:03.000Z" },
+      registry: { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "match" },
       restart: "not-requested",
     });
     expect(server.received[0]).toMatchObject({
@@ -338,7 +347,12 @@ test("the helper asks the launcher about the tunnel with its control token and r
   } finally {
     await server.close();
   }
-  const odd = await controlServer(() => ({ readyz: "yes", contact: { status: "maybe", at: "never" }, restart: "<b>" }));
+  const odd = await controlServer(() => ({
+    readyz: "yes",
+    contact: { status: "maybe", at: "never" },
+    registry: { status: "maybe", sharing: "sometimes", tunnelName: 7, workspaceMatch: "perhaps" },
+    restart: "<b>",
+  }));
   try {
     await expect(requestLauncherConnectorTunnel(descriptorFile(odd.endpoint), {
       traceId: "abc123def456",
@@ -347,6 +361,7 @@ test("the helper asks the launcher about the tunnel with its control token and r
       tunnelReady: null,
       readyz: null,
       contact: { status: "unknown", at: null },
+      registry: { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" },
       restart: "unknown",
     });
   } finally {
@@ -392,4 +407,78 @@ test("a turn that ends on a connector failure tells the launcher its structured 
   } finally {
     await server.close();
   }
+});
+
+// After the owner changed their ChatGPT password on 18.09.2026 the tunnel stayed healthy locally,
+// but it had lost its workspace: ChatGPT's New Plugin -> Tunnel said "No tunnels yet", the connector
+// was gone from the account, and every turn burned the full catalog ladder before failing. OpenAI's
+// own record of the tunnel settles both cases before a single wait.
+test("a tunnel OpenAI no longer has fails at once and names creating one", async () => {
+  const fixture = ladderFixture({
+    listedOnMention: 0,
+    answer: () => tunnel(true, "observed", "not-requested", { status: "missing", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" }),
+  });
+  const error = await fixture.run().catch((caught: Error & { code?: string }) => caught);
+  expect(error).toMatchObject({ status: 424, code: "connector_not_found:tunnel_missing", retryable: false });
+  expect(error.message).toContain("platform.openai.com/settings/organization/tunnels");
+  expect(fixture.calls).toEqual(["prepare", "mention:1", "tunnel"]);
+  expect(fixture.calls).not.toContain("send");
+});
+
+test("a tunnel shared with no workspace fails at once and names sharing it", async () => {
+  const fixture = ladderFixture({
+    listedOnMention: 0,
+    answer: () => tunnel(true, "unknown", "not-requested", { status: "ok", sharing: "not-shared", tunnelName: "codex-web", workspaceMatch: "unknown" }),
+  });
+  const error = await fixture.run().catch((caught: Error & { code?: string }) => caught);
+  expect(error).toMatchObject({ status: 424, code: "connector_not_found:tunnel_not_shared", retryable: false });
+  expect(error.message).toContain('share tunnel "codex-web"');
+  expect(error.message).toContain("this ChatGPT workspace");
+  expect(fixture.calls).toEqual(["prepare", "mention:1", "tunnel"]);
+});
+
+test("an unproven or unauthorized registry answer changes nothing about the ladder", async () => {
+  for (const registry of [
+    { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" },
+    { status: "unauthorized", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" },
+    { status: "ok", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" },
+    // A workspace this computer could not read never ends a turn on its own.
+    { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "unknown" },
+  ] as const) {
+    const fixture = ladderFixture({
+      listedOnMention: 0,
+      answer: () => tunnel(true, "observed", "not-requested", { ...registry }),
+    });
+    const error = await fixture.run().catch((caught: Error & { code?: string }) => caught);
+    expect(error).toMatchObject({ code: "connector_not_found:not_listed" });
+    expect(fixture.calls.filter(call => call.startsWith("sleep:"))).toEqual(
+      CHATGPT_CONNECTOR_CATALOG_WAITS_MS.map(wait => `sleep:${wait}`),
+    );
+  }
+});
+
+test("a registry verdict a turn cannot understand never ends the turn", () => {
+  expect(chatGptConnectorRegistryFailure("Codex Native2", undefined)).toBeUndefined();
+  expect(chatGptConnectorRegistryFailure("Codex Native2", { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "match" }))
+    .toBeUndefined();
+  expect(chatGptConnectorRegistryFailure("Codex Native2", { status: "unproven", sharing: "not-shared", tunnelName: null, workspaceMatch: "unknown" }))
+    .toBeUndefined();
+});
+
+// 19.09.2026: two ChatGPT accounts were signed in to the embedded browser, the connector and the
+// tunnel belonged to the one that was not active, and every turn kept going to the active account
+// where no connector existed. ChatGPT Web switching accounts is supported (upstream #563), so the
+// mismatch has to be named, not waited out.
+test("a ChatGPT workspace the tunnel is not shared with fails at once and names the account to switch", async () => {
+  const fixture = ladderFixture({
+    listedOnMention: 0,
+    answer: () => tunnel(true, "unknown", "not-requested",
+      { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "mismatch" }),
+  });
+  const error = await fixture.run().catch((caught: Error & { code?: string }) => caught);
+  expect(error).toMatchObject({ status: 424, code: "connector_not_found:wrong_workspace", retryable: false });
+  expect(error.message).toContain("switch ChatGPT back to the workspace");
+  expect(error.message).toContain("platform.openai.com/settings/organization/tunnels");
+  expect(fixture.calls).toEqual(["prepare", "mention:1", "tunnel"]);
+  expect(fixture.calls).not.toContain("send");
 });

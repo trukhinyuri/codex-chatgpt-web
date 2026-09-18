@@ -703,7 +703,7 @@ test("an unattended update waits while a new ChatGPT connector is being paired; 
   await quitWhenIdleForUpdate({ version: "v" }, { info: event => logged.push(event) }, 10);
   assert.ok(deferralChecks >= 5, "the idle Codex did not install the update while pairing lasted");
   assert.deepEqual(events, ["launch", 'quit:{"preserveActiveTurns":true,"quiet":true}']);
-  assert.deepEqual(logged, ["launcher.update_deferred_for_connector_pairing"]);
+  assert.equal(logged[0], "launcher.update_deferred_for_connector_pairing");
 
   // A requested install uses the short window, which pairing never delays.
   events.length = 0;

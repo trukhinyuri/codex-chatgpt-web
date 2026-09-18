@@ -12,6 +12,12 @@ import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 import { getTunnelServiceStatus } from "./tunnel-service";
 import {
+  fetchTunnelRegistryRecord,
+  OPENAI_TUNNELS_SETTINGS_URL,
+  tunnelWorkspaceSharing,
+  type TunnelRegistryResult,
+} from "./tunnel-registry";
+import {
   inspectLauncherBrowserHost,
   inspectLauncherBrowserHostLiveness,
   readLauncherBrowserHostDescriptor,
@@ -288,16 +294,180 @@ export function tunnelContactStatus(record: TunnelContactRecord | undefined, now
 }
 
 /**
- * The connector check from local evidence: ChatGPT reaching this tunnel proves a connector is
- * attached to it. Without a readable reading the check stays unproven, as before.
+ * What the launcher's background connector monitor last saw in ChatGPT's own connector menu. It is
+ * written next to the contact record so that `doctor`, which runs in a separate process, reports
+ * the same live evidence without opening ChatGPT or sending anything.
+ */
+export interface ConnectorReadinessRecord {
+  version: 1;
+  tunnel: string;
+  /** True once ChatGPT listed the connector, false once a check saw the menu without it. */
+  connectorListed: boolean | null;
+  lastCheckedAt: string | null;
+  verifiedAt: string | null;
+  lastFailureKind: string | null;
+  /** Whether the ChatGPT workspace in use is one the tunnel is shared with. */
+  workspaceMatch?: "match" | "mismatch" | "unknown";
+}
+
+export function readConnectorReadinessRecord(
+  config: AppConfig,
+  path = join(getConfigDir(), "runtime", "connector-readiness.json"),
+): ConnectorReadinessRecord | undefined {
+  if (config.mode !== "full" || !config.tunnel) return undefined;
+  try {
+    const record = JSON.parse(readFileSync(path, "utf8")) as Partial<ConnectorReadinessRecord>;
+    if (record?.version !== 1 || record.tunnel !== tunnelFingerprint(config.tunnel.tunnelId)) return undefined;
+    if (record.connectorListed !== true && record.connectorListed !== false && record.connectorListed !== null) {
+      return undefined;
+    }
+    return record as ConnectorReadinessRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The one action a person takes when ChatGPT does not list the connector (R2.3). */
+export function connectorNextStep(config: AppConfig, registry: TunnelRegistryResult | undefined): string {
+  const name = JSON.stringify(config.appName);
+  const tunnelName = registry?.status === "ok" ? registry.record.name : null;
+  if (registry?.status === "ok" && tunnelWorkspaceSharing(registry.record).status === "not-shared") {
+    return `Share tunnel ${JSON.stringify(tunnelName ?? "codex-web")} with this ChatGPT workspace at ${OPENAI_TUNNELS_SETTINGS_URL}.`;
+  }
+  if (registry?.status === "missing") {
+    return `Create a tunnel at ${OPENAI_TUNNELS_SETTINGS_URL} and press Connect harness in Codex Superpower.`;
+  }
+  return `Create connector ${name} in ChatGPT (Developer Mode on, Tunnel ${JSON.stringify(tunnelName ?? "codex-web")}, Authentication: None, Allow all actions).`;
+}
+
+/**
+ * Does the tunnel still exist, and does this computer's runtime key still open it? Nothing local
+ * can answer that: the binary, the key file and /readyz all stay healthy after the tunnel is
+ * deleted or the key is revoked in the OpenAI account.
+ */
+export function tunnelRegistryDoctorCheck(registry: TunnelRegistryResult): DoctorCheck {
+  if (registry.status === "ok") {
+    const name = registry.record.name ? ` ${JSON.stringify(registry.record.name)}` : "";
+    return {
+      id: "tunnel-registry",
+      status: "ok",
+      message: `Tunnel${name} exists in OpenAI and this computer's runtime key opens it`,
+    };
+  }
+  if (registry.status === "missing") {
+    return {
+      id: "tunnel-registry",
+      status: "error",
+      message: "The MCP tunnel this computer uses no longer exists in OpenAI",
+      detail: `Create a tunnel at ${OPENAI_TUNNELS_SETTINGS_URL} and press Connect harness in Codex Superpower.`,
+    };
+  }
+  if (registry.status === "unauthorized") {
+    return {
+      id: "tunnel-registry",
+      status: "error",
+      message: "OpenAI no longer accepts this computer's tunnel runtime key",
+      detail: "Press Connect harness in Codex Superpower and paste a current tunnel API key.",
+    };
+  }
+  return {
+    id: "tunnel-registry",
+    status: "warning",
+    unprovenLocally: true,
+    message: "Whether the MCP tunnel still exists in OpenAI could not be checked",
+    detail: registry.detail,
+  };
+}
+
+/**
+ * Is the tunnel reachable from the ChatGPT workspace the person is signed in to? A tunnel shared
+ * with no workspace is the "No tunnels yet" dialog in ChatGPT's New Plugin → Tunnel, and the
+ * connector silently disappears with it. This computer cannot read the id of the signed-in ChatGPT
+ * workspace, so sharing is proven the other way round: ChatGPT reaching this tunnel proves it.
+ */
+export function tunnelWorkspaceDoctorCheck(
+  config: AppConfig,
+  registry: TunnelRegistryResult,
+  contact: TunnelContactStatus,
+  readiness?: ConnectorReadinessRecord,
+): DoctorCheck | undefined {
+  if (registry.status !== "ok") return undefined;
+  const name = JSON.stringify(registry.record.name ?? "codex-web");
+  const sharing = tunnelWorkspaceSharing(registry.record);
+  // Two ChatGPT accounts can be signed in at once and ChatGPT Web switches between them (upstream
+  // feature request #563). When the launcher read the workspace in use, it decides this check.
+  if (readiness?.workspaceMatch === "mismatch") {
+    return {
+      id: "tunnel-workspace",
+      status: "error",
+      message: `ChatGPT is signed in to a workspace that tunnel ${name} is not shared with`,
+      detail: `Switch ChatGPT back to the workspace this computer's tunnel belongs to, or share tunnel ${name} with the workspace in use at ${OPENAI_TUNNELS_SETTINGS_URL}.`,
+    };
+  }
+  if (readiness?.workspaceMatch === "match") {
+    return {
+      id: "tunnel-workspace",
+      status: "ok",
+      message: `ChatGPT is signed in to a workspace tunnel ${name} is shared with`,
+    };
+  }
+  if (sharing.status === "not-shared") {
+    return {
+      id: "tunnel-workspace",
+      status: "error",
+      message: `Tunnel ${name} is shared with no workspace, so no ChatGPT workspace can see it`,
+      detail: `Share tunnel ${name} with this ChatGPT workspace at ${OPENAI_TUNNELS_SETTINGS_URL}.`,
+    };
+  }
+  if (contact.status === "observed") {
+    return {
+      id: "tunnel-workspace",
+      status: "ok",
+      message: `ChatGPT reached tunnel ${name} at ${contact.at}, so it is shared with the workspace in use`,
+    };
+  }
+  const shared = sharing.status === "shared"
+    ? `Tunnel ${name} is shared with ${sharing.workspaces} workspace(s)`
+    : `Tunnel ${name} names no workspace of its own`;
+  return {
+    id: "tunnel-workspace",
+    status: "warning",
+    unprovenLocally: true,
+    message: `${shared}; this computer cannot tell whether one of them is the ChatGPT workspace in use`,
+    detail: `If ChatGPT's New Plugin → Tunnel dialog says "No tunnels yet", share tunnel ${name} with this ChatGPT workspace at ${OPENAI_TUNNELS_SETTINGS_URL}.`,
+  };
+}
+
+/**
+ * The connector check. The launcher's background monitor reads ChatGPT's own connector menu, so a
+ * missing connector is a named failure with one action instead of "local checks cannot prove".
+ * Without such a reading the check falls back to the tunnel's contact counters, as before.
  */
 export function connectorDoctorCheck(
   config: AppConfig,
   record: TunnelContactRecord | undefined,
   now = Date.now(),
+  readiness?: ConnectorReadinessRecord,
+  registry?: TunnelRegistryResult,
 ): DoctorCheck {
   const name = JSON.stringify(config.appName);
   const contact = tunnelContactStatus(record, now);
+  if (readiness?.connectorListed === true) {
+    return {
+      id: "connector",
+      status: "ok",
+      message: `ChatGPT lists connector ${name}`,
+      detail: `The launcher saw it in ChatGPT's connector menu${readiness.verifiedAt ? ` at ${readiness.verifiedAt}` : ""}.`,
+    };
+  }
+  if (readiness?.connectorListed === false) {
+    return {
+      id: "connector",
+      status: "error",
+      message: `ChatGPT does not list connector ${name}${readiness.lastCheckedAt ? ` (checked at ${readiness.lastCheckedAt})` : ""}`,
+      detail: connectorNextStep(config, registry),
+    };
+  }
   if (contact.status === "observed") {
     return {
       id: "connector",
@@ -312,7 +482,7 @@ export function connectorDoctorCheck(
       status: "warning",
       unprovenLocally: true,
       message: `ChatGPT has not connected to this tunnel since it started${contact.at ? ` at ${contact.at}` : ""}`,
-      detail: `If connector ${name} does not exist yet, create it in ChatGPT for this tunnel (Developer Mode on, Authentication: None); Codex Web GPT detects it by itself.`,
+      detail: `If connector ${name} does not exist yet, create it in ChatGPT for this tunnel (Developer Mode on, Authentication: None); Codex Superpower detects it by itself.`,
     };
   }
   return {
@@ -446,7 +616,21 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(runtime.ok
       ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }
       : { id: "tunnel-runtime", status: "error", message: "Tunnel runtime is not ready", detail: runtime.detail });
-    checks.push(connectorDoctorCheck(config, readTunnelContactRecord(config)));
+    // Live proof from OpenAI, not from this computer: the tunnel still exists, its runtime key
+    // still opens it, and it is shared with a workspace at all.
+    const registry = await fetchTunnelRegistryRecord(config);
+    checks.push(tunnelRegistryDoctorCheck(registry));
+    const contactRecord = readTunnelContactRecord(config);
+    const readiness = readConnectorReadinessRecord(config);
+    const workspace = tunnelWorkspaceDoctorCheck(config, registry, tunnelContactStatus(contactRecord), readiness);
+    if (workspace) checks.push(workspace);
+    checks.push(connectorDoctorCheck(
+      config,
+      contactRecord,
+      Date.now(),
+      readiness,
+      registry,
+    ));
   } else {
     checks.push({ id: "tools", status: "warning", message: "Browser-only mode intentionally has no local tools or MCP tunnel" });
   }

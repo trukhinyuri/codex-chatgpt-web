@@ -430,7 +430,11 @@ test("the launcher re-checks the connector by itself after a connector failure a
 
   // The rest of the wiring: every place that should start, feed or consult the monitor does.
   assert.match(electronMain, /connectorTunnel: \(request\) => \{[\s\S]*?connectorTunnelService\(request\)/);
-  assert.match(electronMain, /onTurnEnded: \(outcome\) => handleBrowserTurnEnded\(outcome, stateStore\)/);
+  assert.match(electronMain, /onTurnEnded: \(outcome\) => \{[\s\S]*?handleBrowserTurnEnded\(outcome, stateStore\);/);
+  // doctor runs in its own process and must not open ChatGPT: the launcher leaves it the reading.
+  assert.match(electronMain, /onVerified: \(snapshot\) => \{\n\s*persistConnectorReadiness\(snapshot\);/);
+  assert.match(electronMain, /onChange: \(snapshot\) => \{\n\s*persistConnectorReadiness\(snapshot\);/);
+  assert.match(electronMain, /runtimeSupervisor\.writeConnectorReadiness\(config, snapshot\)/);
   assert.match(electronMain, /onTunnelStarted: \(\) => connectorMonitor\?\.noteTunnelRestarted\(\)/);
   const setupMcp = electronMain.slice(electronMain.indexOf('handle("launcher:setup-mcp"'), electronMain.indexOf('handle("launcher:set-mcp-step"'));
   assert.match(setupMcp, /connectorVerifiedAt: null[\s\S]*?connectorMonitor\?\.start\("setup-mcp"\)/);

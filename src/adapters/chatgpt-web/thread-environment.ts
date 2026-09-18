@@ -12,6 +12,7 @@ import {
   extractChatGptRootThreadMetadata,
   hasCurrentChatGptEnvironmentContext,
   hasRawChatGptEnvironmentContext,
+  pathlessChatGptEnvironmentDelta,
   unattributedChatGptEnvironmentMessages,
   isChatGptCompactionContinuation,
   MissingTrustedCodexEnvironmentError,
@@ -154,12 +155,35 @@ export class ChatGptThreadEnvironmentStore {
       return environment;
     } catch (error) {
       if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
+      const threadId = identity.threadId;
       const hasCurrentContext = hasCurrentChatGptEnvironmentContext(parsed);
       const lineage = extractChatGptThreadSpawnLineage(parsed);
       const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);
       const historicalMessages = hasCurrentContext && !currentCompaction && lineage
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
-      if (hasCurrentContext && !currentCompaction && !historicalMessages) throw error;
+      // A current delta that names no filesystem path at all cannot move, widen or lower authority,
+      // so it is answered with the authority this thread already holds. Any delta that does name a
+      // path, including a malformed or contradictory one, still fails closed on the paths below.
+      // Ported from upstream codex-chatgpt-web PR #568.
+      const authorityForPathlessDelta = (): ChatGptTurnEnvironment | undefined => {
+        const delta = pathlessChatGptEnvironmentDelta(parsed);
+        if (!delta) return undefined;
+        const cached = this.get(threadId);
+        if (!cached) return undefined;
+        if (delta.sandboxType && delta.sandboxType !== cached.sandboxPolicy.type) return undefined;
+        return {
+          cwd: cached.cwd,
+          roots: cached.roots,
+          writableRoots: cached.writableRoots,
+          sandboxPolicy: cached.sandboxPolicy,
+          tools: parsed.context.tools ?? [],
+        };
+      };
+      if (hasCurrentContext && !currentCompaction && !historicalMessages) {
+        const reused = authorityForPathlessDelta();
+        if (reused) return reused;
+        throw error;
+      }
       const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : undefined;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
@@ -190,7 +214,13 @@ export class ChatGptThreadEnvironmentStore {
       // the same thread's already-trusted authority still applies to its later turns. History is
       // never itself turned into authority, and it never unlocks cross-thread inheritance.
       const hasRawContext = hasRawChatGptEnvironmentContext(parsed);
-      if (hasRawContext && hasCurrentContext) throw error;
+      if (hasRawContext && hasCurrentContext) {
+        // An envelope that does name a path, even a malformed one, still fails closed: only a
+        // path-less delta may be answered from the thread's own authority.
+        const reused = authorityForPathlessDelta();
+        if (reused) return reused;
+        throw error;
+      }
       const sameThread = this.get(identity.threadId);
       if (sameThread) return {
         cwd: sameThread.cwd,

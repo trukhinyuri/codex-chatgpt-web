@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { clipboard, session, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -26,6 +26,22 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
+/** ChatGPT's own selector for the workspace in use; its value is a workspace id, not a credential. */
+const CHATGPT_WORKSPACE_COOKIE = "_account";
+const CHATGPT_WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The workspace id out of ChatGPT's own workspace cookie. Only a value shaped like a workspace id
+ * is accepted, so a cookie ChatGPT repurposes can never be mistaken for one and turn into a claim.
+ */
+function chatGptWorkspaceIdFromCookies(cookies) {
+  if (!Array.isArray(cookies)) return null;
+  for (const cookie of cookies) {
+    const value = cookie?.value;
+    if (typeof value === "string" && CHATGPT_WORKSPACE_ID.test(value)) return value;
+  }
+  return null;
+}
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
@@ -2907,6 +2923,30 @@ class BrowserHost {
   }
 
   /**
+   * Which ChatGPT workspace the embedded browser is signed in to right now.
+   *
+   * ChatGPT keeps the chosen workspace in its own `_account` cookie, whose value is the workspace's
+   * id — the same kind of id a tunnel names in `workspace_ids`. It is a selector, not a credential:
+   * only its value is read, it is never logged, and callers compare it and keep a fingerprint.
+   * Two accounts signed in at once are normal (OpenAI supports switching in ChatGPT Web, upstream
+   * feature request #563), and on 19.09.2026 the connector and the tunnel belonged to the account
+   * that was not the active one while every turn kept going to the active one.
+   *
+   * Returns null when the cookie is absent or is not a workspace id; nothing is then claimed.
+   */
+  async activeChatGptWorkspaceId() {
+    try {
+      const cookies = await session.fromPartition(this.partition).cookies.get({
+        url: CHATGPT_ORIGIN,
+        name: CHATGPT_WORKSPACE_COOKIE,
+      });
+      return chatGptWorkspaceIdFromCookies(cookies);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Whether the launcher may run a background check now: no Codex turn, sign-in or other browser
    * operation, and the person is not looking at the embedded browser, whose page a check reloads.
    */
@@ -3153,6 +3193,8 @@ module.exports = {
   BrowserHost,
   BrowserTurnCancelledError,
   CHATGPT_VIEWPORT_CSS,
+  CHATGPT_WORKSPACE_COOKIE,
+  chatGptWorkspaceIdFromCookies,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isChatGptOriginUrl,

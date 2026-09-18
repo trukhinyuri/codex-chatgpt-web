@@ -739,10 +739,25 @@ export interface LauncherConnectorTunnelRequest {
   waitMs?: number;
 }
 
+/** What OpenAI's tunnel registry answered about the configured tunnel, without any credential. */
+export type LauncherTunnelRegistryStatus = "ok" | "missing" | "unauthorized" | "unproven";
+export type LauncherTunnelRegistrySharing = "shared" | "not-shared" | "unknown";
+/** Whether the ChatGPT workspace in use is one the tunnel is shared with. */
+export type LauncherChatGptWorkspaceMatch = "match" | "mismatch" | "unknown";
+
+export interface LauncherConnectorTunnelRegistry {
+  status: LauncherTunnelRegistryStatus;
+  sharing: LauncherTunnelRegistrySharing;
+  /** The tunnel's name in OpenAI, so a message can name the row the person has to share. */
+  tunnelName: string | null;
+  workspaceMatch: LauncherChatGptWorkspaceMatch;
+}
+
 export interface LauncherConnectorTunnelStatus {
   tunnelReady: boolean | null;
   readyz: boolean | null;
   contact: { status: LauncherTunnelContactStatus; at: string | null };
+  registry: LauncherConnectorTunnelRegistry;
   restart: string;
 }
 
@@ -753,10 +768,27 @@ function parseLauncherConnectorTunnelStatus(body: Record<string, unknown>): Laun
   const contact = body.contact && typeof body.contact === "object" ? body.contact as Record<string, unknown> : {};
   const status = contact.status === "observed" || contact.status === "not-observed" ? contact.status : "unknown";
   const at = typeof contact.at === "string" && Number.isFinite(Date.parse(contact.at)) ? contact.at : null;
+  const registry = body.registry && typeof body.registry === "object"
+    ? body.registry as Record<string, unknown>
+    : {};
+  const registryStatus: LauncherTunnelRegistryStatus =
+    registry.status === "ok" || registry.status === "missing" || registry.status === "unauthorized"
+      ? registry.status
+      : "unproven";
+  const sharing: LauncherTunnelRegistrySharing =
+    registry.sharing === "shared" || registry.sharing === "not-shared" ? registry.sharing : "unknown";
   return {
     tunnelReady: optionalBoolean(body.tunnelReady),
     readyz: optionalBoolean(body.readyz),
     contact: { status, at },
+    registry: {
+      status: registryStatus,
+      sharing,
+      tunnelName: typeof registry.tunnelName === "string" && registry.tunnelName ? registry.tunnelName : null,
+      workspaceMatch: registry.workspaceMatch === "match" || registry.workspaceMatch === "mismatch"
+        ? registry.workspaceMatch
+        : "unknown",
+    },
     restart: typeof body.restart === "string" && /^[a-z-]{1,40}$/.test(body.restart) ? body.restart : "unknown",
   };
 }

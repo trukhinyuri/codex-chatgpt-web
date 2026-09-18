@@ -43,6 +43,25 @@ const TUNNEL_CONTACT_OBSERVATION_FRESH_MS = 60_000;
  */
 const TUNNEL_CONTACT_METRICS_VERIFIED_VERSIONS = new Set(["0.0.12"]);
 const TUNNEL_CONTACT_METHODS = new Set(["initialize", "tools/list", "tools/call"]);
+/**
+ * OpenAI's own record of the tunnel. Local evidence — the binary, the key file, the process, its
+ * /readyz — stays green after the tunnel is deleted or unshared in the account, which is exactly
+ * what the 18.09.2026 incident looked like from this computer. The runtime key is read from its
+ * file for the request and never kept, logged or passed on (R7.2).
+ */
+const OPENAI_TUNNEL_REGISTRY_URL = "https://api.openai.com/v1/tunnels";
+const TUNNEL_REGISTRY_TIMEOUT_MS = 10_000;
+/** A registry answer is reused for this long; the connector ladder asks once per rung. */
+const TUNNEL_REGISTRY_CACHE_MS = 60_000;
+const TUNNEL_REGISTRY_UNPROVEN = Object.freeze({ status: "unproven", sharing: "unknown", tunnelName: null, workspaceIds: Object.freeze([]) });
+
+/** A tunnel shared with no workspace cannot appear in any ChatGPT workspace. */
+function tunnelRegistrySharing(body) {
+  const list = value => (Array.isArray(value) ? value.filter(entry => typeof entry === "string" && entry) : []);
+  if (list(body?.workspace_ids).length > 0) return "shared";
+  if (list(body?.organization_ids).length > 0) return "not-shared";
+  return "unknown";
+}
 
 function parsePrometheusLabels(text) {
   const labels = {};
@@ -487,6 +506,8 @@ class RuntimeSupervisor {
     this.preservedTunnel = null;
     this.lastConnectorTunnelRecoveryAt = 0;
     this.contactStatePath = path.join(coreHome, "runtime", "tunnel-contact.json");
+    this.connectorReadinessPath = path.join(coreHome, "runtime", "connector-readiness.json");
+    this.tunnelRegistrySample = null;
     this.contactSample = null;
   }
 
@@ -1011,6 +1032,98 @@ class RuntimeSupervisor {
       this.logger.info("runtime.tunnel_chatgpt_contact_observed", { contacts: probe.contacts });
     }
     return tunnelContactStatus(record, now.getTime());
+  }
+
+  /**
+   * Ask OpenAI whether the configured tunnel still exists, whether this computer's runtime key
+   * still opens it, and whether it reaches a workspace at all. Every outcome is a value: a turn's
+   * pre-flight and the connector checklist must keep working without network.
+   */
+  async probeTunnelRegistry(config, { now = Date.now(), fetchImpl = fetch } = {}) {
+    if (config?.mode !== "full" || !config.tunnel) return TUNNEL_REGISTRY_UNPROVEN;
+    const cached = this.tunnelRegistrySample;
+    if (cached && cached.tunnelId === config.tunnel.tunnelId && now - cached.at < TUNNEL_REGISTRY_CACHE_MS) {
+      return cached.verdict;
+    }
+    let key = "";
+    try {
+      key = fs.readFileSync(config.tunnel.runtimeKeyFile, "utf8").trim();
+    } catch {
+      return TUNNEL_REGISTRY_UNPROVEN;
+    }
+    if (!key) return TUNNEL_REGISTRY_UNPROVEN;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TUNNEL_REGISTRY_TIMEOUT_MS);
+    let verdict = TUNNEL_REGISTRY_UNPROVEN;
+    try {
+      const response = await fetchImpl(
+        `${OPENAI_TUNNEL_REGISTRY_URL}/${encodeURIComponent(config.tunnel.tunnelId)}`,
+        { method: "GET", headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: controller.signal },
+      );
+      if (response.status === 404) {
+        verdict = { status: "missing", sharing: "unknown", tunnelName: null, workspaceIds: [] };
+      } else if (response.status === 401 || response.status === 403) {
+        verdict = { status: "unauthorized", sharing: "unknown", tunnelName: null, workspaceIds: [] };
+      } else if (response.ok) {
+        const body = await response.json();
+        const id = body && typeof body === "object" ? body.id : undefined;
+        if (typeof id === "string" && id && id !== config.tunnel.tunnelId) {
+          verdict = TUNNEL_REGISTRY_UNPROVEN;
+        } else {
+          verdict = {
+            status: "ok",
+            sharing: tunnelRegistrySharing(body),
+            tunnelName: typeof body?.name === "string" && body.name ? body.name : null,
+            // Kept in this process only, to compare with the workspace ChatGPT is signed in to.
+            workspaceIds: Array.isArray(body?.workspace_ids)
+              ? body.workspace_ids.filter(entry => typeof entry === "string" && entry)
+              : [],
+          };
+        }
+      }
+    } catch {
+      // A fetch failure's message can carry the request; it is never logged or passed on.
+      verdict = TUNNEL_REGISTRY_UNPROVEN;
+    } finally {
+      clearTimeout(timer);
+      key = "";
+    }
+    this.tunnelRegistrySample = { tunnelId: config.tunnel.tunnelId, at: now, verdict };
+    if (verdict.status !== "ok") {
+      this.logger.warn("runtime.tunnel_registry_unhealthy", { status: verdict.status });
+    } else if (verdict.sharing === "not-shared") {
+      this.logger.warn("runtime.tunnel_registry_not_shared", {});
+    }
+    return verdict;
+  }
+
+  /**
+   * Keep what the background monitor last saw in ChatGPT's connector menu where `doctor` can read
+   * it. `doctor` runs in its own process and must not open ChatGPT itself, so without this record
+   * it could only say that local checks prove nothing. Times and one failure kind only; no titles,
+   * no account data.
+   */
+  writeConnectorReadiness(config, snapshot) {
+    if (config?.mode !== "full" || !config.tunnel) return null;
+    const iso = value => (typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null);
+    const record = {
+      version: 1,
+      tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+      connectorListed: snapshot?.connectorListed === true ? true
+        : snapshot?.connectorListed === false ? false : null,
+      lastCheckedAt: iso(snapshot?.lastCheckedAt),
+      verifiedAt: iso(snapshot?.verifiedAt),
+      lastFailureKind: typeof snapshot?.lastFailureKind === "string" ? snapshot.lastFailureKind : null,
+      workspaceMatch: snapshot?.workspaceMatch === "match" || snapshot?.workspaceMatch === "mismatch"
+        ? snapshot.workspaceMatch
+        : "unknown",
+    };
+    try {
+      writePrivateFileAtomic(this.connectorReadinessPath, `${JSON.stringify(record, null, 2)}\n`);
+    } catch (error) {
+      this.logger.warn("runtime.connector_readiness_write_failed", { message: errorMessage(error) });
+    }
+    return record;
   }
 
   /** Wait for the bridge's /healthz before tunnel-client (and its codex app-server) asks it for models. */
@@ -2449,6 +2562,9 @@ class RuntimeSupervisor {
 
 module.exports = {
   CONNECTOR_TUNNEL_RECOVERY_INTERVAL_MS,
+  TUNNEL_REGISTRY_CACHE_MS,
+  TUNNEL_REGISTRY_TIMEOUT_MS,
+  tunnelRegistrySharing,
   MAX_RESTARTS_PER_WINDOW,
   RESTART_WINDOW_MS,
   TUNNEL_CONTACT_OBSERVATION_FRESH_MS,

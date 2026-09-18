@@ -19,7 +19,15 @@ Every branch named here is on GitHub. To continue one without earlier conversati
    - send without the 15 s limit, `fork/rel-send` and its review fixes `fork/rel-send-r1`;
    - diagnostics and last-good catalog, `fork/rel-diag-catalog`;
    - admission gate and heavy-phase lock, `fork/rel-admission-gate`;
-   - connector readiness, `fork/rel-connector`.
+   - connector readiness, `fork/rel-connector`;
+   - live checks of the tunnel, the ChatGPT workspace and the connector, `fork/doctor-live-checks`
+     (builds on `fork/rel-connector`). `doctor` and a turn's pre-flight ask OpenAI whether the tunnel
+     still exists and reaches a workspace (`GET /v1/tunnels/{id}` with the runtime key), compare the
+     ChatGPT workspace the embedded browser is signed in to with the tunnel's own workspaces, and read
+     what the launcher last saw in ChatGPT's connector menu. Each failure names one action instead of
+     "local checks cannot prove". It also ports upstream #568 (a mid-turn environment delta that omits
+     `cwd` is answered from the thread's own authority) and degrades an effort level the account does
+     not have to High instead of failing every turn (upstream #564).
 
    Branches without commits yet must be implemented from the work items. The integration branch is `fork/reliability-wave1`.
 2. **Visible rename to Codex Superpower** with authors and About panel. Branch `fork/rename-visible` holds the first version, which the legacy-updater contract test shows is compatible with the updater at `86f2d311`. Review fixes merged with R11 go to `fork/rename-visible-r2`. [Analysis](plans/2026-09-18-rename.md).
@@ -34,7 +42,8 @@ Every branch named here is on GitHub. To continue one without earlier conversati
 - **Anonymous problem reports.** Today a report is opened through the user's own GitHub CLI login, so the public issue shows the user's GitHub account, and users without `gh` cannot report at all. Send reports through a small relay that files them under the project's own identity, with the same closed allowlists, rate limits and deduplication; ask for consent once at setup. Until the relay exists, the consent dialog says plainly that the issue appears under the user's GitHub account.
 - **Autonomous maintainer runs.** The work queue fills itself (problem reports, the daily watch), but an agent works through it only when someone says "continue". Run the [agent playbook](agent-playbook.md) on a schedule in CI with a model API key stored as a repository secret: it fixes, opens pull requests, and merges only what passes every check, released through staged rollout with the kill switch. Default until a key is provided: off; maintainers' own agents run the playbook.
 - **Staged rollout and a kill switch** (practice gap): every installation now takes a new `main` within about an hour, so one bad release reaches everyone at once. Give each installation a stable random bucket, widen the eligible share with the age of the commit, halt a release through a file in the repository, and halt automatically when problem reports for the new commit rise.
-- **Several ChatGPT accounts** (requirement R9): a browser profile and connector per account, an account pool in the bridge that schedules turns by load and per-account limits, account-sticky continuations, and setup of additional accounts from the launcher. Design in progress (`plans/multi-account.md`).
+- **Several ChatGPT accounts** (requirement R9): a browser profile and connector per account, an account pool in the bridge that schedules turns by load and per-account limits, account-sticky continuations, and setup of additional accounts from the launcher. Design in progress (`plans/multi-account.md`). Upstream feature request [#563](https://github.com/miuuyy/codex-chatgpt-web/issues/563) asks for the same thing and is worth reading before the design is fixed. Until then one partition holds every signed-in ChatGPT account, ChatGPT Web switches between them, and the product only *detects* the mismatch: the workspace in use is compared with the tunnel's workspaces and a turn fails at once with `connector_not_found:wrong_workspace` instead of going to an account where no connector exists.
+- **Prove the ChatGPT workspace selector.** The workspace in use is read from ChatGPT's own `_account` cookie (`launcher/electron/browser-host.cjs`). The comparison is written so that only a value shaped like a workspace id is used and only a mismatch with a tunnel whose workspaces are known ends a turn, but the cookie's name and meaning have not been confirmed against a live account with two workspaces. Confirm it on such an account, or replace the source with the connector menu, and record the result here.
 - ChatGPT Web reliability, wave 2:
   - status of limits and queues in the launcher (plan 2.3);
   - restarts and updates deferred while turns are queued (2.4);

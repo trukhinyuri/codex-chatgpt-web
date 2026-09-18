@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, chatGptEffortDegradedMessage, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
@@ -32,16 +32,20 @@ test("capabilities gate tools and Pro-only efforts explicitly without changing t
     solAvailable: true,
     extraHighAvailable: true, proAvailable: true,
   })).toMatchObject({ localTools: false });
-  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", {
-    localToolsEnabled: false,
-    solAvailable: true,
-    extraHighAvailable: false, proAvailable: false,
-  })).toThrow("Pro effort is not available");
-  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", {
-    localToolsEnabled: true,
-    solAvailable: true,
-    extraHighAvailable: false, proAvailable: false,
-  })).toThrow("Extra High effort is not available");
+  // An account without Extra High or Pro cannot select them however often Codex retries (upstream
+  // codex-chatgpt-web issue #564), so the turn runs at High and says which level it lost.
+  const plusOnly = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  const pro = resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", plusOnly);
+  expect(pro).toMatchObject({ effort: "high", displayLabel: "High", uiEffortIndex: 2, degradedFrom: "max" });
+  expect(chatGptEffortDegradedMessage(pro)).toBe("This ChatGPT account does not offer Pro; the task runs at High.");
+  const extraHigh = resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", { ...plusOnly, localToolsEnabled: true });
+  expect(extraHigh).toMatchObject({ effort: "high", displayLabel: "High", localTools: true, degradedFrom: "xhigh" });
+  expect(chatGptEffortDegradedMessage(extraHigh)).toBe("This ChatGPT account does not offer Extra High; the task runs at High.");
+  // An account that does have them keeps them, and an ordinary High turn says nothing.
+  const full = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", full)).toMatchObject({ effort: "xhigh", displayLabel: "Extra High" });
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", full)).toMatchObject({ effort: "max", displayLabel: "Pro" });
+  expect(chatGptEffortDegradedMessage(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "high", full))).toBeUndefined();
   expect(() => resolveChatGptWebModelMode("unknown", "high", {
     localToolsEnabled: false,
     solAvailable: true,

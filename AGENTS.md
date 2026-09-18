@@ -66,7 +66,7 @@ Run every check and report each as passed or failed.
    "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" doctor
    ```
 
-   Expect `Doctor result: ready` (browser-only, or Full harness once ChatGPT has reached the tunnel: the connector line then reads `ChatGPT reached this tunnel at <time>`) or `Doctor result: ready for local checks; unproven from this machine: connector` (Full harness before ChatGPT has connected, or when the tunnel's counters cannot be read) — the connector line names exactly what local checks cannot prove; the launcher's MCP checklist covers it.
+   Expect `Doctor result: ready` (browser-only, or Full harness once the tunnel checks pass and ChatGPT lists the connector) or `Doctor result: ready for local checks; unproven from this machine: …` when a check could not be proven from this computer (no network for OpenAI's tunnel registry, or the launcher has not read ChatGPT's connector menu yet). In Full mode `doctor` also asks OpenAI whether the tunnel still exists and this computer's runtime key still opens it, whether it reaches a workspace at all, and whether the ChatGPT workspace in use is one of them. Any `✗` line names exactly one thing to do; do that and rerun `doctor`.
 2. **Bridge.** `curl -s http://127.0.0.1:17841/healthz` returns `"status":"ok"`.
 3. **Test turn.** Pick a ChatGPT Web model the account offers (`chatgpt-web/high` on most paid plans) and run it from a scratch folder:
 
@@ -113,6 +113,9 @@ Evidence lives here:
 | `missing cwd in trusted Codex environment context` | Not expected in this fork, including skills outside Git and multi-folder projects | Collect the turn's rollout and the matching `trusted environment unavailable (…)` line from `launcher.jsonl`, then open an issue in this repository |
 | `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Superpower |
 | `connector_not_found:<kind>` (for example `ChatGPT still does not list connector "Codex Native2"`) | Before sending, the task waited for ChatGPT to list the connector (up to about 4 minutes once ChatGPT had reached the tunnel) | Do what the message names; the launcher re-checks by itself and its MCP checklist shows when to send the task again. Do not restart the launcher |
+| `connector_not_found:tunnel_missing` or `:tunnel_not_shared` | OpenAI no longer has this computer's tunnel, or it is shared with no workspace, so no ChatGPT workspace can see it ("No tunnels yet" in New Plugin → Tunnel) | Do the one thing the message names at <https://platform.openai.com/settings/organization/tunnels>; nothing else helps and no wait fixes it |
+| `connector_not_found:wrong_workspace` | ChatGPT is signed in to a workspace this computer's tunnel is not shared with; the connector exists in the other account | Switch ChatGPT back to that workspace, or share the tunnel with the workspace in use |
+| `This ChatGPT account does not offer Extra High; the task runs at High.` | The account has no such effort level | Nothing; the task runs at High |
 
 ## Develop
 

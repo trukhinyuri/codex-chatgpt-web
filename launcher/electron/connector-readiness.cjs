@@ -23,6 +23,9 @@ const CONNECTOR_PAIRING_RESTART_DEFERRAL_MS = 30 * 60_000;
 /** Each kind names what went wrong and has exactly one next step for the person or the launcher. */
 const CONNECTOR_FAILURE_KINDS = Object.freeze([
   "tunnel_unavailable",
+  "tunnel_missing",
+  "tunnel_not_shared",
+  "wrong_workspace",
   "never_contacted",
   "not_listed",
   "other_name",
@@ -69,7 +72,7 @@ function createConnectorReadinessMonitor({
   isVerified,
   isIdle,
   verify,
-  observe = async () => ({ tunnelReady: null, contact: { status: "unknown", at: null } }),
+  observe = async () => ({ tunnelReady: null, contact: { status: "unknown", at: null }, workspaceMatch: "unknown" }),
   onVerified,
   onChange,
   now = Date.now,
@@ -95,6 +98,7 @@ function createConnectorReadinessMonitor({
     tunnelReady: null,
     contact: { status: "unknown", at: null },
     connectorListed: null,
+    workspaceMatch: "unknown",
     resendHint: false,
     waitingTurn: null,
   };
@@ -111,6 +115,7 @@ function createConnectorReadinessMonitor({
     tunnelReady: state.tunnelReady,
     contact: { ...state.contact },
     connectorListed: state.connectorListed,
+    workspaceMatch: state.workspaceMatch,
     resendHint: state.resendHint,
     waitingTurn: state.waitingTurn && state.waitingTurn.until > now()
       ? { step: state.waitingTurn.step, total: state.waitingTurn.total }
@@ -204,9 +209,13 @@ function createConnectorReadinessMonitor({
         const observed = await observe();
         state.tunnelReady = typeof observed?.tunnelReady === "boolean" ? observed.tunnelReady : null;
         state.contact = normalizeContact(observed?.contact);
+        state.workspaceMatch = observed?.workspaceMatch === "match" || observed?.workspaceMatch === "mismatch"
+          ? observed.workspaceMatch
+          : "unknown";
       } catch {
         state.tunnelReady = null;
         state.contact = { status: "unknown", at: null };
+        state.workspaceMatch = "unknown";
       }
       if (tickGeneration !== generation) return;
       state.checks += 1;
@@ -363,7 +372,33 @@ function createConnectorReadinessMonitor({
  * /readyz does not answer and no turn has an MCP tool call in flight, because restarting the
  * tunnel ends its MCP child and with it every call in progress.
  */
-function createConnectorTunnelService({ supervisor, monitor, logger }) {
+/**
+ * Does the ChatGPT workspace in use reach this tunnel? Two ChatGPT accounts can be signed in at
+ * once and ChatGPT Web switches between them (upstream feature request #563); on 19.09.2026 the
+ * connector and the tunnel belonged to one account while every turn went to the other, and nothing
+ * said so. A mismatch is claimed only when both ids are known: an unreadable selector or a tunnel
+ * whose workspaces are unknown proves nothing.
+ */
+function chatGptWorkspaceMatch(registry, activeWorkspaceId) {
+  if (registry?.status !== "ok") return "unknown";
+  const workspaces = Array.isArray(registry.workspaceIds) ? registry.workspaceIds : [];
+  if (workspaces.length === 0 || typeof activeWorkspaceId !== "string" || !activeWorkspaceId) return "unknown";
+  return workspaces.includes(activeWorkspaceId) ? "match" : "mismatch";
+}
+
+/** What may leave this process about the registry: verdicts and a name, never a workspace id. */
+function publishedRegistry(registry, workspaceMatch) {
+  return {
+    status: registry?.status === "ok" || registry?.status === "missing" || registry?.status === "unauthorized"
+      ? registry.status
+      : "unproven",
+    sharing: registry?.sharing === "shared" || registry?.sharing === "not-shared" ? registry.sharing : "unknown",
+    tunnelName: typeof registry?.tunnelName === "string" && registry.tunnelName ? registry.tunnelName : null,
+    workspaceMatch,
+  };
+}
+
+function createConnectorTunnelService({ supervisor, monitor, logger, activeWorkspaceId }) {
   return async function connectorTunnel({ restart = false, waitStep, waitTotal, waitMs } = {}) {
     let config = null;
     try {
@@ -372,7 +407,13 @@ function createConnectorTunnelService({ supervisor, monitor, logger }) {
       config = null;
     }
     if (!config || config.mode !== "full" || !config.tunnel) {
-      return { tunnelReady: null, readyz: null, contact: { status: "unknown", at: null }, restart: "not-configured" };
+      return {
+        tunnelReady: null,
+        readyz: null,
+        contact: { status: "unknown", at: null },
+        registry: { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" },
+        restart: "not-configured",
+      };
     }
     if (!supervisor.tunnelHealthBaseUrl) {
       try {
@@ -385,6 +426,24 @@ function createConnectorTunnelService({ supervisor, monitor, logger }) {
     if (supervisor.tunnelHealthBaseUrl) {
       const probe = await supervisor.probeTunnelEndpoint("/readyz");
       readyz = probe.observed === true && probe.ok === true;
+    }
+    // OpenAI's own answer about the tunnel, cached by the supervisor: a tunnel that was deleted or
+    // shared with no workspace cannot be healed by waiting, and the turn must say so at once.
+    let registry;
+    try {
+      registry = await supervisor.probeTunnelRegistry(config);
+    } catch {
+      registry = null;
+    }
+    let active = null;
+    try {
+      active = await activeWorkspaceId?.();
+    } catch {
+      active = null;
+    }
+    const published = publishedRegistry(registry, chatGptWorkspaceMatch(registry, active));
+    if (published.workspaceMatch === "mismatch") {
+      logger?.warn?.("connector.chatgpt_workspace_mismatch", {});
     }
     let contact;
     try {
@@ -412,7 +471,7 @@ function createConnectorTunnelService({ supervisor, monitor, logger }) {
     }
     monitor?.noteObservation({ tunnelReady: readyz, contact });
     if (Number.isInteger(waitStep) && waitStep > 0) monitor?.noteWaitingTurn({ step: waitStep, total: waitTotal, waitMs });
-    return { tunnelReady: readyz, readyz, contact, restart: restartResult };
+    return { tunnelReady: readyz, readyz, contact, registry: published, restart: restartResult };
   };
 }
 
@@ -425,6 +484,7 @@ module.exports = {
   connectorCheckDelayMs,
   connectorFailureKind,
   createConnectorReadinessMonitor,
+  chatGptWorkspaceMatch,
   createConnectorTunnelService,
   isConnectorFailureCode,
 };

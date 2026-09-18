@@ -151,6 +151,49 @@ export interface ChatGptUnattributedEnvironmentMessage {
   content: unknown;
 }
 
+export interface ChatGptPathlessEnvironmentDelta {
+  /** Sandbox mode the delta declares, when its declarations agree. */
+  sandboxType?: ChatGptSandboxPolicy["type"];
+}
+
+/** Envelope texts the wire attributes to the current turn through native item metadata. */
+function currentChatGptEnvironmentUpdateTexts(parsed: CodexParsedRequest): string[] {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!turnId) return [];
+  const texts: string[] = [];
+  for (const value of input) {
+    const item = record(value);
+    if (item?.type !== "message" || item.role !== "user") continue;
+    if (itemTurnId(item) !== turnId) continue;
+    const trimmed = rawMessageText(item).trim();
+    if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) texts.push(trimmed);
+  }
+  return texts;
+}
+
+/**
+ * A current-turn environment delta that names no filesystem path at all, such as the date, timezone
+ * or permission-profile refresh Codex appends mid-turn. Naming no path means it cannot widen, move
+ * or lower filesystem authority on its own, so a caller may answer it with authority the thread
+ * already holds. Every shape that does declare a cwd or root element returns undefined, including
+ * malformed and empty cwd markup, so the existing fail-closed handling stays in charge.
+ *
+ * Ported from upstream codex-chatgpt-web PR #568.
+ */
+export function pathlessChatGptEnvironmentDelta(
+  parsed: CodexParsedRequest,
+): ChatGptPathlessEnvironmentDelta | undefined {
+  const texts = currentChatGptEnvironmentUpdateTexts(parsed);
+  if (texts.length === 0) return undefined;
+  if (texts.some(text => /<\/?cwd\b/i.test(text) || /<\/?root\b/i.test(text))) return undefined;
+  const declared = texts.map(text => sandboxTypeFromEnvironment(text));
+  const known = [...new Set(declared.filter((type): type is ChatGptSandboxPolicy["type"] => type !== undefined))];
+  if (known.length > 1) return undefined;
+  return { sandboxType: known[0] };
+}
+
 /** These are claims to locate in native history, never a source of filesystem authority. */
 export function unattributedChatGptEnvironmentMessages(
   parsed: CodexParsedRequest,
@@ -369,6 +412,32 @@ function environmentPartBeforeUser(input: unknown[], userIndex: number, expected
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {
   return environmentPartBeforeUser(input, userIndex, expectedTurnId, metadata)?.text;
+}
+
+/**
+ * A current-turn environment delta can arrive after the active instruction once the turn has
+ * already produced tool rounds, because Codex appends it when the calendar date or timezone changes
+ * mid-turn. The adjacency resolvers above search backwards from the active instruction and cannot
+ * see it, yet it carries the same server-owned turn provenance. Position must not make a current
+ * update invisible; when several trail, the last one is the newest statement.
+ *
+ * Ported from upstream codex-chatgpt-web PR #568.
+ */
+function trailingChatGptEnvironmentDelta(
+  input: unknown[],
+  activeUserIndex: number,
+  expectedTurnId: string | undefined,
+): string | undefined {
+  if (typeof expectedTurnId !== "string" || !expectedTurnId) return undefined;
+  let latest: string | undefined;
+  for (let index = activeUserIndex + 1; index < input.length; index += 1) {
+    const item = record(input[index]);
+    if (item?.type !== "message" || item.role !== "user") continue;
+    if (itemTurnId(item) !== expectedTurnId) continue;
+    const trimmed = rawMessageText(item).trim();
+    if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) latest = trimmed;
+  }
+  return latest;
 }
 
 function sandboxTypeFromEnvironment(text: string): ChatGptSandboxPolicy["type"] | undefined {
@@ -645,7 +714,12 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
 
   // An attempted current update takes precedence over all older authority, even when its native
   // item metadata is incomplete. Never mask malformed permissions/cwd with a previous turn.
-  if (hasCurrentChatGptEnvironmentContext(parsed)) return undefined;
+  if (hasCurrentChatGptEnvironmentContext(parsed)) {
+    const delta = trailingChatGptEnvironmentDelta(
+      input, activeUserIndex, typeof turnId === "string" ? turnId : undefined);
+    if (delta && metadata && environmentMatchesCanonicalMetadata(delta, metadata, false)) return delta;
+    return undefined;
+  }
 
   const replayPrefixLen = Math.min(parsed._replayPrefixLen ?? 0, input.length);
   for (let index = replayPrefixLen - 1; index > 0; index -= 1) {

@@ -15,6 +15,8 @@ const {
 const {
   allowedAuthUrl,
   BrowserHost,
+  CHATGPT_WORKSPACE_COOKIE,
+  chatGptWorkspaceIdFromCookies,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isChatGptOriginUrl,
@@ -3572,4 +3574,18 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
     helperPid: dead.helperPid,
     status: "failed",
   });
+});
+
+// Two ChatGPT accounts can be signed in to the embedded browser at once, and ChatGPT Web switches
+// between them (upstream feature request #563). On 19.09.2026 the connector and the tunnel belonged
+// to the account that was not active, and every turn went to the active one. The workspace in use
+// comes from ChatGPT's own workspace cookie, whose value is a workspace id, not a credential.
+test("the workspace in use is read from ChatGPT's own selector, and only when it looks like one", () => {
+  const workspace = "45285260-1111-4222-8333-444455556666";
+  assert.equal(CHATGPT_WORKSPACE_COOKIE, "_account");
+  assert.equal(chatGptWorkspaceIdFromCookies([{ name: "_account", value: workspace }]), workspace);
+  assert.equal(chatGptWorkspaceIdFromCookies([{ value: "personal" }, { value: workspace }]), workspace);
+  for (const cookies of [undefined, null, [], [{}], [{ value: "" }], [{ value: 7 }], [{ value: "personal" }]]) {
+    assert.equal(chatGptWorkspaceIdFromCookies(cookies), null);
+  }
 });
