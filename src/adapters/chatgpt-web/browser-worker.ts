@@ -3049,6 +3049,7 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     binding: ChatGptAssistantTurnBinding,
     signal?: AbortSignal,
+    allowMcpContinuationUserTurn = false,
   ): Promise<ChatGptAssistantTurnBinding> {
     const boundCount = await withChatGptBrowserObservationTimeout(
       withBrowserTurnAbort(binding.locator.count(), signal),
@@ -3059,19 +3060,30 @@ export class ChatGptBrowserWorker {
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedTurns = new Set(binding.acceptedTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedTurns.has(identity))) {
+    const hasNewUserTurn = state.userIdentities.some(identity => !acceptedTurns.has(identity));
+    // A new user turn while an MCP tool call was already proven in flight is the ChatGPT-Native
+    // continuation protocol working as designed, not an out-of-band interruption: only waive the
+    // check when that external progress was observed before this reconcile started.
+    if (hasNewUserTurn && !allowMcpContinuationUserTurn) {
       throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
     }
+    const acceptedTurnIdentities = hasNewUserTurn
+      ? state.turnIdentities
+      : binding.acceptedTurnIdentities;
     const identity = chatGptReboundTurnIdentity(
       baseline.initialTurnIdentities,
       binding.identity,
       state.responseIdentities,
     );
-    if (!identity || identity === binding.identity) return binding;
+    if (!identity || identity === binding.identity) {
+      return acceptedTurnIdentities === binding.acceptedTurnIdentities
+        ? binding
+        : { ...binding, acceptedTurnIdentities };
+    }
     return {
       identity,
       locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
-      acceptedTurnIdentities: state.turnIdentities,
+      acceptedTurnIdentities,
     };
   }
 
@@ -3614,11 +3626,13 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
+        const progressBeforeReconcile = externalProgress?.snapshot();
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
           submissionBaseline,
           responseTurn,
           abortSignal,
+          chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
         );
         if (rebound.identity !== responseTurn.identity) {
           responseTurn = rebound;
@@ -5039,12 +5053,14 @@ export class ChatGptBrowserWorker {
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent) {
           try {
+            const progressBeforeReconcile = turn.externalProgress?.snapshot();
             const rebound = await withChatGptBrowserObservationTimeout(
               this.reconcileAssistantTurnBinding(
                 page,
                 submissionBaseline,
                 responseTurn,
                 turn.abortSignal,
+                chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
               ),
             );
             if (rebound.identity !== responseTurn.identity) {
