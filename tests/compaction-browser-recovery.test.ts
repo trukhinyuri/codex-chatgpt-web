@@ -14,6 +14,8 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
   const recoveryCallbacks: unknown[] = [];
   const actions: string[] = [];
   const sendBudgets: number[] = [];
+  const turnAbort = new AbortController();
+  let stageSendActivations = 0;
   let stage = "";
   let released = false;
   const page = { evaluate: async () => ({}), isClosed: () => false };
@@ -43,7 +45,14 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     sendAttachedPrompt: async (...args: unknown[]) => {
       // Context ingestion cannot mistake tool activity for acknowledgement of a part.
       expect(args[4]).toBe(stage === "send" ? progress : undefined);
-      if (stage !== "send") expect(args[5]).toBeUndefined();
+      if (stage !== "send") {
+        // A staged part reports the send phase, but its acceptance is not the task's submission.
+        const lifecycle = args[5] as { onSendActivated?: () => unknown; onSubmitted?: unknown };
+        expect(Object.keys(lifecycle)).toEqual(["onSendActivated"]);
+        await lifecycle.onSendActivated!();
+      }
+      // Only the Codex-side cancellation of this turn may press Stop during a send.
+      expect(args[8]).toEqual({ traceId: "compaction_recovery_fixture", cancelSignal: turnAbort.signal });
       recoveryCallbacks.push(args[7]);
       actions.push("send");
       return "user_turn";
@@ -64,6 +73,8 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       reasoning: "high",
       capabilities,
       compaction: !tools,
+      abortSignal: turnAbort.signal,
+      onSendActivated: () => { stageSendActivations += 1; },
       externalProgress: progress,
       completionFence: tools ? {
         begin: async () => { throw new Error("fixture must stop before completion"); },
@@ -85,6 +96,8 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       tools ? "attach:tools" : "attach:plain", "files", "send", "observe",
     ]);
     expect(sendBudgets).toEqual(multipart ? [180_000, 180_000, 180_000] : [20_000]);
+    // Only the staged parts activate through the stub above; the final prompt passes the turn itself.
+    expect(stageSendActivations).toBe(multipart ? 2 : 0);
     expect(released).toBe(true);
   } finally {
     rmSync(diagnostics, { recursive: true, force: true });
