@@ -17,8 +17,15 @@ const { createSourceUpdateController } = require("../electron/source-update.cjs"
 const COMMIT = "2".repeat(40);
 const DAY = 24 * 60 * 60_000;
 
+const tempDirs = [];
+test.after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "cwg-problem-report-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cwg-problem-report-"));
+  tempDirs.push(dir);
+  return dir;
 }
 
 test("update failures map to fixed codes; the lock of another install is not a problem", () => {

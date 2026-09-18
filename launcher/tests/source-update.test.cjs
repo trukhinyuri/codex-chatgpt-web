@@ -30,8 +30,15 @@ const {
 const INSTALLED = "1".repeat(40);
 const MAIN = "2".repeat(40);
 
+const tempDirs = [];
+test.after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
 }
 
 function controller(overrides = {}, dependencies = {}) {
@@ -251,7 +258,7 @@ test("updates refuse to start without an announced update or while one is runnin
   await assert.rejects(slow.instance.beginInstall(), /already being prepared/);
   assert.deepEqual(await slow.instance.checkOnce(), { status: "downloading", version: "5.0.8+2222222", automatic: false });
   release();
-  await first;
+  slow.instance.cancelInstall(await first);
 });
 
 test("the build lock excludes a live owner and reclaims a dead one", () => {

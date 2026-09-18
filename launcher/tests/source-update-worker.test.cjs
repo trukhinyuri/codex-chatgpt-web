@@ -9,6 +9,10 @@ const WORKER = path.join(__dirname, "..", "electron", "source-update-worker.cjs"
 const OLD = "1".repeat(40);
 const NEW = "2".repeat(40);
 const macOnly = { skip: process.platform !== "darwin" && "the worker uses macOS ditto, plutil and ps" };
+const roots = [];
+test.after(() => {
+  for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+});
 
 function plist(commit) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -29,6 +33,7 @@ function makeApp(application, script, commit) {
  */
 function scenario(newStartup, { stagedCommit = NEW, healthTimeoutMs = 3_000, existingRollbacks = [] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cwg-worker-"));
+  roots.push(root);
   const target = path.join(root, "Applications", "Codex Web GPT.app");
   const userData = path.join(root, "userData");
   const tempRoot = path.join(root, "update-temp");
