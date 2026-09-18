@@ -1794,6 +1794,20 @@ interface ChatGptResponseDomCache {
   cacheHits?: number;
 }
 
+export const CHATGPT_RESPONSE_POLL_ACTIVE_MS = 100;
+export const CHATGPT_RESPONSE_POLL_IDLE_MS = 250;
+
+/**
+ * Adaptive cadence for the response-polling loop: once a response DOM snapshot is cached
+ * (ChatGPT has produced visible response structure to compare against), the next read is a cheap
+ * cache-hit rather than a full scan, so polling faster during active streaming cuts avoidable
+ * per-iteration latency without adding load. Before any response structure exists yet, the slower
+ * cadence stands. Ported from upstream PR #320 (the poll-cadence slice only).
+ */
+export function pollSleep(cache: { snapshot?: unknown }): number {
+  return cache.snapshot ? CHATGPT_RESPONSE_POLL_ACTIVE_MS : CHATGPT_RESPONSE_POLL_IDLE_MS;
+}
+
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   responsePresent: false,
   visibleText: "",
@@ -5120,7 +5134,7 @@ export class ChatGptBrowserWorker {
           () => diagnostics.capture(page, "tool-confirmation-visible"),
         )) {
           internalObservationFaults = 0;
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
           continue;
         }
 
@@ -5197,7 +5211,7 @@ export class ChatGptBrowserWorker {
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
           domHealthTracker.clearMissingResponse();
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
           continue;
         }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
@@ -5242,7 +5256,7 @@ export class ChatGptBrowserWorker {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
                 if (revision === undefined) {
-                  await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                  await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                   continue;
                 }
                 completionFenceRevision = revision;
@@ -5251,14 +5265,14 @@ export class ChatGptBrowserWorker {
                 // stale cached completion and the broker's terminal decision.
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                 continue;
               }
               if (!await turn.completionFence.commit(completionFenceRevision)) {
                 completionFenceRevision = undefined;
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                 continue;
               }
             }
@@ -5307,7 +5321,7 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
@@ -5329,7 +5343,7 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, "internal-observation-fault");
         responseDomCache.key = undefined;
         responseDomCache.snapshot = undefined;
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
        }
       }
 
