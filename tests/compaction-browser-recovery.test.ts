@@ -74,8 +74,9 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       Array(multipart ? 6 : 2).fill(owned ? "function" : "undefined"),
     );
     expect(actions).toEqual([
+      // Stages run in the selected mode; the live control is reconciled again before the final part.
       ...(multipart ? [
-        "effort:low",
+        "effort:high",
         "attach:plain", "send", "observe", "ack",
         "attach:plain", "send", "observe", "ack",
       ] : []),

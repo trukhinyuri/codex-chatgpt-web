@@ -83,7 +83,8 @@ test("multipart planning leaves room for final attachments and execution instruc
     const chars = messages.map(text => text.length);
     const maxStageMessageTokens = Math.max(...tokens.slice(0, -1));
     const maxStageChars = Math.max(...chars.slice(0, -1));
-    const stage = resolveChatGptWebMultipartStagingMode(parsed.modelId, caps, maxStageMessageTokens, maxStageChars);
+    const stage = resolveChatGptWebMultipartStagingMode(parsed.modelId, caps, "high", maxStageMessageTokens, maxStageChars);
+    expect(stage.effort).toBe("high");
     expect(() => assertChatGptWebMultipartInputWithinLimits(
       estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId), Math.max(...tokens),
       parsed.modelId, "high", caps, Math.max(...chars), 3,
