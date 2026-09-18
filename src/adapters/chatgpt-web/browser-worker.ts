@@ -1461,7 +1461,7 @@ export function chatGptSubmissionEvidence(state: {
   generationRunning: boolean;
 }): ChatGptSubmissionEvidence | undefined {
   if (chatGptNewTurnIdentity(state.initialTurnIdentities, state.userIdentities)) return "user_turn";
-  if (chatGptNewTurnIdentity(state.initialTurnIdentities, state.responseIdentities)) return "assistant_turn";
+  if (chatGptLatestNewTurnIdentity(state.initialTurnIdentities, state.responseIdentities)) return "assistant_turn";
   if (state.generationRunning) return "generation_running";
   return undefined;
 }
@@ -1561,12 +1561,19 @@ export function chatGptNewTurnIdentity(
   initial: readonly string[],
   current: readonly string[],
 ): string | undefined {
-  const previous = new Set(initial);
-  const added = current.filter(identity => !previous.has(identity));
+  const added = newTurnIdentities(initial, current);
   if (added.length > 1) {
     throw new Error(`ChatGPT exposed ${added.length} new conversation turns for one submitted message`);
   }
   return added[0];
+}
+
+/** One Codex submit may create several assistant shells; the last one owns the final Markdown. */
+export function chatGptLatestNewTurnIdentity(
+  initial: readonly string[],
+  current: readonly string[],
+): string | undefined {
+  return newTurnIdentities(initial, current).at(-1);
 }
 
 export function chatGptReboundTurnIdentity(
@@ -1574,8 +1581,17 @@ export function chatGptReboundTurnIdentity(
   boundIdentity: string,
   current: readonly string[],
 ): string | undefined {
-  if (current.includes(boundIdentity)) return boundIdentity;
-  return chatGptNewTurnIdentity(initial, current);
+  const latest = chatGptLatestNewTurnIdentity(initial, current);
+  if (latest) return latest;
+  return current.includes(boundIdentity) ? boundIdentity : undefined;
+}
+
+function newTurnIdentities(
+  initial: readonly string[],
+  current: readonly string[],
+): string[] {
+  const previous = new Set(initial);
+  return current.filter(identity => !previous.has(identity));
 }
 
 export class ChatGptCompletionTracker {
@@ -1605,6 +1621,14 @@ export class ChatGptCompletionTracker {
     this.missingPostToolAnswerSince = undefined;
     this.candidate = undefined;
     return true;
+  }
+
+  /** A mid-stream rebind to a later assistant shell invalidates every completion signal collected
+   * against the abandoned shell; the tracker must judge the new shell from a clean slate. */
+  resetAnswerWindow(): void {
+    this.candidate = undefined;
+    this.missingPostToolAnswerSince = undefined;
+    this.postToolAnswerBaselineText = undefined;
   }
 
   update(
@@ -2207,16 +2231,29 @@ const imageExtensions = new Map([
   ["image/webp", "webp"],
 ]);
 
+/**
+ * Single source of truth for the format constraint every ChatGPT Web transport enforces: an
+ * inline base64 data URL in one of the supported image mime types. The HTTP boundary
+ * (findInvalidChatGptWebInputImage in server.ts) calls this to reject an invalid image with an
+ * early 400 instead of failing the turn deep inside the browser worker.
+ */
+export function validateChatGptWebInputImage(imageUrl: string): string | undefined {
+  const parsed = parseDataUrl(imageUrl);
+  if (!parsed) return "must be an inline base64 data URL";
+  if (!imageExtensions.has(parsed.mediaType.toLowerCase())) return `has unsupported media type: ${parsed.mediaType}`;
+  return undefined;
+}
+
 export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array<{ name: string; mimeType: string; buffer: Buffer }> {
   if (images.length > CHATGPT_MAX_INPUT_IMAGES) {
     throw new Error(`ChatGPT web accepts at most ${CHATGPT_MAX_INPUT_IMAGES} input images per Codex turn`);
   }
   let totalBytes = 0;
   return images.map(image => {
-    const parsed = parseDataUrl(image.imageUrl);
-    if (!parsed) throw new Error(`ChatGPT web input image ${image.ref} must be an inline base64 data URL`);
-    const extension = imageExtensions.get(parsed.mediaType.toLowerCase());
-    if (!extension) throw new Error(`ChatGPT web input image ${image.ref} has unsupported media type: ${parsed.mediaType}`);
+    const invalid = validateChatGptWebInputImage(image.imageUrl);
+    if (invalid) throw new Error(`ChatGPT web input image ${image.ref} ${invalid}`);
+    const parsed = parseDataUrl(image.imageUrl)!;
+    const extension = imageExtensions.get(parsed.mediaType.toLowerCase())!;
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(parsed.base64) || parsed.base64.length % 4 !== 0) {
       throw new Error(`ChatGPT web input image ${image.ref} contains invalid base64 data`);
     }
@@ -2988,7 +3025,7 @@ export class ChatGptBrowserWorker {
     signal?: AbortSignal,
   ): Promise<string> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    const identity = chatGptNewTurnIdentity(
+    const identity = chatGptLatestNewTurnIdentity(
       baseline.initialTurnIdentities,
       state.responseIdentities,
     );
@@ -3090,7 +3127,7 @@ export class ChatGptBrowserWorker {
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
       // despite this exact iteration having successfully observed the page.
       progress = externalProgress?.snapshot();
-      const identity = chatGptNewTurnIdentity(
+      const identity = chatGptLatestNewTurnIdentity(
         observationBaseline.initialTurnIdentities,
         state.responseIdentities,
       );
@@ -3136,10 +3173,12 @@ export class ChatGptBrowserWorker {
     const boundCount = await withChatGptBrowserObservationTimeout(
       withBrowserTurnAbort(binding.locator.count(), signal),
     );
-    if (boundCount === 1) return binding;
     if (boundCount > 1) {
       throw new Error(`ChatGPT exposed ${boundCount} DOM nodes for the bound assistant turn`);
     }
+    // Even when the originally bound shell is still present (boundCount === 1), ChatGPT may have
+    // opened a later assistant shell for this same submission; only checking identities below (not
+    // short-circuiting here) lets a later shell win, matching chatGptLatestNewTurnIdentity.
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedTurns = new Set(binding.acceptedTurnIdentities);
     const hasNewUserTurn = state.userIdentities.some(identity => !acceptedTurns.has(identity));
@@ -3713,23 +3752,23 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
-      let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-      if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const progressBeforeReconcile = externalProgress?.snapshot();
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
-          abortSignal,
-          chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
-        );
-        if (rebound.identity !== responseTurn.identity) {
-          responseTurn = rebound;
-          responseDomCache.key = undefined;
-          responseDomCache.snapshot = undefined;
-          snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        }
+      // Reconcile on every iteration, not only when the bound shell looks absent: ChatGPT can open
+      // a later assistant shell for this same stage while the earlier one still renders content, and
+      // only chatGptReboundTurnIdentity (via reconcileAssistantTurnBinding) can tell the two apart.
+      const progressBeforeReconcile = externalProgress?.snapshot();
+      const rebound = await this.reconcileAssistantTurnBinding(
+        page,
+        submissionBaseline,
+        responseTurn,
+        abortSignal,
+        chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
+      );
+      if (rebound.identity !== responseTurn.identity) {
+        responseTurn = rebound;
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
       }
+      const snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
       const externalProgressSnapshot = externalProgress?.snapshot();
       if (externalProgress
@@ -5072,18 +5111,25 @@ export class ChatGptBrowserWorker {
 
       let lastHeartbeat = 0;
       let finalText = "";
+      // Accumulates every delta actually emitted to the caller, across any mid-stream rebind to a
+      // later assistant shell, so the returned answer is not truncated to only the final shell's
+      // own Markdown buffer (see the rebind branch below).
+      let streamedAnswer = "";
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
-      const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
+      let visibleTrace = new ChatGptVisibleTraceTracker();
+      let markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (visible) {
+          streamedAnswer += visible;
+          turn.onTextDelta(visible);
+        }
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
@@ -5142,51 +5188,63 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        if (!snapshot.responsePresent) {
-          try {
-            const progressBeforeReconcile = turn.externalProgress?.snapshot();
-            const rebound = await withChatGptBrowserObservationTimeout(
-              this.reconcileAssistantTurnBinding(
-                page,
-                submissionBaseline,
-                responseTurn,
-                turn.abortSignal,
-                chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
-              ),
-            );
-            if (rebound.identity !== responseTurn.identity) {
-              responseTurn = rebound;
-              responseDomCache.key = undefined;
-              responseDomCache.snapshot = undefined;
-              snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        // Reconcile on every iteration, not only when the bound shell looks absent: ChatGPT can
+        // open a later assistant shell for this same submission while the earlier one still renders
+        // content, and only chatGptReboundTurnIdentity (via reconcileAssistantTurnBinding) can tell
+        // the two apart. Skipping this check whenever the old shell still "looks" present is exactly
+        // how a later ChatGPT assistant bubble used to get silently dropped.
+        try {
+          const progressBeforeReconcile = turn.externalProgress?.snapshot();
+          const rebound = await withChatGptBrowserObservationTimeout(
+            this.reconcileAssistantTurnBinding(
+              page,
+              submissionBaseline,
+              responseTurn,
+              turn.abortSignal,
+              chatGptExternalToolCallsAreInFlight(progressBeforeReconcile),
+            ),
+          );
+          if (rebound.identity !== responseTurn.identity) {
+            try {
+              const leftover = markdownBuffer.finish();
+              if (leftover.delta) emitMarkdownDelta(leftover.delta);
+            } catch {
+              // The replaced assistant shell is no longer the answer this turn will return.
             }
-          } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
-            consecutiveObservationRebinds += 1;
-            if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-              throw new Error(
-                `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-                { cause: error },
-              );
-            }
-            await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
-            submissionBaseline = {
-              ...submissionBaseline,
-              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
-              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
-              domCache: {},
-            };
-            responseTurn = {
-              ...responseTurn,
-              locator: page.locator(`[data-turn-id=${JSON.stringify(responseTurn.identity)}]`),
-            };
+            responseTurn = rebound;
+            markdownBuffer = new ChatGptMarkdownBuffer();
+            visibleTrace = new ChatGptVisibleTraceTracker();
+            completionTracker.resetAnswerWindow();
+            completionFenceRevision = undefined;
             responseDomCache.key = undefined;
             responseDomCache.snapshot = undefined;
-            await diagnostics.capture(page, "response-page-rebound");
-            continue;
           }
+        } catch (error) {
+          if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
+          consecutiveObservationRebinds += 1;
+          if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+            throw new Error(
+              `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+              { cause: error },
+            );
+          }
+          await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
+          submissionBaseline = {
+            ...submissionBaseline,
+            userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+            responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+            domCache: {},
+          };
+          responseTurn = {
+            ...responseTurn,
+            locator: page.locator(`[data-turn-id=${JSON.stringify(responseTurn.identity)}]`),
+          };
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          await diagnostics.capture(page, "response-page-rebound");
+          continue;
         }
+        const snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
@@ -5301,7 +5359,10 @@ export class ChatGptBrowserWorker {
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
             } else {
-              finalText = final.markdown;
+              // Not `final.markdown`: a mid-stream rebind to a later assistant shell resets
+              // markdownBuffer, so the last shell's own buffer only ever holds its own tail. The
+              // accumulator carries every delta emitted across every shell this turn bound to.
+              finalText = streamedAnswer;
             }
             break;
           }

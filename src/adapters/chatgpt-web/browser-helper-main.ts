@@ -70,11 +70,17 @@ type InputMessage = RunMessage
   | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
   | { type: "shutdown" };
 
+const helperErrorDetail = (error: unknown): string => {
+  const value = error instanceof Error ? error : new Error(String(error));
+  const stack = typeof value.stack === "string" && value.stack.trim() ? value.stack.trim() : undefined;
+  return (stack ?? `${value.name}: ${value.message}`).slice(0, 12_000);
+};
+
 let outputFailure: Error | undefined;
 const handleOutputFailure = (error: Error): void => {
   if (outputFailure) return;
   outputFailure = error;
-  void requestShutdown();
+  void requestShutdown(new Error(`Browser helper output pipe failed: ${error.message}`), 1);
 };
 const protocolOutput = createProcessLineWriter(stdout, handleOutputFailure);
 const diagnosticOutput = createProcessLineWriter(stderr, handleOutputFailure);
@@ -108,16 +114,25 @@ const completionFenceCommitWaiters = new Map<string, {
 let completionFenceRequestId = 0;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | undefined;
+let shutdownExitCode = 0;
+let shutdownReasonLogged = false;
 
-function requestShutdown(): Promise<void> {
+function requestShutdown(reason?: unknown, exitCode = 0): Promise<void> {
+  shutdownExitCode = Math.max(shutdownExitCode, exitCode);
+  if (reason !== undefined && !shutdownReasonLogged) {
+    shutdownReasonLogged = true;
+    diagnostic(`[browser-helper] shutdown requested exitCode=${shutdownExitCode}\n${helperErrorDetail(reason)}`);
+  }
   if (shutdownPromise) return shutdownPromise;
   let completeShutdown!: () => void;
   shutdownPromise = new Promise<void>(resolveShutdown => {
     completeShutdown = resolveShutdown;
   });
   shuttingDown = true;
+  // Stop protocol output immediately, but keep stderr alive until worker cleanup finishes. Closing
+  // diagnostics first and then trying to report a cleanup failure into that closed writer erased
+  // the only explanation for a status-1 helper exit.
   protocolOutput.close();
-  diagnosticOutput.close();
   for (const controller of abortControllers.values()) controller.abort();
   for (const selection of preparedSelections.values()) selection.cancel();
   preparedSelections.clear();
@@ -136,11 +151,15 @@ function requestShutdown(): Promise<void> {
   input.close();
   void closeChatGptBrowserWorkers().then(
     () => {
+      diagnostic(`[browser-helper] shutdown complete exitCode=${shutdownExitCode}`);
+      diagnosticOutput.close();
       completeShutdown();
-      process.exit(0);
+      process.exit(shutdownExitCode);
     },
     error => {
-      diagnostic(`Browser helper shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      shutdownExitCode = 1;
+      diagnostic(`[browser-helper] shutdown cleanup failed\n${helperErrorDetail(error)}`);
+      diagnosticOutput.close();
       completeShutdown();
       process.exit(1);
     },
@@ -485,7 +504,7 @@ input.on("line", line => {
     commitWaiter?.reject(new DOMException("Browser helper turn aborted before completion-fence commit", "AbortError"));
   }
   else if (message.type === "shutdown") {
-    void requestShutdown();
+    void requestShutdown(new Error("Browser helper received an explicit shutdown request"));
   } else if (message.type === "verify") {
     void verify(message).catch(error => writeProtocol({
       type: "error",
@@ -514,13 +533,23 @@ input.on("line", line => {
   }
 });
 input.on("close", () => {
-  void requestShutdown();
+  const activeOperations = abortControllers.size;
+  void requestShutdown(
+    new Error(`Browser helper stdin closed with ${activeOperations} active operation(s)`),
+    activeOperations > 0 ? 1 : 0,
+  );
 });
 process.once("SIGINT", () => {
-  void requestShutdown();
+  void requestShutdown(new Error("Browser helper received SIGINT"));
 });
 process.once("SIGTERM", () => {
-  void requestShutdown();
+  void requestShutdown(new Error("Browser helper received SIGTERM"));
+});
+process.once("uncaughtException", error => {
+  void requestShutdown(new Error(`Browser helper uncaughtException\n${helperErrorDetail(error)}`), 1);
+});
+process.once("unhandledRejection", reason => {
+  void requestShutdown(new Error(`Browser helper unhandledRejection\n${helperErrorDetail(reason)}`), 1);
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.

@@ -60,7 +60,7 @@ Run every check and report each as passed or failed.
    "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" doctor
    ```
 
-   Expect `Doctor result: ready`. A note that local checks cannot prove the connector is attached is normal; **Verify runtime** covers it.
+   Expect `Doctor result: ready` (browser-only) or `Doctor result: ready for local checks; unproven from this machine: connector` (Full harness) — the connector line names exactly what local checks cannot prove; **Verify runtime** covers it.
 2. **Bridge.** `curl -s http://127.0.0.1:17841/healthz` returns `"status":"ok"`.
 3. **Test turn.** Pick a ChatGPT Web model the account offers (`chatgpt-web/high` on most paid plans) and run it from a scratch folder:
 

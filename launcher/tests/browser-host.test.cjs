@@ -946,6 +946,110 @@ test("concurrent embedded login requests share one authentication operation", as
   assert.equal(inspections, 1);
 });
 
+test("passkey sign-in supersedes an in-flight embedded login instead of joining it", async () => {
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: false },
+    authNavigationError: null,
+    loginOperation: null,
+    loginKind: null,
+    loginSuperseded: false,
+    sessionRefreshOperation: null,
+    authView: { id: "auth" },
+    activateHomeSurface() {},
+    show() {},
+    setState(patch) { Object.assign(fixture.state, patch); },
+    snapshot: () => ({ ...fixture.state }),
+    logger: { info: event => calls.push(event) },
+    view: { webContents: {
+      getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      loadURL: async () => {},
+    } },
+    probeAuthentication: async () => ({ authenticated: false }),
+    runSessionInspection: async () => calls.push("inspect"),
+    closeAuthView: view => calls.push(["close-auth", view.id]),
+    withManualOperation: async (name, action) => {
+      calls.push(name);
+      return await action();
+    },
+    loginWithPasskey: async () => {
+      calls.push("chrome-passkey");
+      return { storageState: {}, cleanup: async () => {} };
+    },
+    installPasskeyLogin: async () => {
+      fixture.state.authenticated = true;
+      return { ...fixture.state };
+    },
+  });
+
+  const embedded = BrowserHost.prototype.openLogin.call(fixture);
+  const passkey = BrowserHost.prototype.openPasskeyLogin.call(fixture);
+  assert.notEqual(passkey, embedded);
+  assert.equal(fixture.loginSuperseded, true);
+
+  // The replaced embedded login reports browser state rather than a sign-in failure the user did
+  // not cause, and the passkey flow reaches Chrome instead of inheriting the embedded timeout.
+  assert.deepEqual(await embedded, { authenticated: false });
+  assert.equal((await passkey).authenticated, true);
+  assert.ok(calls.includes("browser.login_superseded_by_passkey"));
+  assert.ok(calls.includes("chrome-passkey"));
+  assert.ok(!calls.includes("inspect"));
+  assert.deepEqual(calls.filter(entry => Array.isArray(entry)), [["close-auth", "auth"]]);
+  assert.equal(fixture.loginOperation, null);
+  assert.equal(fixture.loginKind, null);
+  assert.equal(fixture.loginSuperseded, false);
+});
+
+test("concurrent passkey sign-in requests share one operation", async () => {
+  let chromeOpens = 0;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: false },
+    authNavigationError: null,
+    loginOperation: null,
+    loginKind: null,
+    loginSuperseded: false,
+    sessionRefreshOperation: null,
+    authView: null,
+    activateHomeSurface() {},
+    show() {},
+    setState(patch) { Object.assign(fixture.state, patch); },
+    snapshot: () => ({ ...fixture.state }),
+    logger: { info() {} },
+    withManualOperation: async (_name, action) => await action(),
+    loginWithPasskey: async () => {
+      chromeOpens += 1;
+      return { storageState: {}, cleanup: async () => {} };
+    },
+    installPasskeyLogin: async () => ({ authenticated: true }),
+  });
+
+  const first = BrowserHost.prototype.openPasskeyLogin.call(fixture);
+  const second = BrowserHost.prototype.openPasskeyLogin.call(fixture);
+  assert.equal(first, second);
+  assert.equal(fixture.loginSuperseded, false);
+  assert.deepEqual(await first, { authenticated: true });
+  assert.equal(chromeOpens, 1);
+});
+
+test("the authentication wait is released as soon as a passkey sign-in supersedes it", async () => {
+  let probes = 0;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    authNavigationError: null,
+    loginSuperseded: false,
+    probeAuthentication: async () => {
+      probes += 1;
+      fixture.loginSuperseded = true;
+      return { authenticated: false };
+    },
+  });
+
+  await assert.rejects(
+    BrowserHost.prototype.waitForAuthenticated.call(fixture, 180_000),
+    /superseded by passkey sign-in/,
+  );
+  assert.equal(probes, 1);
+});
+
 test("explicit login waits for an in-flight saved-session refresh before taking browser ownership", async () => {
   const calls = [];
   let finishRefresh;

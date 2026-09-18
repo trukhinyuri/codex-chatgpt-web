@@ -1243,7 +1243,11 @@ class RuntimeSupervisor {
               : "Existing launcher runtime ownership could not be safely recovered";
             this.writeExternalState(detail);
             this.logger.warn("runtime.external_owner_detected", { port: config.port, detail });
-            return { status: "external", detail };
+            // healthyRuntime already passed the same service/mode/version check startTunnel's own
+            // caller (main.cjs) uses to trust "ready": a caller that sees it should self-heal the
+            // Codex route against this working daemon instead of unconditionally disconnecting it
+            // as though the runtime had failed.
+            return { status: "external", detail, ...(healthyRuntime ? { healthy: true } : {}) };
           }
         } catch (error) {
           const detail = errorMessage(error);

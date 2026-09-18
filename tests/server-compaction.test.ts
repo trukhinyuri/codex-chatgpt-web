@@ -1,4 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary, encodeCompactionSummary } from "../src/responses/compaction";
@@ -9,6 +12,20 @@ import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "..
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
+
+// A completed compaction turn now persists checkpoint evidence to disk (compaction-continuation.ts,
+// under defaultConfig()'s config directory). Without this isolation, defaultConfig("full") resolves
+// that directory from CODEX_CHATGPT_WEB_HOME (or the real ~/.codex-chatgpt-web when unset), and this
+// file's tests would write real checkpoint files into it.
+let compactionHomeRoot: string;
+beforeEach(() => {
+  compactionHomeRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-compaction-test-"));
+  process.env.CODEX_CHATGPT_WEB_HOME = compactionHomeRoot;
+});
+afterEach(() => {
+  delete process.env.CODEX_CHATGPT_WEB_HOME;
+  rmSync(compactionHomeRoot, { recursive: true, force: true });
+});
 
 // These fixtures test checkpoint authorization, not persisted previous_response_id storage.
 const responseRequest: typeof respond = (request, config, factory, options) =>

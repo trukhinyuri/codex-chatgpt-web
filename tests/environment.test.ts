@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, resolve, toNamespacedPath } from "node:path";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/compaction-continuation";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -1573,8 +1573,13 @@ describe("trusted Codex task environment continuity", () => {
     ].join("\n") + "\n");
     createRolloutState(join(codexHome, "state_5.sqlite"), outsidePath);
 
+    // The index pointing outside sessions/ is treated as an ordinary archival and triggers a
+    // fallback scan of sessions/ (see the dedicated archival-recovery test below), never a silent
+    // read of the outside path itself. With sessions/ empty here, that fallback also finds nothing,
+    // so the request still fails closed -- with a message that no longer leaks the internal
+    // path-escape mechanism.
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(environmentlessChild()))
-      .toThrow("Codex rollout path escapes the sessions directory");
+      .toThrow("Codex has no canonical rollout for the requested subagent thread");
 
     const validPath = join(
       codexHome,
@@ -1603,5 +1608,23 @@ describe("trusted Codex task environment continuity", () => {
     });
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(malformed))
       .toThrow("missing cwd");
+  });
+
+  test("rollout recovery treats an indexed archival as recoverable and scans sessions/ for the canonical file", () => {
+    // Codex can move a session's rollout into archived_sessions/ (or elsewhere outside sessions/)
+    // without updating the SQLite state index, which still points at the pre-archival path. That
+    // must not fail the turn or read the archived copy as authority: it must fall back to an
+    // unindexed scan of sessions/, exactly as when the index has no row at all.
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const archivedPath = join(codexHome, "archived_sessions", basename(rolloutPath));
+    mkdirSync(dirname(archivedPath), { recursive: true });
+    writeFileSync(archivedPath, readFileSync(rolloutPath));
+    const databasePath = join(codexHome, "state_5.sqlite");
+    createRolloutState(databasePath, archivedPath);
+    const database = new Database(databasePath);
+    database.exec("DELETE FROM thread_spawn_edges");
+    database.query("UPDATE threads SET agent_path = NULL WHERE id = ?").run(rolloutThreadId);
+    database.close();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
   });
 });

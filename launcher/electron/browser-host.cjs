@@ -36,6 +36,7 @@ const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
+const LOGIN_SUPERSEDED_MESSAGE = "ChatGPT sign-in was superseded by passkey sign-in";
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
 // stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
@@ -376,6 +377,8 @@ class BrowserHost {
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
+    this.loginKind = null;
+    this.loginSuperseded = false;
     this.sessionRefreshOperation = null;
     this.cloudflareChallengeRecovery = null;
     this.cloudflareChallengeRecoveryArmed = true;
@@ -2446,27 +2449,44 @@ class BrowserHost {
           // An explicit login is the recovery path after a failed saved-session refresh.
         }
       }
-      return await this.withManualOperation("ChatGPT login", async () => {
-        this.authNavigationError = null;
-        this.show();
-        this.logger.info("browser.login_opened");
-        const current = this.view.webContents.getURL();
-        if (!isChatGptOriginUrl(current)) {
-          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
-        }
-        await this.probeAuthentication();
-        const authenticated = await this.waitForAuthenticated();
-        await this.runSessionInspection(false);
-        return authenticated;
-      });
+      try {
+        return await this.withManualOperation("ChatGPT login", async () => {
+          this.authNavigationError = null;
+          this.show();
+          this.logger.info("browser.login_opened");
+          const current = this.view.webContents.getURL();
+          if (!isChatGptOriginUrl(current)) {
+            await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+          }
+          await this.probeAuthentication();
+          const authenticated = await this.waitForAuthenticated();
+          await this.runSessionInspection(false);
+          return authenticated;
+        });
+      } catch (error) {
+        // Handing sign-in to the passkey flow is a deliberate replacement, so report the current
+        // browser state instead of surfacing a login failure the user did not cause.
+        if (error instanceof Error && error.message === LOGIN_SUPERSEDED_MESSAGE) return this.snapshot();
+        throw error;
+      }
     })();
     const tracked = operation.finally(() => {
-      if (this.loginOperation === tracked) this.loginOperation = null;
+      if (this.loginOperation === tracked) {
+        this.loginOperation = null;
+        this.loginKind = null;
+        this.loginSuperseded = false;
+      }
     });
     this.loginOperation = tracked;
+    this.loginKind = "embedded";
     return tracked;
   }
 
+  // A signed-out launcher starts the embedded ChatGPT login on its own, so a passkey-only account
+  // always finds one in flight by the time the user reaches Passkey sign in. Returning that
+  // in-flight promise made the passkey flow wait for the embedded login's own timeout instead of
+  // ever opening Chrome, so an explicit passkey request now supersedes an embedded login rather
+  // than joining it.
   openPasskeyLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT passkey import");
     if (this.state.authenticated) {
@@ -2474,8 +2494,22 @@ class BrowserHost {
       this.show();
       return Promise.resolve(this.snapshot());
     }
-    if (this.loginOperation) return this.loginOperation;
+    if (this.loginOperation && this.loginKind === "passkey") return this.loginOperation;
+    const superseded = this.loginOperation;
+    if (superseded) this.loginSuperseded = true;
     const operation = (async () => {
+      if (superseded) {
+        this.logger.info("browser.login_superseded_by_passkey");
+        try {
+          await superseded;
+        } catch {
+          // The embedded login is expected to end here; the passkey flow owns sign-in from now on.
+        }
+      }
+      // Only the embedded wait above may observe the supersede signal. Clearing it before any
+      // passkey work keeps this flow's own authentication wait from aborting itself.
+      this.loginSuperseded = false;
+      if (superseded && this.authView) this.closeAuthView(this.authView, true, false);
       const sessionRefresh = this.sessionRefreshOperation;
       if (sessionRefresh) {
         try {
@@ -2498,9 +2532,14 @@ class BrowserHost {
       });
     })();
     const tracked = operation.finally(() => {
-      if (this.loginOperation === tracked) this.loginOperation = null;
+      if (this.loginOperation === tracked) {
+        this.loginOperation = null;
+        this.loginKind = null;
+        this.loginSuperseded = false;
+      }
     });
     this.loginOperation = tracked;
+    this.loginKind = "passkey";
     return tracked;
   }
 
@@ -2787,6 +2826,9 @@ class BrowserHost {
   async waitForAuthenticated(timeoutMs = 180_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      // A superseding passkey sign-in releases this wait immediately; otherwise the embedded login
+      // would hold the browser's manual-operation lock for the rest of its timeout.
+      if (this.loginSuperseded) throw new Error(LOGIN_SUPERSEDED_MESSAGE);
       if (this.authNavigationError) {
         const error = this.authNavigationError;
         this.authNavigationError = null;
@@ -2921,7 +2963,8 @@ class BrowserHost {
       return await action();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.setState({ status: "error", message });
+      // The superseding sign-in publishes its own state; an error banner here would be wrong.
+      if (message !== LOGIN_SUPERSEDED_MESSAGE) this.setState({ status: "error", message });
       throw error;
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);

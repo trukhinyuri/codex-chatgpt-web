@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,8 +31,22 @@ function scratch(name: string): string {
   return root;
 }
 
+// DevChatDriver.compact() (src/dev-chat/driver.ts) calls the real compactRequest/responseRequest
+// from src/server.ts, which now persists completed compaction checkpoints to disk
+// (compaction-continuation.ts) under defaultConfig()'s config directory. Without this isolation,
+// defaultConfig() resolves that directory from CODEX_CHATGPT_WEB_HOME (or the real
+// ~/.codex-chatgpt-web when unset), and the auto-compact tests below would write real checkpoint
+// files into it.
+let devChatHomeRoot: string;
+beforeEach(() => {
+  devChatHomeRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-dev-chat-test-"));
+  process.env.CODEX_CHATGPT_WEB_HOME = devChatHomeRoot;
+});
+
 afterEach(() => {
   chatGptTurnSessions.clear();
+  delete process.env.CODEX_CHATGPT_WEB_HOME;
+  rmSync(devChatHomeRoot, { recursive: true, force: true });
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
