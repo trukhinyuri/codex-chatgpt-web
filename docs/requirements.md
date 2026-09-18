@@ -49,6 +49,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. Secrets stay with the human: agents never type, read, print or store passwords, one-time codes, API keys or cookies.
 3. No OAuth client secrets or other credentials are committed; build inputs from outside the repository are pinned by version and SHA-256.
 4. The bridge listens only on loopback and rejects foreign origins.
+5. The product does not disguise what it is. It never spoofs a browser, hides its automation, or evades a provider's detection or protective measures; it reduces the risk of account restrictions by staying within limits and terms, not by concealment.
 
 ## R8. Quality
 
