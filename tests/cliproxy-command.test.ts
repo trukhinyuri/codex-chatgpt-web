@@ -35,8 +35,8 @@ test("connect checks the proxy with the key from stdin, stores it privately and 
   expect(seen.map(request => new URL(request.url).pathname)).toEqual(["/healthz", "/v1/models"]);
   expect(seen[1]!.headers.get("authorization")).toBe(`Bearer ${KEY}`);
   expect(readCliProxyConnection(home)).toEqual({ baseUrl: "http://127.0.0.1:8317", apiKey: KEY });
-  expect(statSync(join(home, "secrets", "cliproxy-api-key")).mode & 0o777).toBe(0o600);
-  expect(statSync(join(home, "cliproxy.json")).mode & 0o777).toBe(0o600);
+  if (process.platform !== "win32") expect(statSync(join(home, "secrets", "cliproxy-api-key")).mode & 0o777).toBe(0o600);
+  if (process.platform !== "win32") expect(statSync(join(home, "cliproxy.json")).mode & 0o777).toBe(0o600);
   expect(readFileSync(join(home, "cliproxy.json"), "utf8")).not.toContain(KEY);
 });
 
@@ -82,7 +82,7 @@ test("the management key is checked, stored privately, and accounts are listed w
   const stored = await run(["management-key", "--stdin"], { fetchImpl: proxy.fetchImpl, readKey: async () => MGMT });
   expect(JSON.parse(stored)).toEqual({ management: true, accounts: 2 });
   expect(stored).not.toContain(MGMT);
-  expect(statSync(join(home, "secrets", "cliproxy-management-key")).mode & 0o777).toBe(0o600);
+  if (process.platform !== "win32") expect(statSync(join(home, "secrets", "cliproxy-management-key")).mode & 0o777).toBe(0o600);
   expect(proxy.seen.at(-1)!.headers.get("authorization")).toBe(`Bearer ${MGMT}`);
 
   const listed = JSON.parse(await run(["accounts"], { fetchImpl: proxy.fetchImpl })) as { accounts: Array<Record<string, unknown>> };
