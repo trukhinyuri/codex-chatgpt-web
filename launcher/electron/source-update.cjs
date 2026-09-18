@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { classifyUpdateFailure } = require("./problem-report.cjs");
 
 // This fork ships from source: the launcher updates itself from the main branch of the fork's
 // GitHub repository and installs a new build only after the complete verification suite passes.
@@ -406,6 +407,7 @@ function createSourceUpdateController({
   sourceRoot = defaultSourceRoot(),
   healthTimeoutMs = SOURCE_HEALTH_TIMEOUT_MS,
   publish,
+  onProblem,
   logger,
   dependencies = {},
 }) {
@@ -426,9 +428,28 @@ function createSourceUpdateController({
 
   if (supported) {
     // Surface what the previous update did: a rollback is a problem the maintainer needs to hear about.
-    const last = readUpdateState(statePath).lastResult;
+    const updateState = readUpdateState(statePath);
+    const last = updateState.lastResult;
     if (last?.result === "rolled-back" && last.commit !== currentCommit) {
       logger?.warn("launcher.update_rolled_back", { commit: last.commit, stage: last.stage, at: last.at, channel: "source" });
+    }
+    // Install and startup failures are recorded by the worker after this launcher exited; report
+    // each once. Build failures are reported where they happen, in beginInstall.
+    if ((last?.result === "rolled-back" || (last?.result === "failed" && last.stage !== "build"))
+      && last.stage !== "rolled-back-by-user" && !last.reported && COMMIT.test(String(last.commit || ""))) {
+      const code = classifyUpdateFailure(last.reason);
+      if (code) {
+        onProblem?.({
+          kind: last.result === "rolled-back" ? "update-rolled-back" : "update-install-failed",
+          code,
+          stage: last.stage,
+          version: sourceUpdateVersion(currentVersion, last.commit),
+          commit: last.commit,
+        });
+      }
+      try {
+        writePrivateFileAtomic(statePath, `${JSON.stringify({ ...updateState, lastResult: { ...last, reported: true } }, null, 2)}\n`);
+      } catch {}
     }
   }
 
@@ -570,6 +591,8 @@ function createSourceUpdateController({
         logger?.warn("launcher.update_failed", { commit: target.commit, automatic, message: errorMessage(error), channel: "source" });
         // Remember the failure: an unattended update never retries this commit; a manual one may.
         try { recordFailedCommit(statePath, target.commit, { stage: "build", reason: errorMessage(error) }); } catch {}
+        const code = classifyUpdateFailure(errorMessage(error));
+        if (code) onProblem?.({ kind: "update-build-failed", code, stage: "build", version: target.version, commit: target.commit });
         candidate = { ...target, automatic: false, blocked: "failed-before" };
         transition(availableState(candidate));
         throw new Error(`Update to ${target.version} was not installed: ${errorMessage(error)}. Details: ${logPath}`);
@@ -638,6 +661,7 @@ module.exports = {
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  readLoginShellPath,
   readUpdateState,
   recordFailedCommit,
   releaseLock,

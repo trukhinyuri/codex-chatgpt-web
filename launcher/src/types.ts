@@ -129,7 +129,11 @@ export interface LauncherSnapshot {
   smokePassed: boolean;
   operation: OperationState | null;
   update: UpdateState;
+  /** Consent for GitHub problem reports; "unavailable" outside installed builds of this fork. */
+  problemReports: ProblemReportConsent;
 }
+
+export type ProblemReportConsent = "unknown" | "auto" | "never" | "unavailable";
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
@@ -182,6 +186,7 @@ export interface LauncherApi {
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
+  setProblemReports(enabled: boolean): Promise<ProblemReportConsent>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;

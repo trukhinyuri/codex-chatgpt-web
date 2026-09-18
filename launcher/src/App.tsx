@@ -1587,6 +1587,7 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const [problemReports, setProblemReports] = useState(snapshot.problemReports);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1694,6 +1695,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {problemReports !== "unavailable" ? <SettingRow body={copy.problemReportsBody} label={copy.problemReports}>
+          <Switch
+            checked={problemReports === "auto"}
+            onChange={(checked) => void api!.setProblemReports(checked)
+              .then(setProblemReports)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         {snapshot.packaged && !devProfile ? <SettingRow body={copy.automaticUpdatesBody} label={copy.automaticUpdates}>
           <Switch
             checked={snapshot.state.automaticUpdates}

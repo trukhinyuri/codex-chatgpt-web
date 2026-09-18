@@ -113,6 +113,7 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 | Updates | Offers upstream release packages | Installs this repository's `main` automatically after the full test suite passes, only while Codex is idle, and restores the previous build if the new one does not start cleanly |
 | Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
 | Other models | — | [Models from a local CLIProxyAPI](#models-from-cliproxyapi) join the same Codex model list, with Codex's own sign-in and features intact |
+| Problem reports | — | [Consented GitHub issues](#problem-reports) built only from fixed codes and versions |
 | AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
 
 Each fix meant for upstream lives in its own `fix/…` branch with a regression test.
@@ -131,6 +132,14 @@ Each fix meant for upstream lives in its own `fix/…` branch with a regression 
   Automatic updates then skip the commit you rolled back from until `main` moves on.
 - **Logs.** `~/Library/Application Support/Codex Web GPT/logs/source-update.log` records every check, build step, swap and rollback.
 - **Trust.** An update runs this repository's build and tests on your Mac, as the installer does. Only the maintainer can push to `main`.
+
+## Problem reports
+
+When an update fails to build or pass its tests, is rolled back, or the local runtime does not start, the launcher can open an issue in this repository so the maintainer can fix it. The first time, it asks and shows the exact report; choose **Always report automatically**, **Report this one**, **Not now** or **Never**, and change it later in **Settings → Report problems to the maintainer**.
+
+- A report contains only fixed codes from a closed list, the app version and commit, the macOS version and the CPU architecture. It never contains prompts, session content, file paths, account data or error text; the code that builds reports drops anything else.
+- It is sent through your own GitHub CLI login (`gh`), so the issue is public and shows your GitHub account. Without `gh` nothing is sent.
+- Each problem is one issue, shared by everyone who hits it; a repeat adds at most one short comment a day. At most five new issues a day are opened from one Mac.
 
 ## Requirements and limits
 

@@ -9,6 +9,7 @@ Instructions for AI coding agents (Codex, Claude Code and others) that install, 
 - **Never interrupt running work.** Before you quit the launcher or restart its runtime, confirm that `curl -s http://127.0.0.1:17841/healthz` reports `"active_http_turns":0` and `"active_browser_turns":0`, or run the installer with `WAIT_FOR_IDLE=1`, which waits for that itself.
 - **Leave Codex's configuration to the launcher.** **Install models** and **Remove** manage the keys it owns in `~/.codex/config.toml`. Before any manual edit, copy the file with a date in its name.
 - **Report evidence.** For every step, give the command and its result. Say plainly what failed or was not checked.
+- **Problem reports are the human's choice.** The launcher asks before it opens a GitHub issue. Never answer that dialog for the human, and never paste logs, prompts or paths into an issue yourself; the automatic report already carries what the maintainer needs.
 
 ## Install (macOS)
 

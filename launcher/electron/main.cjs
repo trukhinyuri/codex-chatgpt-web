@@ -36,8 +36,11 @@ const {
   SOURCE_CHECK_INTERVAL_MS,
   STARTUP_HEALTH_FILE,
   createSourceUpdateController,
+  readLoginShellPath,
+  sourceUpdateVersion,
   writeStartupHealth,
 } = require("./source-update.cjs");
+const { createProblemReporter } = require("./problem-report.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
@@ -111,6 +114,7 @@ let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
 let automaticUpdateRunning = false;
+let problemReporter = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -245,6 +249,12 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
     startupCleanupFailed: "Startup cleanup failed",
     catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
+    reportTitle: "Report this problem?",
+    reportDetail: "Codex Superpower can open a public issue in github.com/trukhinyuri/codex-superpower through your GitHub CLI (gh) login, so the maintainer can fix it. Exactly this is sent, nothing else: no prompts, session content, file paths, account data or error text.",
+    reportAlways: "Always report automatically",
+    reportOnce: "Report this one",
+    reportNotNow: "Not now",
+    reportNever: "Never",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -260,6 +270,12 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
     startupCleanupFailed: "启动清理失败",
     catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
+    reportTitle: "报告此问题？",
+    reportDetail: "Codex Superpower 可以通过你的 GitHub CLI（gh）登录在 github.com/trukhinyuri/codex-superpower 中创建公开 issue，方便维护者修复。只会发送下面的内容：不包含提示词、会话内容、文件路径、账户数据或错误文本。",
+    reportAlways: "始终自动报告",
+    reportOnce: "报告这一次",
+    reportNotNow: "以后再说",
+    reportNever: "从不",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -275,6 +291,12 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
     startupCleanupFailed: "啟動清理失敗",
     catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
+    reportTitle: "回報此問題？",
+    reportDetail: "Codex Superpower 可以透過你的 GitHub CLI（gh）登入，在 github.com/trukhinyuri/codex-superpower 建立公開 issue，方便維護者修正。只會送出下方內容：不含提示詞、工作階段內容、檔案路徑、帳戶資料或錯誤文字。",
+    reportAlways: "一律自動回報",
+    reportOnce: "回報這一次",
+    reportNotNow: "稍後再說",
+    reportNever: "永不",
   }),
   "ja": Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -290,6 +312,12 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
     startupCleanupFailed: "起動後のクリーンアップに失敗しました",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
+    reportTitle: "この問題を報告しますか？",
+    reportDetail: "Codex Superpower は GitHub CLI（gh）のログインを使って github.com/trukhinyuri/codex-superpower に公開 issue を作成し、メンテナーが修正できるようにします。送信されるのは下の内容だけで、プロンプト、セッション内容、ファイルパス、アカウント情報、エラーテキストは含まれません。",
+    reportAlways: "常に自動で報告",
+    reportOnce: "今回だけ報告",
+    reportNotNow: "後で",
+    reportNever: "報告しない",
   }),
   "ko": Object.freeze({
     openLauncher: "Codex Web GPT 열기",
@@ -305,6 +333,12 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
+    reportTitle: "이 문제를 보고할까요?",
+    reportDetail: "Codex Superpower는 GitHub CLI(gh) 로그인으로 github.com/trukhinyuri/codex-superpower에 공개 이슈를 만들어 관리자가 고칠 수 있게 합니다. 아래 내용만 전송되며 프롬프트, 세션 내용, 파일 경로, 계정 정보, 오류 텍스트는 포함되지 않습니다.",
+    reportAlways: "항상 자동으로 보고",
+    reportOnce: "이번만 보고",
+    reportNotNow: "나중에",
+    reportNever: "보고하지 않음",
   }),
 });
 
@@ -530,7 +564,12 @@ function registerIpc({ logger, stateStore }) {
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
+    problemReports: problemReporter?.consent() ?? "unavailable",
   }));
+  handle("launcher:problem-reports", (_event, enabled) => {
+    if (!problemReporter) throw new Error("Problem reports are available in installed builds of Codex Superpower");
+    return problemReporter.setConsent(enabled === true ? "auto" : "never");
+  });
 
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });
@@ -1073,6 +1112,49 @@ function reportLauncherStartup(status, reason = null) {
   });
 }
 
+/** The version string reports use: the app version and this build's commit. */
+function reportedVersion() {
+  const commit = String(LAUNCHER_MANIFEST.sourceCommit || "");
+  return SOURCE_COMMIT.test(commit) ? sourceUpdateVersion(app.getVersion(), commit) : app.getVersion();
+}
+
+async function findGhExecutable() {
+  const loginPath = await readLoginShellPath();
+  for (const directory of [...loginPath.split(path.delimiter), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) {
+    const candidate = directory ? path.join(directory, "gh") : "";
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** One-time consent for problem reports; the dialog shows exactly what would be sent. */
+async function askProblemReportConsent(report, stateStore) {
+  const copy = nativeCopyFor(stateStore.read().language);
+  const options = {
+    type: "question",
+    title: copy.reportTitle,
+    message: report.title,
+    detail: `${copy.reportDetail}\n\n${report.body}`,
+    buttons: [copy.reportAlways, copy.reportOnce, copy.reportNotNow, copy.reportNever],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  return ["auto", "once", "skip", "never"][result.response] ?? "skip";
+}
+
+function reportProblem(problem) {
+  if (!problemReporter) return;
+  void problemReporter.report({
+    version: reportedVersion(),
+    commit: LAUNCHER_MANIFEST.sourceCommit,
+    ...problem,
+  });
+}
+
 async function start() {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
@@ -1140,6 +1222,15 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  // Packaged builds of this fork report problems as GitHub issues, with the user's consent.
+  if (app.isPackaged && !IS_DEV_PROFILE && SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) {
+    problemReporter = createProblemReporter({
+      userDataDirectory: app.getPath("userData"),
+      findGh: findGhExecutable,
+      askConsent: report => askProblemReportConsent(report, stateStore),
+      logger,
+    });
+  }
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -1218,6 +1309,7 @@ async function start() {
     logsDirectory: app.getPath("logs"),
     userDataDirectory: app.getPath("userData"),
     publish: (state) => send("launcher:update-state", state),
+    onProblem: reportProblem,
     logger,
   });
   registerIpc({ logger, stateStore });
@@ -1364,6 +1456,9 @@ async function start() {
       runtime.status === "ready" || runtime.status === "not-configured" ? "healthy" : "unhealthy",
       `runtime-${runtime.status}`,
     );
+    if (runtime.status !== "ready" && runtime.status !== "not-configured") {
+      reportProblem({ kind: "runtime-start-failed", code: `runtime-${runtime.status}`, stage: "startup" });
+    }
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
@@ -1432,6 +1527,7 @@ async function start() {
     }
   }).catch(async (error) => {
     reportLauncherStartup("unhealthy", "runtime-start-error");
+    reportProblem({ kind: "runtime-start-failed", code: "runtime-start-error", stage: "startup" });
     const primary = error instanceof Error ? error.message : String(error);
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const message = routeRecovery.error
