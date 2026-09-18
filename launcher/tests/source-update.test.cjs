@@ -646,7 +646,10 @@ test("startup health is a small private record without free text from the sessio
 test("the launcher reports its start, installs unattended updates only after a long idle period, and honours the setting", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
   assert.match(main, /app\.quit\(\);\n\s*return;\n\s*\}\n\s*reportLauncherStartup\("starting"\);/);
-  assert.match(main, /reportLauncherStartup\(\n\s*runtime\.status === "ready" \|\| runtime\.status === "not-configured" \? "healthy" : "unhealthy",/);
+  assert.match(main, /const runtimeHealthy = runtime\.status === "ready" \|\| runtime\.status === "not-configured";/);
+  assert.match(main, /reportLauncherStartup\(\n\s*runtimeHealthy && proxyHealthy \? "healthy" : "unhealthy",/);
+  // A managed CLIProxyAPI is brought to the bundled binary before the bridge starts taking turns.
+  assert.ok(main.indexOf("const cliproxy = await syncCliProxyService(logger);") < main.indexOf("const runtime = await runtimeSupervisor.startIfConfigured();"));
   assert.match(main, /reportLauncherStartup\("unhealthy", "runtime-start-error"\);/);
   assert.match(main, /reportLauncherStartup\("unhealthy", "launcher-start-error"\);/);
   assert.match(main, /const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 10 \* 60_000;/);

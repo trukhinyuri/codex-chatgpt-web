@@ -13,10 +13,11 @@
     "build:renderer": "vite build",
     "build": "bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
-    "package": "bun run build && bun run build:runtime && bun run scripts/package.cjs",
-    "package:mac": "bun run build && bun run build:runtime && bun run scripts/package.cjs --mac",
-    "package:win": "bun run build && bun run build:runtime && bun run scripts/package.cjs --win",
-    "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
+    "build:cliproxyapi": "node scripts/prepare-cliproxyapi.cjs",
+    "package": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs",
+    "package:mac": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --mac",
+    "package:win": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --win",
+    "package:linux": "bun run build && bun run build:runtime && bun run build:cliproxyapi && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "electron ."
@@ -64,6 +65,10 @@
       {
         "from": "build/runtime",
         "to": "runtime"
+      },
+      {
+        "from": "build/cliproxyapi",
+        "to": "cliproxyapi"
       }
     ],
     "mac": {

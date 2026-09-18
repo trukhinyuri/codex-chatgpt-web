@@ -111,7 +111,7 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 - `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
 - Manage the proxy's accounts from here once you add its management key (`remote-management.secret-key` in its config), again on standard input: `cliproxy management-key --stdin`, then `cliproxy accounts` (e-mail addresses masked unless `--show-emails`), `cliproxy login claude` (also `codex`, `antigravity`, `kimi`, `xai`, `devin`, `meta`; opens the provider's sign-in page and waits), and `cliproxy remove REF` (the `ref` from the list).
 - The launcher's **CLIProxyAPI** section does the same with buttons: connect, add the management key, sign accounts in and remove them. Keys are cleared from the form as soon as they are sent.
-- You run CLIProxyAPI itself; its [README](https://github.com/router-for-me/CLIProxyAPI) covers installation.
+- The app carries a CLIProxyAPI build from `cliproxyapi/` when it was built with Go. `cliproxy service adopt --config ~/path/config.yaml [--replace-label <your LaunchAgent>]` lets the launcher run the proxy with that config: it stops your LaunchAgent (keeping a copy), and from then on every app update brings the proxy up to date too, only while Codex is idle; if the proxy does not come back, the whole update is rolled back. `cliproxy service release` gives your own LaunchAgent back.
 
 ## What this fork changes
 
@@ -177,7 +177,7 @@ More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), **Activity** and **Settings → 
 
 ## Develop
 
-Building from source requires Bun 1.4.0 exactly.
+Building from source requires Bun 1.4.0 exactly; the CLIProxyAPI component in `cliproxyapi/` also needs Go 1.26 or newer.
 
 ```bash
 git clone https://github.com/trukhinyuri/codex-superpower.git
@@ -190,7 +190,7 @@ bun run app:package
 
 `bun run verify` is the gate for `main`: installed launchers pick up a new `main` within an hour, and they install nothing that fails it or that does not start cleanly. Fixes meant for upstream start from `upstream/main` in a `fix/…` branch; fork-only changes start from `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [DEV chat harness](docs/dev-chat.md).
 
-The upstream README and its translations are in [docs/upstream](docs/upstream/README.md).
+The upstream README and its translations are in [docs/upstream](docs/upstream/README.md). `cliproxyapi/` holds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT), kept in sync with upstream as a `git subtree`; see AGENTS.md.
 
 ## Credits and license
 

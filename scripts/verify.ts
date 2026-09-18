@@ -34,6 +34,7 @@ try {
   await run(["run", "launcher:typecheck"]);
   await run(["run", "launcher:test"]);
   await run(["run", "launcher:build"]);
+  await run(["run", "scripts/verify-cliproxyapi.ts"]);
   await run(["run", "scripts/build-runtime-bundle.ts", runtimeBundle]);
   await run([
     "run",

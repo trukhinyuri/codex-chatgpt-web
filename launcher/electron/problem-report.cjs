@@ -27,7 +27,7 @@ const CODES = new Set([
   "verify-failed", "launcher-dependencies-failed", "dependencies-failed", "package-failed",
   "commit-mismatch", "package-missing", "checkout-foreign", "network", "git-failed", "extract-failed",
   "startup-runtime-error", "startup-launcher-error", "exited-during-startup", "startup-timeout",
-  "stage-failed", "runtime-start-error", "other",
+  "stage-failed", "runtime-start-error", "cliproxy-unhealthy", "startup-cliproxy-unhealthy", "other",
   ...RUNTIME_STATUSES.map(status => `runtime-${status}`),
   ...RUNTIME_STATUSES.map(status => `startup-runtime-${status}`),
 ]);
@@ -55,6 +55,7 @@ function classifyUpdateFailure(message) {
     [/git [a-z-]+ .*failed/, "git-failed"],
     [/Could not extract the built package/, "extract-failed"],
     [/startup failed \(runtime-start-error\)/, "startup-runtime-error"],
+    [/startup failed \(cliproxy-unhealthy\)/, "startup-cliproxy-unhealthy"],
     [/startup failed \(runtime-([a-z-]+)\)/, match => `startup-runtime-${match[1]}`],
     [/startup failed \(launcher-start-error\)/, "startup-launcher-error"],
     [/exited during startup/, "exited-during-startup"],

@@ -4,6 +4,15 @@ import { join } from "node:path";
 import { stdin, stdout } from "node:process";
 import { atomicWriteFile, getConfigDir } from "./config";
 import {
+  DEFAULT_BUNDLE_DIR,
+  adoptService,
+  readServiceState,
+  releaseService,
+  servicePaths,
+  syncService,
+  type Launchctl,
+} from "./cliproxy-service";
+import {
   CLIPROXY_CONNECTION_FILE,
   CLIPROXY_ROUTES_FILE,
   loopbackBaseUrl,
@@ -29,7 +38,8 @@ export const CLIPROXY_HELP = `  codex-chatgpt-web cliproxy status
   codex-chatgpt-web cliproxy management-key --stdin
   codex-chatgpt-web cliproxy accounts [--show-emails]
   codex-chatgpt-web cliproxy login <${LOGIN_PROVIDERS.join("|")}> [--no-open]
-  codex-chatgpt-web cliproxy remove REF`;
+  codex-chatgpt-web cliproxy remove REF
+  codex-chatgpt-web cliproxy service <status|sync [--bundle DIR]|adopt --config PATH [--replace-label LABEL]|release>`;
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
@@ -126,6 +136,12 @@ function flag(args: string[], name: string): boolean {
   return true;
 }
 
+const systemLaunchctl: Launchctl = async (args) => {
+  const child = Bun.spawn(["/bin/launchctl", ...args], { stdio: ["ignore", "pipe", "pipe"] });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  return { code, stdout, stderr };
+};
+
 function openInBrowser(url: string): void {
   if (process.platform === "darwin") Bun.spawn(["/usr/bin/open", url], { stdio: ["ignore", "ignore", "ignore"] });
 }
@@ -139,6 +155,8 @@ export async function cliproxyCommand(
     write = (text: string) => { stdout.write(text); },
     open = openInBrowser,
     sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+    launchctl = systemLaunchctl,
+    launchAgents = undefined as string | undefined,
   } = {},
 ): Promise<void> {
   const action = args.shift() ?? "status";
@@ -276,5 +294,36 @@ export async function cliproxyCommand(
     write(`${JSON.stringify({ removed: accountRef(name) }, null, 2)}\n`);
     return;
   }
-  throw new Error("cliproxy action must be one of: status, connect, disconnect, management-key, accounts, login, remove");
+  if (action === "service") {
+    if (process.platform !== "darwin" && !launchAgents) throw new Error("The CLIProxyAPI service is managed on macOS only");
+    const deps = { home, uid: process.getuid?.() ?? 0, launchctl, fetchImpl, sleep, launchAgents };
+    const sub = args.shift() ?? "status";
+    const bundle = option(args, "--bundle") ?? DEFAULT_BUNDLE_DIR;
+    if (sub === "status") {
+      if (args.length > 0) throw new Error(`Unexpected argument: ${args[0]}`);
+      const state = readServiceState(servicePaths(home, launchAgents));
+      write(`${JSON.stringify({ managed: state?.enabled === true, configPath: state?.configPath ?? null, adoptedFrom: state?.adoptedFrom?.label ?? null }, null, 2)}\n`);
+      return;
+    }
+    if (sub === "sync") {
+      if (args.length > 0) throw new Error(`Unexpected argument: ${args[0]}`);
+      write(`${JSON.stringify(await syncService(deps, bundle), null, 2)}\n`);
+      return;
+    }
+    if (sub === "adopt") {
+      const configPath = option(args, "--config");
+      const replaceLabel = option(args, "--replace-label") ?? null;
+      if (!configPath) throw new Error("cliproxy service adopt needs --config PATH");
+      if (args.length > 0) throw new Error(`Unexpected argument: ${args[0]}`);
+      write(`${JSON.stringify(await adoptService(deps, configPath, replaceLabel, bundle), null, 2)}\n`);
+      return;
+    }
+    if (sub === "release") {
+      if (args.length > 0) throw new Error(`Unexpected argument: ${args[0]}`);
+      write(`${JSON.stringify(await releaseService(deps), null, 2)}\n`);
+      return;
+    }
+    throw new Error("cliproxy service action must be one of: status, sync, adopt, release");
+  }
+  throw new Error("cliproxy action must be one of: status, connect, disconnect, management-key, accounts, login, remove, service");
 }

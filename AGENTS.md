@@ -48,7 +48,7 @@ When the human runs [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 
 printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" cliproxy connect --api-key-stdin
 ```
 
-Expect `"connected": true` with the number of proxy models. To manage the proxy's accounts, pipe its management key the same way into `cliproxy management-key --stdin`; then `cliproxy accounts` lists them (e-mails masked; do not use `--show-emails` in a shared transcript), `cliproxy login <provider>` opens the sign-in page for the human and waits, and `cliproxy remove REF` removes one (by the `ref` from the list) after the human confirms. Then ask the human to restart Codex and check that the model list shows the proxy's models. `cliproxy status` reports the connection; `cliproxy disconnect` turns it off. Codex keeps its OpenAI provider; do not add a separate `model_provider` for the proxy, which would switch off Codex features tied to that provider.
+Expect `"connected": true` with the number of proxy models. To manage the proxy's accounts, pipe its management key the same way into `cliproxy management-key --stdin`; then `cliproxy accounts` lists them (e-mails masked; do not use `--show-emails` in a shared transcript), `cliproxy login <provider>` opens the sign-in page for the human and waits, and `cliproxy remove REF` removes one (by the `ref` from the list) after the human confirms. Then ask the human to restart Codex and check that the model list shows the proxy's models. `cliproxy status` reports the connection; `cliproxy disconnect` turns it off. Codex keeps its OpenAI provider; do not add a separate `model_provider` for the proxy, which would switch off Codex features tied to that provider. To let the launcher run and update the proxy itself, ask the human first, then `cliproxy service adopt --config <their config.yaml> --replace-label <their LaunchAgent label, if any>`; expect `"status": "running"`. `cliproxy service release` undoes it.
 
 ## Verify
 
@@ -114,4 +114,14 @@ Evidence lives here:
 - Branches: a fix meant for upstream starts from `upstream/main` in `fix/<topic>` with a regression test; a fork-only change starts from `main` in `fork/<topic>`. Merge both into `main`, and keep `fork-build` equal to `main` for older installers.
 - Keep the Full-harness contract in `src/adapters/chatgpt-web/prompt.ts` free of the vocabulary that `tests/prompt-contract.test.ts` excludes.
 - Launcher interface text needs all five languages in `launcher/src/i18n.ts`.
+- `cliproxyapi/` is [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (Go), imported as a squashed `git subtree` of the `superpower` branch of [trukhinyuri/vibeflow](https://github.com/trukhinyuri/vibeflow): upstream plus this project's fixes. `bun run verify` builds and tests it (`scripts/verify-cliproxyapi.ts`) with the Go toolchain pinned in `scripts/cliproxyapi-build.json`, which the build downloads from go.dev and checks by SHA-256 on first use (`CODEX_SUPERPOWER_GO` overrides it; caches live in `~/Library/Caches/codex-superpower`). Skip a Go test only for timing or network flakiness, in `FLAKY_GO_TESTS` with the reason.
+- Upstream embeds the OAuth client of the public Antigravity app in its source. This repository never carries it: verify fails on such a literal in `cliproxyapi/`, and the build reads it from upstream at the commit pinned in `scripts/cliproxyapi-build.json` (SHA-256 checked) and passes it to the Go linker. To sync upstream, rebase `superpower` in a CLIProxyAPI clone onto the new upstream release (keep the commit that turns the client into build-time variables), push it, then squash it in on a branch and verify:
+
+  ```bash
+  git fetch https://github.com/trukhinyuri/vibeflow.git superpower
+  git subtree merge --prefix=cliproxyapi --squash FETCH_HEAD
+  bun run verify
+  ```
+
+  Never `git subtree pull` from upstream directly: its history carries the literal. If upstream changed `internal/auth/antigravity/constants.go`, update its commit and SHA-256 in `scripts/cliproxyapi-build.json`.
 - Architecture and security background: [docs/architecture.md](docs/architecture.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md).

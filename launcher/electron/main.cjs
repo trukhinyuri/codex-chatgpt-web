@@ -41,7 +41,7 @@ const {
   writeStartupHealth,
 } = require("./source-update.cjs");
 const { createProblemReporter } = require("./problem-report.cjs");
-const { createCliProxyPanel } = require("./cliproxy-cli.cjs");
+const { createCliProxyPanel, runCliProxy } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
@@ -1259,6 +1259,29 @@ function reportLauncherStartup(status, reason = null) {
   });
 }
 
+/**
+ * Bring a CLIProxyAPI service this app manages to the proxy binary it carries. Runs before the bridge
+ * starts, so no Codex turn goes through the proxy while it restarts. A managed proxy that does not
+ * come back makes this start unhealthy, and the update worker restores the previous app (and with
+ * it the previous proxy binary).
+ */
+async function syncCliProxyService(logger) {
+  if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "darwin") return { status: "off" };
+  try {
+    const result = await runCliProxy(
+      runtimeSupervisor.runtimeCommand(["cliproxy", "service", "sync", "--bundle", path.join(process.resourcesPath, "cliproxyapi")]),
+      { env: { ...process.env, CODEX_CHATGPT_WEB_HOME: CORE_HOME }, timeoutMs: 90_000 },
+    );
+    if (result?.status !== "off") {
+      logger.info("cliproxy.service_synced", { status: result?.status, binaryChanged: result?.binaryChanged === true, proxyVersion: result?.proxyVersion ?? null });
+    }
+    return result ?? { status: "off" };
+  } catch (error) {
+    logger.warn("cliproxy.service_sync_failed", { message: error instanceof Error ? error.message : String(error) });
+    return { status: "unhealthy" };
+  }
+}
+
 /** The version string reports use: the app version and this build's commit. */
 function reportedVersion() {
   const commit = String(LAUNCHER_MANIFEST.sourceCommit || "");
@@ -1597,16 +1620,20 @@ async function start() {
         send("launcher:state-changed", state);
       }
     }
+    const cliproxy = await syncCliProxyService(logger);
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return runtime;
+    if (runtime.status !== "ready") return { ...runtime, cliproxy: cliproxy.status };
     const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    return { ...runtime, cliproxy: cliproxy.status, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
     // "not-configured" is a healthy start: a fresh install has nothing to run yet.
+    const runtimeHealthy = runtime.status === "ready" || runtime.status === "not-configured";
+    const proxyHealthy = runtime.cliproxy !== "unhealthy";
     reportLauncherStartup(
-      runtime.status === "ready" || runtime.status === "not-configured" ? "healthy" : "unhealthy",
-      `runtime-${runtime.status}`,
+      runtimeHealthy && proxyHealthy ? "healthy" : "unhealthy",
+      proxyHealthy ? `runtime-${runtime.status}` : "cliproxy-unhealthy",
     );
+    if (!proxyHealthy) reportProblem({ kind: "runtime-start-failed", code: "cliproxy-unhealthy", stage: "startup" });
     if (runtime.status !== "ready" && runtime.status !== "not-configured") {
       reportProblem({ kind: "runtime-start-failed", code: `runtime-${runtime.status}`, stage: "startup" });
     }
