@@ -125,6 +125,8 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 | A tool call that ChatGPT stops before it runs | The model may blame Codex auto-review or the target service | The model reports that ChatGPT stopped the call and that it never reached Codex |
 | Updates | Offers upstream release packages | Installs this repository's `main` automatically after the full test suite passes, only while Codex is idle, and restores the previous build if the new one does not start cleanly |
 | Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
+| Fixes from the wider project | Open pull requests and forks, unmerged | About thirty fixes ported from upstream pull requests and other forks, each with a regression test: DNS-rebinding protection for the bridge, exact origin checks, no resend of a prompt ChatGPT already accepted, retry and continuation fixes, composer and effort-slider races, retained-tab and session recovery, compaction persistence, image validation, doctor evidence, a visible tray icon |
+| Quitting with running turns | Cancels them | Asks first; the default keeps the launcher running |
 | Other models | — | [Models from a local CLIProxyAPI](#models-from-cliproxyapi) join the same Codex model list, with Codex's own sign-in and features intact |
 | Problem reports | — | [Consented GitHub issues](#problem-reports) built only from fixed codes and versions |
 | AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
