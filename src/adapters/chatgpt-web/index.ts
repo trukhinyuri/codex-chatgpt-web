@@ -299,6 +299,15 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
   for (const event of events) emit(event);
 }
 
+/**
+ * A rate limit ChatGPT reports after Send, before this browser turn handed Codex any tool call,
+ * repeats no local work when the turn is sent again on a fresh surface. It stays retryable so Codex
+ * waits out the stated delay instead of failing the task; every other post-send error does not.
+ */
+export function rateLimitStaysRetryableAfterSend(error: ChatGptWebAdapterError, handedToolCallsToCodex: boolean): boolean {
+  return error.retryable && chatGptRateLimitCause(error) !== undefined && !handedToolCallsToCodex;
+}
+
 function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   const phase = session.runtime.submission?.phase;
@@ -327,6 +336,7 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
   }
   if (normalized instanceof ChatGptWebAdapterError) {
     if (!normalized.retryable) return normalized;
+    if (rateLimitStaysRetryableAfterSend(normalized, session.hasHandedToolCallsToCodex())) return normalized;
     // The originating code/status/message stay visible (folded in as `cause`) so the failure
     // remains diagnosable even though the prompt will not be resent.
     return new ChatGptWebAdapterError(normalized.message, {

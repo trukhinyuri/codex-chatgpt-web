@@ -17,7 +17,7 @@ import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePa
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
-import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, rateLimitStaysRetryableAfterSend } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
@@ -1217,26 +1217,44 @@ describe("ChatGPT outer-native harness v4", () => {
 
         try {
           const adapter = createChatGptWebAdapter(provider);
+          const rateLimit = upstream.error().code === "rate_limit_exceeded";
           for (let attempt = 0; attempt < 2; attempt += 1) {
             const events: AdapterEvent[] = [];
             await adapter.runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
             const error = events.at(-1) as Extract<AdapterEvent, { type: "error" }> | undefined;
-            // The structured error keeps its own code/message (still diagnosable), but past the
-            // send phase it must never stay retryable — that is what stops the resend.
+            // The structured error keeps its own code/message (still diagnosable). Past the send
+            // phase it stops being retryable, except a rate limit before any tool call reached
+            // Codex: resending that repeats no local work, and Codex must wait out the delay.
             expect(error).toMatchObject({
               type: "error",
               code: upstream.error().code,
-              message: upstream.error().message,
-              retryable: false,
+              retryable: rateLimit,
             });
+            if (!rateLimit) expect(error!.message).toBe(upstream.error().message);
           }
-          expect(browserStarts).toBe(1);
+          // A rate-limited turn starts again on a fresh surface; anything else is never resent.
+          expect(browserStarts).toBe(rateLimit ? 2 : 1);
         } finally {
           (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
         }
       });
     }
   }
+
+  test("only a rate limit with no tool call handed to Codex stays retryable after Send", () => {
+    const limit = new ChatGptWebAdapterError("ChatGPT rate limit: too many requests. Please try again in 60s.", {
+      status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true,
+    });
+    const serverError = new ChatGptWebAdapterError("ChatGPT ended the turn with 'Something went wrong'.", {
+      status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true,
+    });
+    expect(rateLimitStaysRetryableAfterSend(limit, false)).toBe(true);
+    expect(rateLimitStaysRetryableAfterSend(limit, true)).toBe(false);
+    expect(rateLimitStaysRetryableAfterSend(serverError, false)).toBe(false);
+    expect(rateLimitStaysRetryableAfterSend(new ChatGptWebAdapterError(limit.message, {
+      status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false,
+    }), false)).toBe(false);
+  });
 
   test("an unclassified browser failure retires its session before the next native retry", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h4-error-retry-${process.pid}-${Date.now()}`);

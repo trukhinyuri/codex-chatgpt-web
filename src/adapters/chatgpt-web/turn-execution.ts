@@ -336,6 +336,11 @@ export class ChatGptTurnSession {
     return [...this.outstandingById.values()];
   }
 
+  /** Whether Codex received any tool call from this browser turn, so a resend could repeat its effects. */
+  hasHandedToolCallsToCodex(): boolean {
+    return this.outstandingById.size > 0 || this.deliveredResultIds.size > 0;
+  }
+
   settledOutcome(): ChatGptBrowserOutcome | undefined {
     return this.settledBrowserOutcome;
   }
