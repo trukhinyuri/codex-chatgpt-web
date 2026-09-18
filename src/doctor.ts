@@ -6,6 +6,7 @@ import { inspectCodexIntegration } from "./codex-integration";
 import { findTopLevelAssignment, parseDocument } from "./codex-integration-document";
 import { getCodexConfigPath } from "./codex-integration-shared";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
+import { formatRuntimeBuildStamp } from "./build-stamp";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 import { getTunnelServiceStatus } from "./tunnel-service";
@@ -15,6 +16,7 @@ import {
   readLauncherBrowserHostDescriptor,
 } from "./launcher-browser-host";
 import { processRunning } from "./process";
+import { VERSION } from "./version";
 
 const BUILTIN_CODEX_MODEL_PROVIDER = "openai";
 
@@ -25,12 +27,16 @@ export interface DoctorCheck {
   status: CheckStatus;
   message: string;
   detail?: string;
+  /** True when this check cannot be proven from this machine alone (e.g. an external connector). */
+  unprovenLocally?: boolean;
 }
 
 export interface DoctorReport {
   ok: boolean;
   mode?: AppConfig["mode"];
   checks: DoctorCheck[];
+  /** ids of every unprovenLocally check, so "ready" can be told apart from "ready, but unproven". */
+  unproven: string[];
 }
 
 /** Whether Codex's own config routes model discovery somewhere other than this daemon. */
@@ -223,13 +229,14 @@ export function modelCatalogDoctorCheck(input: {
 
 export async function runDoctor(): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
+  checks.push({ id: "build", status: "ok", message: `Runtime ${VERSION}, ${formatRuntimeBuildStamp()}` });
   let config: AppConfig;
   try {
     config = loadConfig();
     checks.push({ id: "config", status: "ok", message: `Configuration is valid (${getConfigPath()})` });
   } catch (error) {
     checks.push({ id: "config", status: "error", message: "Configuration is invalid", detail: error instanceof Error ? error.message : String(error) });
-    return { ok: false, checks };
+    return { ok: false, checks, unproven: [] };
   }
 
   if (config.browserHost === "launcher") {
@@ -345,6 +352,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push({
       id: "connector",
       status: "warning",
+      unprovenLocally: true,
       message: `Local checks cannot prove that ChatGPT connector ${JSON.stringify(config.appName)} is attached to this tunnel`,
       detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
     });
@@ -356,6 +364,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     ok: !checks.some(check => check.status === "error"),
     mode: config.mode,
     checks,
+    unproven: checks.filter(check => check.unprovenLocally).map(check => check.id),
   };
 }
 
@@ -365,6 +374,12 @@ export function formatDoctorReport(report: DoctorReport): string {
     `${icon[check.status]} ${check.message}`,
     ...(check.detail ? [`  ${check.detail}`] : []),
   ]);
-  lines.push(report.ok ? "Doctor result: ready" : "Doctor result: not ready");
+  if (!report.ok) {
+    lines.push("Doctor result: not ready");
+  } else if (report.unproven.length > 0) {
+    lines.push(`Doctor result: ready for local checks; unproven from this machine: ${report.unproven.join(", ")}`);
+  } else {
+    lines.push("Doctor result: ready");
+  }
   return `${lines.join("\n")}\n`;
 }
