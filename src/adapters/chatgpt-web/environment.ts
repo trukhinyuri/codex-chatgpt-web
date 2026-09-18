@@ -92,6 +92,19 @@ function itemTurnId(value: unknown): string | undefined {
   return typeof turnId === "string" ? turnId : undefined;
 }
 
+/**
+ * Codex labels each content part of an item it builds with the part's producer, aligned by index.
+ * User-typed text is always `user.text`, so a label can authenticate Codex-built markup that a
+ * user message could only imitate. Undefined when the labels are absent or do not align.
+ */
+function itemContentKinds(value: unknown): string[] | undefined {
+  const item = record(value);
+  const kinds = record(item?.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+  if (!Array.isArray(kinds) || !kinds.every(kind => typeof kind === "string")) return undefined;
+  const parts = Array.isArray(item?.content) ? item.content : undefined;
+  return parts && parts.length === kinds.length ? kinds as string[] : undefined;
+}
+
 function rawMessageText(value: Record<string, unknown>): string {
   if (typeof value.content === "string") return value.content;
   if (!Array.isArray(value.content)) return "";
@@ -308,7 +321,13 @@ export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRe
   return parseChatGptEnvironmentText(parsed, updates[0]!);
 }
 
-function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {
+interface EnvironmentPart {
+  item: Record<string, unknown>;
+  partIndex: number;
+  text: string;
+}
+
+function environmentPartBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): EnvironmentPart | undefined {
   if (userIndex <= 0) return undefined;
   const user = record(input[userIndex]);
   if (!isUserOrParentInstruction(user, metadata)) return undefined;
@@ -330,13 +349,19 @@ function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurn
   if (candidateTurnId !== userTurnId) return undefined;
 
   const content = Array.isArray(candidate.content) ? candidate.content : [];
-  for (const part of content) {
+  for (const [partIndex, part] of content.entries()) {
     const text = record(part)?.text;
     if (typeof text !== "string") continue;
     const trimmed = text.trim();
-    if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) return trimmed;
+    if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) {
+      return { item: candidate, partIndex, text: trimmed };
+    }
   }
   return undefined;
+}
+
+function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {
+  return environmentPartBeforeUser(input, userIndex, expectedTurnId, metadata)?.text;
 }
 
 function sandboxTypeFromEnvironment(text: string): ChatGptSandboxPolicy["type"] | undefined {
@@ -526,12 +551,23 @@ function isSameTurnSkillInjection(value: unknown, turnId: string): boolean {
     && /^<skill\b[\s\S]*<\/skill>$/.test(rawMessageText(item).trim());
 }
 
+const CODEX_ENVIRONMENT_CONTEXT_KIND = "environments.environment_context";
+const CODEX_SELECTED_SKILL_KIND = "skills.selected_skill_instructions";
+
+function hasContentKinds(value: unknown): boolean {
+  return record(record(value)?.internal_chat_message_metadata_passthrough)?.content_item_kinds !== undefined;
+}
+
 /**
- * Codex sends canonical `workspaces` metadata only for Git repositories, so a skill invocation in
- * a plain folder can never satisfy metadata-bound root recovery. Recover such a turn only through
- * the per-item native provenance that an ordinary turn already requires: the instruction and its
- * adjacent environment carry the current turn id, every later item up to the active one is a
- * same-turn skill injection, and the envelope still agrees with the canonical sandbox metadata.
+ * Codex sends canonical `workspaces` metadata only for the Git repository that contains the cwd,
+ * so metadata-bound root recovery fails for a skill invocation in a plain folder (no metadata
+ * roots) and in a project with several folders (fewer metadata roots than declared roots). Recover
+ * such a turn only through the per-item native provenance that an ordinary turn already requires:
+ * the instruction and its adjacent environment carry the current turn id, every later item up to
+ * the active one is a same-turn skill injection, and the envelope still agrees with the canonical
+ * cwd and sandbox metadata. When Codex labels content parts, or when Git metadata exists, the
+ * environment part and every skill item must also carry Codex's own labels. User-typed markup is
+ * always labelled `user.text`, so it can never supply roots that metadata does not bind.
  */
 function sameTurnSkillEnvironmentBeforeUser(
   input: unknown[],
@@ -540,12 +576,23 @@ function sameTurnSkillEnvironmentBeforeUser(
   turnId: string,
   metadata: Record<string, unknown>,
 ): string | undefined {
+  const environment = environmentPartBeforeUser(input, userIndex, turnId, metadata);
+  if (!environment) return undefined;
+  const workspaces = record(metadata.workspaces);
+  const requireCodexLabels = hasContentKinds(environment.item)
+    || (workspaces !== undefined && Object.keys(workspaces).length > 0);
+  if (requireCodexLabels
+    && itemContentKinds(environment.item)?.[environment.partIndex] !== CODEX_ENVIRONMENT_CONTEXT_KIND) {
+    return undefined;
+  }
   for (let index = userIndex + 1; index <= activeUserIndex; index += 1) {
     if (!isSameTurnSkillInjection(input[index], turnId)) return undefined;
+    if (!requireCodexLabels) continue;
+    const kinds = itemContentKinds(input[index]);
+    if (!kinds?.length || kinds.some(kind => kind !== CODEX_SELECTED_SKILL_KIND)) return undefined;
   }
-  const environment = environmentBeforeUser(input, userIndex, turnId, metadata);
-  if (!environment || !environmentMatchesCanonicalMetadata(environment, metadata, false)) return undefined;
-  return environment;
+  if (!environmentMatchesCanonicalMetadata(environment.text, metadata, false)) return undefined;
+  return environment.text;
 }
 
 function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
@@ -573,10 +620,9 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   if (current) return current;
 
   // A skill invocation appends another server-owned user item after the real instruction. Recover
-  // the earlier current-turn environment/prompt pair only through canonical metadata, and bind all
-  // declared roots to metadata workspaces so user-authored XML cannot widen filesystem authority.
-  const metadataWorkspaces = record(metadata?.workspaces);
-  const withoutWorkspaceMetadata = !metadataWorkspaces || Object.keys(metadataWorkspaces).length === 0;
+  // the earlier current-turn environment/prompt pair through canonical metadata that binds every
+  // declared root, or through per-item native provenance whose roots Codex itself labelled, so
+  // user-authored XML cannot widen filesystem authority.
   let crossedAssistantOutput = false;
   for (let index = activeUserIndex - 1; index > 0; index -= 1) {
     crossedAssistantOutput ||= hasAssistantOutputBetween(input, index, index + 1);
@@ -584,7 +630,7 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
     // provenance may cross an assistant response; otherwise resolve from the native rollout.
     if (crossedAssistantOutput && itemTurnId(input[index]) !== turnId) continue;
     const sameTurn = canonicalMetadataEnvironmentBeforeUser(input, index, metadata, true)
-      ?? (withoutWorkspaceMetadata && metadata && typeof turnId === "string" && turnId
+      ?? (metadata && typeof turnId === "string" && turnId
         ? sameTurnSkillEnvironmentBeforeUser(input, index, activeUserIndex, turnId, metadata)
         : undefined);
     if (sameTurn) return sameTurn;
