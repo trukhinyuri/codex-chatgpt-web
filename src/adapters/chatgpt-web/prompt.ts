@@ -511,6 +511,8 @@ export function compileChatGptWebPrompt(
       "Use actual Codex Native results as evidence for local observations and effects.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
+      "If ChatGPT stops a Codex Native call before it runs, that call never reached Codex: nothing ran and there is no result. Say that ChatGPT stopped it before execution and name the operation. Do not attribute it to Codex approvals, auto-review, the sandbox, or the target service, and do not conclude that a service, account, or connector is unavailable without an actual result from it.",
+      "Do not repeat an identical call that ChatGPT stopped. If the operation is still required, state it as one clear, single-purpose call; if ChatGPT stops it again, tell the user which operation did not run.",
       "Continue using the available tools until the requested work is complete and verified.",
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
     ]
