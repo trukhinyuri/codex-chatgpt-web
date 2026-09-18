@@ -31,7 +31,11 @@ const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runti
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
-const { createUpdateController } = require("./update.cjs");
+const { SOURCE_CHECK_INTERVAL_MS, createSourceUpdateController } = require("./source-update.cjs");
+// Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
+const LAUNCHER_MANIFEST = require("../package.json");
+const UPDATE_IDLE_QUIET_MS = 30_000;
+const UPDATE_IDLE_POLL_MS = 5_000;
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -927,11 +931,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    const launch = await updateController.beginInstall();
-    const result = await requestQuit();
-    if (!result.ok) {
-      updateController.cancelInstall(launch);
-      throw new Error(result.message);
+    // Build, test and stage while Codex keeps working; replace the app only in an idle window.
+    const prepared = await updateController.beginInstall();
+    try {
+      await quitWhenIdleForUpdate(prepared, logger);
+    } catch (error) {
+      updateController.cancelInstall(prepared);
+      throw error;
     }
     return true;
   });
@@ -948,7 +954,41 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+async function runtimeActivity() {
+  try {
+    const config = runtimeSupervisor?.readConfig();
+    if (!config) return null;
+    return await runtimeSupervisor.proxyHealthPayload(config);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait until Codex has had no active HTTP or browser turn for a quiet period, then let the prepared
+ * update replace the app. The runtime drains without cancelling work; if a turn arrives during the
+ * drain, the worker is stopped and the wait continues. Nothing is interrupted to install an update.
+ */
+async function quitWhenIdleForUpdate(prepared, logger) {
+  let idleSince = null;
+  for (;;) {
+    const health = await runtimeActivity();
+    const idle = !health
+      || (health.active_http_turns === 0 && health.active_browser_turns === 0);
+    idleSince = idle ? (idleSince ?? Date.now()) : null;
+    if (idleSince !== null && Date.now() - idleSince >= UPDATE_IDLE_QUIET_MS) {
+      const launch = updateController.launchInstall(prepared);
+      const result = await requestQuit({ preserveActiveTurns: true, quiet: true });
+      if (result.ok) return;
+      updateController.abortLaunch(launch);
+      logger?.info("launcher.update_waiting_for_idle", { reason: result.message });
+      idleSince = null;
+    }
+    await new Promise(resolve => setTimeout(resolve, UPDATE_IDLE_POLL_MS));
+  }
+}
+
+async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -958,7 +998,9 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    // An update drains the runtime and fails instead of cancelling turns that started meanwhile.
+    if (preserveActiveTurns) await runtimeSupervisor?.shutdown();
+    else await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
@@ -970,8 +1012,10 @@ async function requestQuit() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     quitting = false;
-    showMainWindow();
-    publishOperation({ name: "launcher-quit", status: "failed", message });
+    if (!quiet) {
+      showMainWindow();
+      publishOperation({ name: "launcher-quit", status: "failed", message });
+    }
     return { ok: false, message };
   } finally {
     shutdownInProgress = false;
@@ -1106,8 +1150,12 @@ async function start() {
   });
   await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
-  updateController = createUpdateController({
+  // This fork updates from its own GitHub main branch after the full test suite passes; it never
+  // offers upstream release packages, which do not contain the fork's changes.
+  updateController = createSourceUpdateController({
     currentVersion: app.getVersion(),
+    currentCommit: LAUNCHER_MANIFEST.sourceCommit,
+    currentSourceState: LAUNCHER_MANIFEST.sourceState,
     platform: process.platform,
     arch: process.arch,
     packaged: app.isPackaged && !IS_DEV_PROFILE,
@@ -1132,7 +1180,10 @@ async function start() {
     });
   }
   await loadRenderer(mainWindow);
-  if (!launcherSmokeTest) void updateController.checkOnce();
+  if (!launcherSmokeTest) {
+    void updateController.checkOnce();
+    setInterval(() => { void updateController.checkOnce(); }, SOURCE_CHECK_INTERVAL_MS).unref?.();
+  }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {

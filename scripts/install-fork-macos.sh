@@ -1,57 +1,88 @@
 #!/bin/bash
 # Build Codex Web GPT from the trukhinyuri fork and install it on macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/fork-build/scripts/install-fork-macos.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/install-fork-macos.sh | bash
 #
 # Environment overrides:
-#   REF=<branch>   fork branch to build (default: fork-build, which carries the fork's fixes)
-#   SRC=<dir>      checkout location (default: ~/Personal/Sources/codex-chatgpt-web)
-#   VERIFY=0       skip `bun run verify` (not recommended)
+#   REF=<branch>      branch to build (default: main)
+#   SRC=<dir>         checkout to build from (default: ~/.codex-chatgpt-web-source, a clone this
+#                     script and the launcher's updater manage; any local change there is discarded)
+#   VERIFY=0          skip `bun run verify` (not recommended; the launcher's updater never skips it)
+#   WAIT_FOR_IDLE=1   if the launcher is running, wait until Codex has no active ChatGPT Web turn,
+#                     then quit the launcher and install (never interrupts running work)
 #
-# Like the official installer, this script does not quit a running launcher: quit Codex Web GPT
-# from its menu and run the command again. A package already built from the same commit is reused.
-# It never touches ~/.codex or ~/.codex-chatgpt-web. The first app it replaces (normally the
-# official release) is kept in ~/.cache/ccw-app-official.noindex for rollback; the .noindex suffix
-# keeps that copy out of Spotlight and Launch Services.
+# The script builds with the Bun version pinned in package.json, runs the full verification,
+# packages the app, installs it into /Applications, checks that the launcher adopted the new
+# runtime, and runs doctor. It never touches ~/.codex or ~/.codex-chatgpt-web. The first app it
+# replaces is kept in ~/.cache/ccw-app-official.noindex for rollback; the .noindex suffix keeps
+# that copy out of Spotlight and Launch Services.
 set -euo pipefail
 
 REPO_URL="https://github.com/trukhinyuri/codex-chatgpt-web.git"
 UPSTREAM_URL="https://github.com/miuuyy/codex-chatgpt-web.git"
-REF="${REF:-fork-build}"
-SRC="${SRC:-$HOME/Personal/Sources/codex-chatgpt-web}"
+MANAGED_SRC="$HOME/.codex-chatgpt-web-source"
+REF="${REF:-main}"
+SRC="${SRC:-$MANAGED_SRC}"
 VERIFY="${VERIFY:-1}"
+WAIT_FOR_IDLE="${WAIT_FOR_IDLE:-0}"
 APP="/Applications/Codex Web GPT.app"
+APP_PROC="$APP/Contents/MacOS/Codex Web GPT"
 KEEP="$HOME/.cache/ccw-app-official.noindex"
+HEALTH_URL="http://127.0.0.1:17841/healthz"
 
 say() { printf '==> %s\n' "$*"; }
 die() { printf 'install-fork-macos: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = Darwin ] || die "macOS only"
-command -v git >/dev/null 2>&1 || die "git is required"
-command -v bun >/dev/null 2>&1 || die "Bun is required; the project pins its exact version in package.json"
 case "$(uname -m)" in
   arm64) ARCH=arm64 ;;
   x86_64) ARCH=x64 ;;
   *) die "unsupported architecture: $(uname -m)" ;;
 esac
+command -v git >/dev/null 2>&1 || die "git is required: install the Xcode Command Line Tools with 'xcode-select --install'"
+command -v node >/dev/null 2>&1 || die "Node.js is required to package the app: install it, for example with 'brew install node'"
+command -v bun >/dev/null 2>&1 || die "Bun is required: install the pinned version with: curl -fsSL https://bun.sh/install | bash -s bun-v1.4.0"
 
-# Source checkout: clone once, then only fast-forward the requested fork branch.
+# One build at a time: the launcher's in-app updater takes the same lock.
+LOCK="$SRC.lock"
+mkdir -p "$(dirname "$SRC")"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    die "another install or launcher update is running (PID $owner)"
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" || die "could not acquire $LOCK"
+fi
+echo $$ > "$LOCK/pid"
+STAGE=""
+cleanup() { rm -rf "$LOCK"; if [ -n "$STAGE" ]; then rm -rf "$STAGE"; fi; }
+trap cleanup EXIT
+
+# Source checkout. The managed clone always matches origin/$REF exactly; a checkout you point SRC
+# at is only fast-forwarded and must have no uncommitted changes.
 if [ -d "$SRC/.git" ]; then
   origin="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
   case "$origin" in
     *trukhinyuri/codex-chatgpt-web|*trukhinyuri/codex-chatgpt-web.git) ;;
     *) die "$SRC is not a checkout of the trukhinyuri fork (origin: ${origin:-none})" ;;
   esac
-  [ -z "$(git -C "$SRC" status --porcelain)" ] || die "$SRC has uncommitted changes; commit or stash them first"
   git -C "$SRC" fetch --quiet origin
-  if git -C "$SRC" show-ref --verify --quiet "refs/heads/$REF"; then
-    git -C "$SRC" checkout --quiet "$REF"
-    git -C "$SRC" merge --quiet --ff-only "origin/$REF" || die "local $REF has diverged from origin/$REF"
+  if [ "$SRC" = "$MANAGED_SRC" ]; then
+    git -C "$SRC" checkout --quiet --force -B "$REF" "origin/$REF"
+    git -C "$SRC" reset --quiet --hard "origin/$REF"
+    git -C "$SRC" clean --quiet -fd
   else
-    git -C "$SRC" checkout --quiet -b "$REF" --track "origin/$REF"
+    [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no)" ] || die "$SRC has uncommitted changes; commit or stash them first"
+    if git -C "$SRC" show-ref --verify --quiet "refs/heads/$REF"; then
+      git -C "$SRC" checkout --quiet "$REF"
+      git -C "$SRC" merge --quiet --ff-only "origin/$REF" || die "local $REF has diverged from origin/$REF"
+    else
+      git -C "$SRC" checkout --quiet -b "$REF" --track "origin/$REF"
+    fi
   fi
 else
-  mkdir -p "$(dirname "$SRC")"
+  [ ! -e "$SRC" ] || [ -z "$(ls -A "$SRC")" ] || die "$SRC exists but is not a Git checkout; move it away or set SRC"
   git clone --quiet --branch "$REF" "$REPO_URL" "$SRC"
 fi
 git -C "$SRC" remote get-url upstream >/dev/null 2>&1 || git -C "$SRC" remote add upstream "$UPSTREAM_URL"
@@ -63,7 +94,7 @@ say "Source: $REF @ ${COMMIT:0:7} ($(git log -1 --format=%s))"
 WANT_BUN="$(sed -n 's/.*"packageManager": *"bun@\([0-9][0-9.]*\)".*/\1/p' package.json)"
 HAVE_BUN="$(bun --version)"
 [ -n "$WANT_BUN" ] || die "cannot read the pinned Bun version from package.json"
-[ "$WANT_BUN" = "$HAVE_BUN" ] || die "Bun $WANT_BUN is required, found $HAVE_BUN"
+[ "$WANT_BUN" = "$HAVE_BUN" ] || die "Bun $WANT_BUN is required, found $HAVE_BUN; install it with: curl -fsSL https://bun.sh/install | bash -s bun-v$WANT_BUN"
 
 # Build: verify, then package. Reuse a package built from this exact commit.
 STAMP="launcher/artifacts/.built-commit"
@@ -83,7 +114,7 @@ else
   bun install --frozen-lockfile
   (cd launcher && bun install --frozen-lockfile)
   if [ "$VERIFY" = 1 ]; then
-    say "Running bun run verify (several minutes)"
+    say "Running bun run verify (all tests, several minutes)"
     bun run verify
   else
     say "Skipping verification (VERIFY=0)"
@@ -96,12 +127,30 @@ else
   printf '%s\n' "$COMMIT" > "$STAMP"
 fi
 
-# Install exactly like the official installer: never replace a running launcher.
-if pgrep -f "$APP/Contents/MacOS/Codex Web GPT" >/dev/null 2>&1; then
-  die "quit Codex Web GPT from its menu, then run the same command again (the package will be reused)"
+# Install exactly like the official installer: never replace a running launcher, and never cancel
+# work to do it.
+launcher_running() { pgrep -f "$APP_PROC" >/dev/null 2>&1; }
+active_turns() {
+  local health http browser
+  health="$(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null)" || { echo 0; return; }
+  http="$(printf '%s' "$health" | plutil -extract active_http_turns raw -o - - 2>/dev/null || echo 0)"
+  browser="$(printf '%s' "$health" | plutil -extract active_browser_turns raw -o - - 2>/dev/null || echo 0)"
+  echo $(( http + browser ))
+}
+if launcher_running; then
+  [ "$WAIT_FOR_IDLE" = 1 ] || die "quit Codex Web GPT from its menu, or rerun with WAIT_FOR_IDLE=1 (the package will be reused)"
+  say "Waiting until Codex has no active ChatGPT Web turn for 60 seconds"
+  quiet=0
+  while [ "$quiet" -lt 60 ]; do
+    if [ "$(active_turns)" = 0 ]; then quiet=$((quiet + 5)); else quiet=0; fi
+    sleep 5
+  done
+  say "Quitting Codex Web GPT"
+  osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
+  launcher_running && die "Codex Web GPT did not quit; quit it from its menu and rerun"
 fi
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
 ditto -x -k "$ZIP" "$STAGE"
 NEW="$STAGE/Codex Web GPT.app"
 [ -x "$NEW/Contents/MacOS/Codex Web GPT" ] || die "the package is incomplete: $ZIP"
@@ -141,3 +190,4 @@ if [ -f "$HOME/.codex-chatgpt-web/config.json" ]; then
 else
   say "Not set up yet: sign in to ChatGPT in the launcher, run the browser smoke test, then Install models"
 fi
+say "RESULT installed commit=$COMMIT runtime=${WANT:0:12}"

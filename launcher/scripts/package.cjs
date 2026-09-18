@@ -39,6 +39,17 @@ if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
   builderArgs.push("--config.mac.identity=-");
 }
 
+// Stamp the package with the commit it was built from. The launcher's source updater compares this
+// stamp with the fork's main branch; a build with local changes is always offered the update.
+const sourceRoot = path.resolve(root, "..");
+const sourceHead = spawnSync("git", ["-C", sourceRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+if (sourceHead.status === 0 && /^[0-9a-f]{40}$/.test(sourceHead.stdout.trim())) {
+  const sourceChanges = spawnSync("git", ["-C", sourceRoot, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" });
+  const sourceState = sourceChanges.status === 0 && sourceChanges.stdout.trim() === "" ? "clean" : "dirty";
+  builderArgs.push(`--config.extraMetadata.sourceCommit=${sourceHead.stdout.trim()}`);
+  builderArgs.push(`--config.extraMetadata.sourceState=${sourceState}`);
+}
+
 const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"));
 const artifactsDirectory = path.join(root, "artifacts");
 
