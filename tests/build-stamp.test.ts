@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,18 +34,22 @@ test.each([
 
 test("runtime build stamp reads a manifest from disk and tolerates a missing file", () => {
   const root = mkdtempSync(join(tmpdir(), "build-stamp-"));
-  const path = join(root, "manifest.json");
-  expect(runtimeBuildStamp(path)).toBeUndefined();
-  writeFileSync(path, manifest({
-    commit: "abcdef123456",
-    dirty: true,
-    builtAt: "2026-09-18T00:00:00.000Z",
-  }));
-  expect(runtimeBuildStamp(path)).toEqual({
-    commit: "abcdef123456",
-    dirty: true,
-    builtAt: "2026-09-18T00:00:00.000Z",
-  });
+  try {
+    const path = join(root, "manifest.json");
+    expect(runtimeBuildStamp(path)).toBeUndefined();
+    writeFileSync(path, manifest({
+      commit: "abcdef123456",
+      dirty: true,
+      builtAt: "2026-09-18T00:00:00.000Z",
+    }));
+    expect(runtimeBuildStamp(path)).toEqual({
+      commit: "abcdef123456",
+      dirty: true,
+      builtAt: "2026-09-18T00:00:00.000Z",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("build stamp formatting distinguishes unstamped, clean, and dirty builds", () => {

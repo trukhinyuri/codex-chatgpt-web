@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,10 @@ import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import type { CodexParsedRequest } from "../src/types";
 
 const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 function statePath(): string {
   const root = mkdtempSync(join(tmpdir(), "compaction-continuation-"));

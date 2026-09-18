@@ -113,7 +113,7 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 - `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
 - Manage the proxy's accounts from here once you add its management key (`remote-management.secret-key` in its config), again on standard input: `cliproxy management-key --stdin`, then `cliproxy accounts` (e-mail addresses masked unless `--show-emails`), `cliproxy login claude` (also `codex`, `antigravity`, `kimi`, `xai`, `devin`, `meta`; opens the provider's sign-in page and waits), and `cliproxy remove REF` (the `ref` from the list).
 - The launcher's **CLIProxyAPI** section does the same with buttons: connect, add the management key, sign accounts in and remove them. Keys are cleared from the form as soon as they are sent.
-- You run CLIProxyAPI itself; its [README](https://github.com/router-for-me/CLIProxyAPI) covers installation.
+- The app carries a CLIProxyAPI build from `cliproxyapi/` when it was built with Go. `cliproxy service adopt --config ~/path/config.yaml [--replace-label <your LaunchAgent>]` lets the launcher run the proxy with that config: it stops your LaunchAgent (keeping a copy), and from then on every app update brings the proxy up to date too, only while Codex is idle; if the proxy does not come back, the whole update is rolled back. `cliproxy service release` gives your own LaunchAgent back.
 
 ## What this fork changes
 
@@ -137,7 +137,7 @@ Each fix meant for upstream lives in its own `fix/…` branch with a regression 
 
 ## Updates and rollback
 
-- **Automatic (default).** The launcher checks `main` every hour. A new commit installs by itself when it only adds commits to the installed build, its GitHub checks passed (or the repository runs none), and it has not failed on this Mac before. The launcher builds it at low CPU priority, runs `bun run verify`, packages it, and swaps the app after Codex has sent no request through the bridge for ten minutes. A task whose tool runs longer than that without a model request can still see one failed request, which Codex reports; continue it. The new launcher must report a healthy start within six minutes; otherwise the previous app goes back into place and that commit is never installed automatically again. Turn this off in **Settings → Automatic updates**.
+- **Automatic (default).** The launcher checks `main` every hour. A new commit installs by itself when it only adds commits to the installed build, its GitHub checks passed (or the repository runs none), and it has not failed on this Mac before. The launcher builds it at low CPU priority, runs `bun run verify`, packages it, and swaps the app after Codex has had no turn in flight for ten minutes; when every recent ChatGPT Web turn failed, or the update has waited six hours, one quiet minute is enough, so a fix reaches a failing installation instead of waiting behind its failures. A click on the update button installs it 30 seconds after Codex's tasks finish. A task whose tool runs longer than that without a model request can still see one failed request, which Codex reports; continue it. The new launcher must report a healthy start within six minutes; otherwise the previous app goes back into place and that commit is never installed automatically again. Turn this off in **Settings → Automatic updates**.
 - **Manual.** Any other update, for example one that failed before, appears as **Update to v5.0.8+‹commit›**. The same checks apply; it installs after 30 idle seconds.
 - **From a terminal.** Rerun the quick-start command with `WAIT_FOR_IDLE=1` before `bash`. It keeps the replaced build and restores it if the new one does not start cleanly, like the launcher does.
 - **Rollback.** The two builds replaced last are kept in `~/Library/Application Support/Codex Web GPT/rollback.noindex`. To put the newest one back (after Codex is idle; `LIST=1` lists them, `ENTRY=<name>` picks one):
@@ -179,7 +179,7 @@ More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), **Activity** and **Settings → 
 
 ## Develop
 
-Building from source requires Bun 1.4.0 exactly.
+Building from source requires Bun 1.4.0 exactly; the CLIProxyAPI component in `cliproxyapi/` also needs Go 1.26 or newer.
 
 ```bash
 git clone https://github.com/trukhinyuri/codex-superpower.git
@@ -192,7 +192,7 @@ bun run app:package
 
 `bun run verify` is the gate for `main`: installed launchers pick up a new `main` within an hour, and they install nothing that fails it or that does not start cleanly. Fixes meant for upstream start from `upstream/main` in a `fix/…` branch; fork-only changes start from `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [DEV chat harness](docs/dev-chat.md).
 
-The upstream README and its translations are in [docs/upstream](docs/upstream/README.md).
+The upstream README and its translations are in [docs/upstream](docs/upstream/README.md). `cliproxyapi/` holds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT), kept in sync with upstream as a `git subtree`; see AGENTS.md.
 
 ## Credits and license
 

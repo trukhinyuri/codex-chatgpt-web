@@ -19,6 +19,9 @@ const {
   lowPriorityCommand,
   prepareCheckout,
   isTransientBuildFailure,
+  prepareBuildHome,
+  sourceBuildEnvironment,
+  sourceBuildHome,
   readUpdateState,
   recordFailedCommit,
   releaseLock,
@@ -27,6 +30,7 @@ const {
   sourceUpdateVersion,
   writeStartupHealth,
 } = require("../electron/source-update.cjs");
+const { createTurnOutcomeLog, updateQuietWindow, SHORT_QUIET_MS, LONG_WAIT_MS } = require("../electron/update-idle-policy.cjs");
 
 const INSTALLED = "1".repeat(40);
 const MAIN = "2".repeat(40);
@@ -70,6 +74,11 @@ function controller(overrides = {}, dependencies = {}) {
       releaseLock: lockPath => calls.push(["unlock", lockPath]),
       appendLog: () => {},
       prepareCheckout: async ({ commit, env }) => calls.push(["checkout", commit, env.PATH]),
+      prepareBuildHome: () => {
+        const buildHome = path.join(logs, "build-home");
+        fs.mkdirSync(buildHome, { recursive: true });
+        return buildHome;
+      },
       run: async (command, args, { cwd }) => calls.push(["run", command, args.join(" "), path.basename(cwd)]),
       findPackage: () => path.join(logs, "codex-web-gpt-5.0.8-mac-arm64.zip"),
       extractMac: (_archive, destination) => {
@@ -306,6 +315,52 @@ test("a network failure during the build defers the update instead of rejecting 
   assert.equal(isTransientBuildFailure(Object.assign(new Error("bun run verify exited with code 1"), { outputTail: ["expect(received).toBe(expected)"] })), false);
 });
 
+test("update builds run in a private home, so no test can reach the user's Codex or bridge state", async () => {
+  const seen = [];
+  const { instance, logs } = controller({}, {
+    prepareCheckout: async ({ env }) => seen.push(["checkout", env.HOME]),
+    run: async (command, args, { env }) => seen.push([args.join(" "), env.HOME, env.CODEX_HOME, env.CODEX_CHATGPT_WEB_HOME, env.CODEX_SUPERPOWER_UPDATE_BUILD]),
+  });
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  const buildHome = path.join(logs, "build-home");
+  assert.equal(seen[0][0], "checkout");
+  assert.equal(seen[0][1], process.env.HOME, "git keeps the real home for its proxy and credential settings");
+  for (const step of seen.slice(1)) {
+    assert.deepEqual(step.slice(1), [buildHome, path.join(buildHome, ".codex"), path.join(buildHome, ".codex-chatgpt-web"), "1"], step[0]);
+  }
+  assert.equal(seen.length, 5);
+  instance.cancelInstall(prepared);
+
+  const home = tempDir("cwg-real-home-");
+  fs.writeFileSync(path.join(home, ".npmrc"), "registry=https://registry.example/\n");
+  fs.mkdirSync(path.join(home, "Library", "Application Support", "go"), { recursive: true });
+  fs.writeFileSync(path.join(home, "Library", "Application Support", "go", "env"), "GOPROXY=https://proxy.example\n");
+  const privateHome = prepareBuildHome(home);
+  assert.equal(privateHome, sourceBuildHome(home));
+  assert.equal(privateHome, path.join(home, ".csp-build-home"));
+  assert.equal(fs.readlinkSync(path.join(privateHome, ".npmrc")), path.join(home, ".npmrc"), "the company registry still applies");
+  assert.equal(fs.existsSync(path.join(privateHome, ".bunfig.toml")), false);
+  fs.writeFileSync(path.join(privateHome, "left-by-a-test"), "x");
+  prepareBuildHome(home);
+  assert.equal(fs.existsSync(path.join(privateHome, "left-by-a-test")), false, "every build starts from an empty home");
+  const env = sourceBuildEnvironment({ baseEnv: { PATH: "/usr/bin", HTTPS_PROXY: "http://proxy:3128" }, home, buildHome: privateHome, pathValue: "/bin" });
+  assert.deepEqual(env, {
+    PATH: "/bin",
+    HTTPS_PROXY: "http://proxy:3128",
+    HOME: privateHome,
+    CODEX_HOME: path.join(privateHome, ".codex"),
+    CODEX_CHATGPT_WEB_HOME: path.join(privateHome, ".codex-chatgpt-web"),
+    BUN_INSTALL_CACHE_DIR: path.join(home, ".bun", "install", "cache"),
+    ELECTRON_CACHE: path.join(home, "Library", "Caches", "electron"),
+    ELECTRON_BUILDER_CACHE: path.join(home, "Library", "Caches", "electron-builder"),
+    CODEX_SUPERPOWER_CACHE: path.join(home, "Library", "Caches", "codex-superpower"),
+    GOENV: path.join(home, "Library", "Application Support", "go", "env"),
+    CODEX_SUPERPOWER_UPDATE_BUILD: "1",
+  });
+  assert.ok(Buffer.byteLength(path.join(sourceBuildHome("/Users/a-rather-long-user-name"), ".codex-chatgpt-web", "runtime", "turn-broker.sock")) <= 103, "a socket under the private home fits macOS's limit");
+});
+
 test("an update build runs every test but leaves the online dependency audit to CI", () => {
   const verify = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "verify.ts"), "utf8");
   assert.match(verify, /const updateBuild = process\.env\.CODEX_SUPERPOWER_UPDATE_BUILD === "1";/);
@@ -313,6 +368,7 @@ test("an update build runs every test but leaves the online dependency audit to 
   assert.match(verify, /await run\(\["run", "test"\]\);/);
   const updater = fs.readFileSync(path.join(__dirname, "..", "electron", "source-update.cjs"), "utf8");
   assert.match(updater, /CODEX_SUPERPOWER_UPDATE_BUILD: "1",/);
+  assert.match(updater, /const env = sourceBuildEnvironment\(\{ buildHome: deps\.prepareBuildHome\(\), pathValue: buildPath \}\);/);
 });
 
 test("a package that is not the announced commit is rejected", async () => {
@@ -437,6 +493,8 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     setTimeout,
     updateIdleWait: null,
     updateInstallRequested: false,
+    turnOutcomes: createTurnOutcomeLog(),
+    updateQuietWindow,
     activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
     runtimeActivity: async () => {
       const next = activity.shift() ?? { active_http_turns: 0, active_browser_turns: 0 };
@@ -454,7 +512,7 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     },
   };
   const quitWhenIdleForUpdate = loadQuitWhenIdle(context);
-  await quitWhenIdleForUpdate({ version: "5.0.8+2222222" }, { info: () => events.push("wait") });
+  await quitWhenIdleForUpdate({ version: "5.0.8+2222222" }, { info: event => { if (event === "launcher.update_waiting_for_idle") events.push("wait"); } });
   assert.deepEqual(events.filter(event => !event.startsWith("activity")), [
     "launch:5.0.8+2222222",
     'quit:{"preserveActiveTurns":true,"quiet":true}',
@@ -479,6 +537,8 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
       setTimeout,
       updateIdleWait: null,
       updateInstallRequested: false,
+      turnOutcomes: createTurnOutcomeLog(),
+      updateQuietWindow,
       activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
       runtimeActivity: async () => activity(),
       launcherLanguage: () => "en",
@@ -537,6 +597,61 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
     assert.equal(await context.installPendingUpdateSooner(), true);
     assert.equal(context.updateInstallRequested, true);
   }
+});
+
+test("a build whose turns only fail installs its fix after one quiet minute, and a busy healthy one still waits", () => {
+  let clock = 1_000_000_000;
+  const outcomes = createTurnOutcomeLog({ now: () => clock });
+  const window = () => updateQuietWindow({ baseQuietMs: 10 * 60_000, outcomes, waitingSince: 1_000_000_000, now: clock });
+  assert.deepEqual(window(), { quietMs: 10 * 60_000, reason: "idle" }, "no evidence: the long unattended window");
+  outcomes.record("failed");
+  outcomes.record("aborted");
+  assert.equal(window().reason, "idle", "two failures are not yet a failing build");
+  outcomes.record("failed");
+  assert.deepEqual(window(), { quietMs: SHORT_QUIET_MS, reason: "failing" });
+  outcomes.record("completed");
+  assert.equal(window().reason, "idle", "one completed turn means there is work to protect");
+  clock += 16 * 60_000;
+  outcomes.record("failed");
+  assert.equal(window().reason, "idle", "failures older than fifteen minutes no longer count");
+  clock = 1_000_000_000 + LONG_WAIT_MS;
+  assert.deepEqual(window(), { quietMs: SHORT_QUIET_MS, reason: "long-wait" }, "after six hours a one-minute lull is enough");
+  assert.equal(updateQuietWindow({ baseQuietMs: 30_000, outcomes, waitingSince: clock, now: clock + LONG_WAIT_MS }).quietMs, 30_000, "a click's shorter window is never lengthened");
+  outcomes.record("unknown");
+  assert.equal(outcomes.since(0).length, 5, "only known outcomes are recorded");
+});
+
+test("while turns keep failing, the waiting update installs in the first quiet minute instead of never", async () => {
+  const events = [];
+  const failing = createTurnOutcomeLog();
+  for (const status of ["failed", "failed", "aborted"]) failing.record(status);
+  const context = {
+    UPDATE_IDLE_QUIET_MS: 30_000,
+    UPDATE_IDLE_POLL_MS: 1,
+    Date,
+    setTimeout,
+    updateIdleWait: null,
+    updateInstallRequested: false,
+    turnOutcomes: failing,
+    // The real policy with its one-minute floor replaced by zero so the test runs at once.
+    updateQuietWindow: options => {
+      const decided = updateQuietWindow(options);
+      return decided.reason === "failing" ? { ...decided, quietMs: 0 } : decided;
+    },
+    activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
+    runtimeActivity: async () => ({ active_http_turns: 0, active_browser_turns: 0 }),
+    updateController: {
+      launchInstall: () => { events.push("launch"); return {}; },
+      abortLaunch: () => events.push("abort"),
+      noteInstallProgress: () => {},
+    },
+    requestQuit: async options => { events.push(`quit:${JSON.stringify(options)}`); return { ok: true }; },
+  };
+  const quitWhenIdleForUpdate = loadQuitWhenIdle(context);
+  await quitWhenIdleForUpdate({ version: "v" }, { info: (event, detail) => events.push(`${event}:${detail.reason}`) }, 10 * 60_000);
+  assert.deepEqual(events, ["launcher.update_quiet_window:failing", "launch", 'quit:{"preserveActiveTurns":true,"quiet":true}'], "the unattended ten minutes do not apply to a failing build, and nothing is cancelled");
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  assert.match(main, /onTurnEnded: status => turnOutcomes\.record\(status\),/);
 });
 
 test("the update quit drains without cancelling while an ordinary quit keeps cancelling", () => {
@@ -646,7 +761,12 @@ test("startup health is a small private record without free text from the sessio
 test("the launcher reports its start, installs unattended updates only after a long idle period, and honours the setting", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
   assert.match(main, /app\.quit\(\);\n\s*return;\n\s*\}\n\s*reportLauncherStartup\("starting"\);/);
-  assert.match(main, /reportLauncherStartup\(\n\s*runtime\.status === "ready" \|\| runtime\.status === "not-configured" \? "healthy" : "unhealthy",/);
+  assert.match(main, /const runtimeHealthy = runtime\.status === "ready" \|\| runtime\.status === "not-configured";/);
+  assert.match(main, /reportLauncherStartup\(\n\s*runtimeHealthy && proxyHealthy \? "healthy" : "unhealthy",/);
+  // Without a managed proxy nothing runs for it, so a start never fails on its account.
+  assert.match(main, /if \(!fs\.existsSync\(path\.join\(CORE_HOME, "cliproxyapi", "service\.json"\)\)\) return \{ status: "off" \};/);
+  // A managed CLIProxyAPI is brought to the bundled binary before the bridge starts taking turns.
+  assert.ok(main.indexOf("const cliproxy = await syncCliProxyService(logger);") < main.indexOf("const runtime = await runtimeSupervisor.startIfConfigured();"));
   assert.match(main, /reportLauncherStartup\("unhealthy", "runtime-start-error"\);/);
   assert.match(main, /reportLauncherStartup\("unhealthy", "launcher-start-error"\);/);
   assert.match(main, /const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 10 \* 60_000;/);
@@ -749,6 +869,8 @@ test("every updater test keeps staged builds out of the real temporary folder", 
     const constructions = source.split("createSourceUpdateController(").length - 1;
     const isolated = (source.match(/stagingParent: logs/g) || []).length;
     assert.ok(isolated >= Math.min(constructions, 1), `${file} passes stagingParent to its controllers`);
+    // A test that builds must not empty the private build home of a real update running on this Mac.
+    if (source.includes(".beginInstall(")) assert.match(source, /prepareBuildHome: \(\) =>/, `${file} passes prepareBuildHome to controllers that build`);
   }
 });
 

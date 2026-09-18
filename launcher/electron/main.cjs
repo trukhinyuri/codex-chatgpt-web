@@ -20,6 +20,7 @@ const {
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, openedAtLoginOnMac, setAutostart } = require("./autostart.cjs");
+const { createTurnOutcomeLog, updateQuietWindow } = require("./update-idle-policy.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -42,7 +43,7 @@ const {
 } = require("./source-update.cjs");
 const { createProblemReporter } = require("./problem-report.cjs");
 const { aboutPanelOptions } = require("./about.cjs");
-const { createCliProxyPanel } = require("./cliproxy-cli.cjs");
+const { createCliProxyPanel, runCliProxy } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
@@ -122,6 +123,8 @@ let manualUpdateRunning = false;
 // The prepared update waiting for an idle Codex; a click on the update button shortens its wait.
 let updateIdleWait = null;
 let updateInstallRequested = false;
+// Outcomes of recent ChatGPT Web turns: a build whose turns only fail has no work to protect.
+const turnOutcomes = createTurnOutcomeLog();
 let problemReporter = null;
 let launcherStateStore = null;
 
@@ -1112,13 +1115,20 @@ async function runtimeActivity() {
 async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUIET_MS) {
   const wait = { quietMs: updateInstallRequested ? Math.min(quietMs, UPDATE_IDLE_QUIET_MS) : quietMs, now: false };
   updateIdleWait = wait;
+  const waitingSince = Date.now();
   let idleSince = null;
+  let windowReason = null;
   try {
     for (;;) {
       const running = activeTurnCount(await runtimeActivity());
       updateController.noteInstallProgress({ activeTurns: running, requested: wait.quietMs <= UPDATE_IDLE_QUIET_MS });
       idleSince = running === 0 ? (idleSince ?? Date.now()) : null;
-      if (wait.now || (idleSince !== null && Date.now() - idleSince >= wait.quietMs)) {
+      const window = updateQuietWindow({ baseQuietMs: wait.quietMs, outcomes: turnOutcomes, waitingSince, now: Date.now() });
+      if (window.reason !== windowReason) {
+        windowReason = window.reason;
+        logger?.info("launcher.update_quiet_window", { reason: window.reason, quietMs: window.quietMs });
+      }
+      if (wait.now || (idleSince !== null && Date.now() - idleSince >= window.quietMs)) {
         const launch = await updateController.launchInstall(prepared);
         const result = await requestQuit({ preserveActiveTurns: !wait.now, quiet: true });
         if (result.ok) return;
@@ -1258,6 +1268,32 @@ function reportLauncherStartup(status, reason = null) {
     status,
     reason,
   });
+}
+
+/**
+ * Bring a CLIProxyAPI service this app manages to the proxy binary it carries. Runs before the bridge
+ * starts, so no Codex turn goes through the proxy while it restarts. A managed proxy that does not
+ * come back makes this start unhealthy, and the update worker restores the previous app (and with
+ * it the previous proxy binary).
+ */
+async function syncCliProxyService(logger) {
+  if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "darwin") return { status: "off" };
+  // Only a proxy this app manages (`cliproxy service adopt`) has a record; without one there is
+  // nothing to sync, and a start must not depend on running the runtime for it.
+  if (!fs.existsSync(path.join(CORE_HOME, "cliproxyapi", "service.json"))) return { status: "off" };
+  try {
+    const result = await runCliProxy(
+      runtimeSupervisor.runtimeCommand(["cliproxy", "service", "sync", "--bundle", path.join(process.resourcesPath, "cliproxyapi")]),
+      { env: { ...process.env, CODEX_CHATGPT_WEB_HOME: CORE_HOME }, timeoutMs: 90_000 },
+    );
+    if (result?.status !== "off") {
+      logger.info("cliproxy.service_synced", { status: result?.status, binaryChanged: result?.binaryChanged === true, proxyVersion: result?.proxyVersion ?? null });
+    }
+    return result ?? { status: "off" };
+  } catch (error) {
+    logger.warn("cliproxy.service_sync_failed", { message: error instanceof Error ? error.message : String(error) });
+    return { status: "unhealthy" };
+  }
 }
 
 /** The version string reports use: the app version and this build's commit. */
@@ -1403,6 +1439,7 @@ async function start() {
     startHidden,
   });
   browserControl = await new BrowserControlServer({
+    onTurnEnded: status => turnOutcomes.record(status),
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
@@ -1609,16 +1646,20 @@ async function start() {
         send("launcher:state-changed", state);
       }
     }
+    const cliproxy = await syncCliProxyService(logger);
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return runtime;
+    if (runtime.status !== "ready") return { ...runtime, cliproxy: cliproxy.status };
     const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    return { ...runtime, cliproxy: cliproxy.status, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
     // "not-configured" is a healthy start: a fresh install has nothing to run yet.
+    const runtimeHealthy = runtime.status === "ready" || runtime.status === "not-configured";
+    const proxyHealthy = runtime.cliproxy !== "unhealthy";
     reportLauncherStartup(
-      runtime.status === "ready" || runtime.status === "not-configured" ? "healthy" : "unhealthy",
-      `runtime-${runtime.status}`,
+      runtimeHealthy && proxyHealthy ? "healthy" : "unhealthy",
+      proxyHealthy ? `runtime-${runtime.status}` : "cliproxy-unhealthy",
     );
+    if (!proxyHealthy) reportProblem({ kind: "runtime-start-failed", code: "cliproxy-unhealthy", stage: "startup" });
     if (runtime.status !== "ready" && runtime.status !== "not-configured") {
       reportProblem({ kind: "runtime-start-failed", code: `runtime-${runtime.status}`, stage: "startup" });
     }

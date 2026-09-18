@@ -52,6 +52,7 @@ test("browser control server authenticates and owns turn visibility", async () =
       return { cancelledByUser: false };
     },
   };
+  const ended = [];
   const server = await new BrowserControlServer({
     logger: {
       info: (event, detail) => logs.push(["info", event, detail]),
@@ -59,6 +60,7 @@ test("browser control server authenticates and owns turn visibility", async () =
     },
     getBrowserHost: () => host,
     getPreferences: () => ({ showBrowserDuringTurns: true }),
+    onTurnEnded: status => ended.push(status),
   }).start();
   const descriptor = server.descriptor();
   try {
@@ -134,6 +136,7 @@ test("browser control server authenticates and owns turn visibility", async () =
       }),
     });
     assert.equal(end.status, 200);
+    assert.deepEqual(ended, ["completed"], "the launcher learns each accepted turn outcome, and only those");
     assert.deepEqual(calls, [
       [
         "start",

@@ -139,6 +139,52 @@ function normalizedRemote(url) {
 }
 
 /** Put the launcher's pinned Bun first, then the user's login-shell tools (git, node). */
+// Files the build still needs from the real home: package registry and proxy settings.
+const BUILD_HOME_LINKS = [".npmrc", ".bunfig.toml"];
+
+/** The private home an update build runs in, short so that sockets under it stay within macOS limits. */
+function sourceBuildHome(home = os.homedir()) {
+  return path.join(home, ".csp-build-home");
+}
+
+/**
+ * The environment of an update build. Tests and build scripts see a private home, so nothing they
+ * do - including a test that forgets to use a temporary folder - can reach this user's Codex
+ * configuration, the bridge's state or the launcher's data. Download caches and registry settings
+ * still come from the user's own home, so a build neither refetches everything nor loses a
+ * company's package registry or Go proxy.
+ */
+function sourceBuildEnvironment({ baseEnv = process.env, home = os.homedir(), buildHome = sourceBuildHome(home), pathValue }) {
+  const caches = path.join(home, "Library", "Caches");
+  const goEnvFile = path.join(home, "Library", "Application Support", "go", "env");
+  return {
+    ...baseEnv,
+    HOME: buildHome,
+    CODEX_HOME: path.join(buildHome, ".codex"),
+    CODEX_CHATGPT_WEB_HOME: path.join(buildHome, ".codex-chatgpt-web"),
+    BUN_INSTALL_CACHE_DIR: baseEnv.BUN_INSTALL_CACHE_DIR || path.join(home, ".bun", "install", "cache"),
+    ELECTRON_CACHE: baseEnv.ELECTRON_CACHE || path.join(caches, "electron"),
+    ELECTRON_BUILDER_CACHE: baseEnv.ELECTRON_BUILDER_CACHE || path.join(caches, "electron-builder"),
+    CODEX_SUPERPOWER_CACHE: baseEnv.CODEX_SUPERPOWER_CACHE || path.join(caches, "codex-superpower"),
+    ...(baseEnv.GOENV || !fs.existsSync(goEnvFile) ? {} : { GOENV: goEnvFile }),
+    // verify.ts leaves the online dependency audit to CI: a new advisory published elsewhere
+    // must not stop this Mac from updating (the installed build has the same dependencies).
+    CODEX_SUPERPOWER_UPDATE_BUILD: "1",
+    PATH: pathValue,
+  };
+}
+
+/** Create a fresh private build home that links only the registry settings of the real one. */
+function prepareBuildHome(home = os.homedir(), buildHome = sourceBuildHome(home)) {
+  fs.rmSync(buildHome, { recursive: true, force: true });
+  fs.mkdirSync(buildHome, { recursive: true, mode: 0o700 });
+  for (const name of BUILD_HOME_LINKS) {
+    const source = path.join(home, name);
+    if (fs.existsSync(source)) fs.symlinkSync(source, path.join(buildHome, name));
+  }
+  return buildHome;
+}
+
 function sourceBuildPath({ runtimeExecutable, loginShellPath = "", inheritedPath = "" }) {
   const entries = [
     path.dirname(runtimeExecutable),
@@ -399,6 +445,7 @@ function defaultDependencies() {
     releaseLock,
     appendLog,
     prepareCheckout,
+    prepareBuildHome: () => prepareBuildHome(),
     run,
     findPackage,
     extractMac(archive, destination) {
@@ -614,18 +661,15 @@ function createSourceUpdateController({
           fs.mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
           lock = deps.acquireLock(`${sourceRoot}.lock`);
           log(`source update ${currentCommit} -> ${target.commit} from ${SOURCE_CLONE_URL}`);
-          const env = {
-            ...process.env,
-            // verify.ts leaves the online dependency audit to CI: a new advisory published elsewhere
-            // must not stop this Mac from updating (the installed build has the same dependencies).
-            CODEX_SUPERPOWER_UPDATE_BUILD: "1",
-            PATH: sourceBuildPath({
-              runtimeExecutable,
-              loginShellPath: await deps.readLoginShellPath(),
-              inheritedPath: process.env.PATH,
-            }),
-          };
-          await deps.prepareCheckout({ sourceRoot, commit: target.commit, env, log });
+          const buildPath = sourceBuildPath({
+            runtimeExecutable,
+            loginShellPath: await deps.readLoginShellPath(),
+            inheritedPath: process.env.PATH,
+          });
+          // Git keeps the real home (its proxy and credential settings); every build step gets a
+          // private one.
+          await deps.prepareCheckout({ sourceRoot, commit: target.commit, env: { ...process.env, PATH: buildPath }, log });
+          const env = sourceBuildEnvironment({ buildHome: deps.prepareBuildHome(), pathValue: buildPath });
           const startedAt = deps.now();
           const steps = sourceBuildSteps();
           for (const [index, step] of steps.entries()) {
@@ -795,6 +839,9 @@ module.exports = {
   classifyComparison,
   createSourceUpdateController,
   isTransientBuildFailure,
+  prepareBuildHome,
+  sourceBuildEnvironment,
+  sourceBuildHome,
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,

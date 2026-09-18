@@ -45,8 +45,27 @@ function completedText(text: string): string {
 }
 
 const NATIVE = { slug: "gpt-6-astra", priority: 3, visibility: "list", supported_in_api: true, supported_reasoning_levels: [] };
-const CLAUDE = { slug: "claude-fable-5-1", priority: 0, visibility: "list", supported_in_api: false, supported_reasoning_levels: [] };
-const GLM = { slug: "glm-5.3", priority: 1, visibility: "list", supported_reasoning_levels: [] };
+// A complete row as CLIProxyAPI answers in Codex's catalog schema.
+function proxyRow(slug: string, fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    slug,
+    display_name: slug,
+    supported_reasoning_levels: [],
+    shell_type: "unified_exec",
+    visibility: "list",
+    supported_in_api: false,
+    priority: 0,
+    support_verbosity: true,
+    default_verbosity: "low",
+    apply_patch_tool_type: null,
+    truncation_policy: { mode: "tokens", limit: 10_000 },
+    experimental_supported_tools: [],
+    model_messages: { instructions_template: "You are Codex." },
+    ...fields,
+  };
+}
+const CLAUDE = proxyRow("claude-fable-5-1");
+const GLM = proxyRow("glm-5.3", { priority: 1, supported_reasoning_levels: [{ effort: "medium", description: "Balanced" }] });
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "cwg-cliproxy-"));
@@ -99,6 +118,55 @@ describe("catalog", () => {
     expect(models[0]).toEqual(NATIVE);
     expect(models[2]).toMatchObject({ supported_in_api: true, priority: 6 });
     expect(models[3]).toMatchObject({ supported_in_api: true, priority: 7 });
+  });
+
+  test("a proxy row Codex would reject is left out, so Codex keeps the whole catalog", () => {
+    const { catalog, added, rejected } = mergeCliProxyModels({ models: [NATIVE] }, [
+      proxyRow("no-instructions", { model_messages: {} }),
+      proxyRow("legacy-instructions", { model_messages: undefined, base_instructions: "You are Codex." }),
+      proxyRow("bad-shell", { shell_type: "zsh" }),
+      proxyRow("bad-truncation", { truncation_policy: { mode: "lines", limit: 1 } }),
+      proxyRow("bad-levels", { supported_reasoning_levels: [{ effort: "high" }] }),
+      proxyRow("no-verbosity-flag", { support_verbosity: undefined }),
+      CLAUDE,
+    ]);
+    expect(added).toEqual(["legacy-instructions", "claude-fable-5-1"]);
+    expect(rejected).toEqual([
+      { slug: "no-instructions", field: "instructions" },
+      { slug: "bad-shell", field: "shell_type" },
+      { slug: "bad-truncation", field: "truncation_policy" },
+      { slug: "bad-levels", field: "supported_reasoning_levels" },
+      { slug: "no-verbosity-flag", field: "support_verbosity" },
+    ]);
+    expect((catalog.models as Array<{ slug: string }>).map(model => model.slug)).toEqual(["gpt-6-astra", "legacy-instructions", "claude-fable-5-1"]);
+  });
+
+  test("an optional field Codex does not know is removed instead of costing the catalog", () => {
+    const { catalog, added } = mergeCliProxyModels({ models: [NATIVE] }, [
+      proxyRow("odd-fields", { default_verbosity: "loud", web_search_tool_type: "video", input_modalities: ["text", "smell"], context_window: "big", use_responses_lite: false }),
+    ]);
+    expect(added).toEqual(["odd-fields"]);
+    const row = (catalog.models as Array<Record<string, unknown>>)[1]!;
+    expect(row).not.toHaveProperty("default_verbosity");
+    expect(row).not.toHaveProperty("web_search_tool_type");
+    expect(row).not.toHaveProperty("input_modalities");
+    expect(row).not.toHaveProperty("context_window");
+    expect(row.use_responses_lite).toBe(false);
+    expect(row).not.toHaveProperty("available_access_programs");
+  });
+
+  test("the catalog stays within the 100 rows Codex Desktop reads, and only proxy rows give way", () => {
+    const native = Array.from({ length: 60 }, (_, index) => ({ ...NATIVE, slug: `native-${index}`, priority: index }));
+    const proxy = Array.from({ length: 50 }, (_, index) => proxyRow(`proxy-${index}`, index < 4 ? { visibility: "hide" } : {}));
+    const { catalog, added, dropped } = mergeCliProxyModels({ models: native }, proxy);
+    const slugs = (catalog.models as Array<{ slug: string }>).map(model => model.slug);
+    expect(slugs).toHaveLength(100);
+    expect(slugs.slice(0, 60)).toEqual(native.map(model => model.slug));
+    expect(dropped).toEqual(["proxy-0", "proxy-1", "proxy-2", "proxy-3", "proxy-44", "proxy-45", "proxy-46", "proxy-47", "proxy-48", "proxy-49"]);
+    expect(added).toHaveLength(40);
+    expect(added).not.toContain("proxy-49");
+    const nativeMax = Math.max(...native.map(model => model.priority));
+    expect((catalog.models as Array<{ slug: string; priority: number }>).filter(model => model.slug.startsWith("proxy-")).every(model => model.priority > nativeMax)).toBe(true);
   });
 
   test("asks the proxy with its own key for the Codex catalog and records the routes", async () => {
