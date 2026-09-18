@@ -176,6 +176,9 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         const result = health?.last_model_catalog_result;
         if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
           || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
+        // A catalog request Codex closed itself (client_aborted, HTTP 499) reached nobody, so it is
+        // not a failure to show. Current bridges never record one; this guards older and foreign ones.
+        if (result.status === 499 || result.failure?.stage === "client_aborted") return;
         const identity = `${health.pid}:${result.request}:${result.at}`;
         if (identity === reportedFailure) return;
         reportedFailure = identity;
