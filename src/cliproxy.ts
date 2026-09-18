@@ -96,6 +96,17 @@ export function readCliProxyConnection(home = getConfigDir()): CliProxyConnectio
   return { baseUrl, apiKey };
 }
 
+/** The CLIProxyAPI management key, when `cliproxy management-key` stored one. Never used by the bridge. */
+export function readCliProxyManagementKey(home = getConfigDir()): string | null {
+  const file = join(home, CLIPROXY_CONNECTION_FILE);
+  if (!existsSync(file)) return null;
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as { managementKeyFile?: unknown };
+  if (typeof parsed.managementKeyFile !== "string" || !isAbsolute(parsed.managementKeyFile)) return null;
+  if (!existsSync(parsed.managementKeyFile)) return null;
+  const key = readFileSync(parsed.managementKeyFile, "utf8").trim();
+  return key && !/\s/.test(key) && key.length <= MAX_KEY_LENGTH ? key : null;
+}
+
 /** Which slugs belong to which backend, as of the last catalog Codex fetched. Survives restarts. */
 export interface ModelRoutes {
   native: string[];
