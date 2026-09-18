@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cliproxyCommand } from "../src/cliproxy-command";
+import { accountRef, cliproxyCommand } from "../src/cliproxy-command";
 import { readCliProxyConnection } from "../src/cliproxy";
 
 const KEY = "sk-secret-proxy-key";
@@ -87,11 +87,13 @@ test("the management key is checked, stored privately, and accounts are listed w
 
   const listed = JSON.parse(await run(["accounts"], { fetchImpl: proxy.fetchImpl })) as { accounts: Array<Record<string, unknown>> };
   expect(listed.accounts).toEqual([
-    { name: "claude-alice@example.com.json", provider: "claude", label: "al***@example.com", disabled: false, status: "active", coolingDown: false },
-    { name: "codex-bob.json", provider: "codex", label: "bo***@example.org", disabled: true, status: "active", coolingDown: true },
+    { ref: accountRef("claude-alice@example.com.json"), name: "cl***@example.com.json", provider: "claude", label: "al***@example.com", disabled: false, status: "active", coolingDown: false },
+    { ref: accountRef("codex-bob.json"), name: "codex-bob.json", provider: "codex", label: "bo***@example.org", disabled: true, status: "active", coolingDown: true },
   ]);
-  const shown = JSON.parse(await run(["accounts", "--show-emails"], { fetchImpl: proxy.fetchImpl })) as { accounts: Array<{ label: string }> };
+  expect(JSON.stringify(listed)).not.toContain("alice@");
+  const shown = JSON.parse(await run(["accounts", "--show-emails"], { fetchImpl: proxy.fetchImpl })) as { accounts: Array<{ label: string; name: string }> };
   expect(shown.accounts[0]!.label).toBe("alice@example.com");
+  expect(shown.accounts[0]!.name).toBe("claude-alice@example.com.json");
 });
 
 test("a rejected management key is not kept", async () => {
@@ -141,5 +143,7 @@ test("a failed sign-in and removal are reported", async () => {
   await run(["connect", "--api-key-stdin"], { fetchImpl: proxy.fetchImpl });
   await run(["management-key", "--stdin"], { fetchImpl: proxy.fetchImpl, readKey: async () => MGMT });
   await expect(run(["login", "codex", "--no-open"], { fetchImpl: proxy.fetchImpl, sleep: async () => {} })).rejects.toThrow(/codex sign-in failed: access_denied/);
-  expect(JSON.parse(await run(["remove", "codex-bob.json"], { fetchImpl: proxy.fetchImpl }))).toEqual({ removed: "codex-bob.json" });
+  expect(JSON.parse(await run(["remove", accountRef("codex-bob.json")], { fetchImpl: proxy.fetchImpl }))).toEqual({ removed: accountRef("codex-bob.json") });
+  expect(JSON.parse(await run(["remove", "codex-bob.json"], { fetchImpl: proxy.fetchImpl }))).toEqual({ removed: accountRef("codex-bob.json") });
+  await expect(run(["remove", "nope"], { fetchImpl: proxy.fetchImpl })).rejects.toThrow(/No such CLIProxyAPI account/);
 });

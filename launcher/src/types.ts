@@ -146,6 +146,9 @@ export interface CliProxyStatus {
 }
 
 export interface CliProxyAccount {
+  /** Short reference used to remove the account; the file name may contain the e-mail. */
+  ref: string;
+  /** Masked like the label. */
   name: string;
   provider: string;
   /** E-mail addresses arrive masked. */

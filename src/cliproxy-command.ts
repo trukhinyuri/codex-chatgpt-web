@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stdin, stdout } from "node:process";
@@ -28,7 +29,7 @@ export const CLIPROXY_HELP = `  codex-chatgpt-web cliproxy status
   codex-chatgpt-web cliproxy management-key --stdin
   codex-chatgpt-web cliproxy accounts [--show-emails]
   codex-chatgpt-web cliproxy login <${LOGIN_PROVIDERS.join("|")}> [--no-open]
-  codex-chatgpt-web cliproxy remove NAME`;
+  codex-chatgpt-web cliproxy remove REF`;
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
@@ -39,12 +40,18 @@ export function maskEmail(value: string): string {
 }
 
 export interface ProxyAccount {
+  /** Stable short reference for `cliproxy remove`; account file names often contain the e-mail. */
+  ref: string;
   name: string;
   provider: string;
   label: string;
   disabled: boolean;
   status: string;
   coolingDown: boolean;
+}
+
+export function accountRef(name: string): string {
+  return createHash("sha256").update(name).digest("hex").slice(0, 10);
 }
 
 export function summarizeAccounts(payload: unknown, showEmails = false): ProxyAccount[] {
@@ -54,8 +61,10 @@ export function summarizeAccounts(payload: unknown, showEmails = false): ProxyAc
   return files.map(file => {
     const label = String(file.label ?? file.email ?? file.name ?? "");
     const cooldowns = file.cooldowns;
+    const name = String(file.name ?? "");
     return {
-      name: String(file.name ?? ""),
+      ref: accountRef(name),
+      name: showEmails ? name : maskEmail(name),
       provider: String(file.provider ?? file.type ?? "unknown"),
       label: showEmails ? label : maskEmail(label),
       disabled: file.disabled === true,
@@ -255,11 +264,16 @@ export async function cliproxyCommand(
     throw new Error(`${provider} sign-in did not finish within five minutes`);
   }
   if (action === "remove") {
-    const name = args.shift();
-    if (!name || args.length > 0) throw new Error("cliproxy remove needs exactly one account name (see `cliproxy accounts`)");
+    const wanted = args.shift();
+    if (!wanted || args.length > 0) throw new Error("cliproxy remove needs exactly one account ref or name (see `cliproxy accounts`)");
+    const listed = await management("auth-files");
+    if (!listed.ok) throw new Error(`CLIProxyAPI account list returned HTTP ${listed.status}`);
+    const names = summarizeAccounts(await listed.json(), true).map(account => account.name);
+    const name = names.find(candidate => candidate === wanted || accountRef(candidate) === wanted);
+    if (!name) throw new Error("No such CLIProxyAPI account; use a ref from `cliproxy accounts`");
     const response = await management(`auth-files?name=${encodeURIComponent(name)}`, { method: "DELETE" });
-    if (!response.ok) throw new Error(`CLIProxyAPI could not remove ${name} (HTTP ${response.status})`);
-    write(`${JSON.stringify({ removed: name }, null, 2)}\n`);
+    if (!response.ok) throw new Error(`CLIProxyAPI could not remove the account (HTTP ${response.status})`);
+    write(`${JSON.stringify({ removed: accountRef(name) }, null, 2)}\n`);
     return;
   }
   throw new Error("cliproxy action must be one of: status, connect, disconnect, management-key, accounts, login, remove");

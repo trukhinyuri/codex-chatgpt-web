@@ -1685,7 +1685,7 @@ function CliProxySurface({ copy, setError }: { copy: Copy; setError: (error: str
               {accounts && accounts.length > 0 ? (
                 <div className="activity-table">
                   {accounts.map((account) => (
-                    <div className="activity-row" key={account.name}>
+                    <div className="activity-row" key={account.ref}>
                       <StateDot state={account.disabled ? "idle" : account.coolingDown ? "busy" : "ready"} />
                       <div>
                         <strong>{account.label || account.name}</strong>
@@ -1697,7 +1697,7 @@ function CliProxySurface({ copy, setError }: { copy: Copy; setError: (error: str
                       <button
                         className="text-button"
                         disabled={busy !== null}
-                        onClick={() => void act(`remove:${account.name}`, () => api!.cliproxy("remove", account.name))}
+                        onClick={() => void act(`remove:${account.ref}`, () => api!.cliproxy("remove", account.ref))}
                         type="button"
                       >
                         {copy.cliproxyRemove}

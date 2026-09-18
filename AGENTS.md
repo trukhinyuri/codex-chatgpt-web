@@ -47,7 +47,7 @@ When the human runs [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 
 printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/codex-chatgpt-web" cliproxy connect --api-key-stdin
 ```
 
-Expect `"connected": true` with the number of proxy models. To manage the proxy's accounts, pipe its management key the same way into `cliproxy management-key --stdin`; then `cliproxy accounts` lists them (e-mails masked; do not use `--show-emails` in a shared transcript), `cliproxy login <provider>` opens the sign-in page for the human and waits, and `cliproxy remove NAME` removes one after the human confirms. Then ask the human to restart Codex and check that the model list shows the proxy's models. `cliproxy status` reports the connection; `cliproxy disconnect` turns it off. Codex keeps its OpenAI provider; do not add a separate `model_provider` for the proxy, which would switch off Codex features tied to that provider.
+Expect `"connected": true` with the number of proxy models. To manage the proxy's accounts, pipe its management key the same way into `cliproxy management-key --stdin`; then `cliproxy accounts` lists them (e-mails masked; do not use `--show-emails` in a shared transcript), `cliproxy login <provider>` opens the sign-in page for the human and waits, and `cliproxy remove REF` removes one (by the `ref` from the list) after the human confirms. Then ask the human to restart Codex and check that the model list shows the proxy's models. `cliproxy status` reports the connection; `cliproxy disconnect` turns it off. Codex keeps its OpenAI provider; do not add a separate `model_provider` for the proxy, which would switch off Codex features tied to that provider.
 
 ## Verify
 
