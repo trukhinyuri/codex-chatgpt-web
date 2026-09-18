@@ -12,16 +12,21 @@ Updated with every release. It lists where the product still falls short of [req
 
 ## In progress
 
-1. **ChatGPT Web reliability, wave 1** ([plan](plans/2026-09-18-bridge-reliability.md), sections 1.1–1.4, 2.1–2.2, 5.1–5.6). On 18.09 about twice as many ChatGPT Web turns failed as completed, from three causes:
-   - The bridge refused turns during ChatGPT's rate-limit cooldown instead of waiting.
-   - Codex retried errors the bridge marked final, up to five times each, and parallel sessions escalated the pause to five minutes.
-   - Large Bigger Context messages failed with "Something went wrong" and were resent unchanged.
+Every branch named here is on GitHub. To continue one without earlier conversation: read its plan, check out the branch, run the full suites with an isolated short HOME/TMPDIR, finish what its plan or open pull request lists, then integrate and release by [engineering-process.md](engineering-process.md#releasing).
 
-   Wave 1 makes errors final for Codex when they are final, holds turns in an account-wide admission gate with paced release instead of refusing them, serializes the heavy browser phases, keeps a last-good model catalog, and verifies the ChatGPT connector automatically.
-2. **Visible rename to Codex Superpower** with authors and About panel (branch `fork/rename-visible`). It is compatible with the updater at `86f2d311`, as the legacy-updater contract test shows, and is under review.
-3. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive; the menu-bar icon becomes optional (branch `fork/dock-autostart-keepalive`).
-4. **Failure-mode review for thousands of users**: every way a user can get stuck, from install to support, checked against the code. Result: `plans/failure-modes.md`.
-5. **Windows CI**: the proxy tests assumed POSIX paths and file modes. Fixed in pull request #1; it ships with the next release.
+1. **ChatGPT Web reliability, wave 1.** [Plan](plans/2026-09-18-bridge-reliability.md) (sections 1.1–1.4, 2.1–2.2, 5.1–5.6), [work items](plans/2026-09-18-bridge-reliability-wave1.md), [evidence](plans/2026-09-18-bridge-reliability-evidence.json). On 18.09 about twice as many ChatGPT Web turns failed as completed, for three reasons: the bridge refused turns during ChatGPT's rate-limit cooldown instead of waiting; Codex retried errors the bridge had marked final, and parallel sessions escalated the pause to five minutes; and large Bigger Context messages failed with "Something went wrong" and were resent unchanged. Items and branches:
+   - Codex error contract, `fork/rel-codex-contract`;
+   - send without the 15 s limit, `fork/rel-send` and its review fixes `fork/rel-send-r1`;
+   - diagnostics and last-good catalog, `fork/rel-diag-catalog`;
+   - admission gate and heavy-phase lock, `fork/rel-admission-gate`;
+   - connector readiness, `fork/rel-connector`.
+
+   Branches without commits yet must be implemented from the work items. The integration branch is `fork/reliability-wave1`.
+2. **Visible rename to Codex Superpower** with authors and About panel. Branch `fork/rename-visible` holds the first version, which the legacy-updater contract test shows is compatible with the updater at `86f2d311`. Review fixes merged with R11 go to `fork/rename-visible-r2`. [Analysis](plans/2026-09-18-rename.md).
+3. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive, with the menu-bar icon optional. The implementation in `fork/dock-autostart-keepalive` is tested only with fakes. A real-launchd end-to-end test in CI is being built in `fork/dock-lifecycle-e2e`; do not release the lifecycle change before that test is green.
+4. **Watch automation:** a daily workflow opens `auto-watch` issues for new Codex versions, upstream changes and active forks, plus a weekly technology watch. Branch `fork/watch-automation`.
+5. **Failure-mode review for thousands of users** and the **multi-account design** (requirement R9). Their plans land in `docs/plans/failure-modes.md` and `docs/plans/multi-account.md`.
+6. **Consent text for problem reports** (the issue appears under the user's GitHub account), branch `fork/report-disclosure`; **Windows CI**, branch `fork/windows-ci-tests` (pull request #1); **these documents**, branch `fork/requirements-docs` (pull request #2).
 
 ## Next
 
