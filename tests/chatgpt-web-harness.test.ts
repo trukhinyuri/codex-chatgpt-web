@@ -3119,6 +3119,23 @@ describe("ChatGPT outer-native harness v4", () => {
       broker.completeTool(token, writeRequest!.callId, toolResult({ output: "continued" }));
       expect((await write).structuredContent).toEqual({ output: "continued" });
 
+      const longWrite = call("codex_write_stdin", {
+        turn_token: token,
+        session_id: 42,
+        yield_time_ms: 300_000,
+      });
+      const [longWriteRequest] = await broker.nextToolBatch(token);
+      expect(longWriteRequest).toEqual(expect.objectContaining({
+        wireName: "write_stdin",
+        freeform: false,
+        arguments: {
+          session_id: 42,
+          yield_time_ms: 60_000,
+        },
+      }));
+      broker.completeTool(token, longWriteRequest!.callId, toolResult({ output: "still running", session_id: 42 }));
+      expect((await longWrite).structuredContent).toMatchObject({ output: "still running", session_id: 42 });
+
       const patch = "*** Begin Patch\n*** Add File: direct-token.txt\n+ok\n*** End Patch";
       const apply = call("codex_apply_patch", { turn_token: token, patch });
       const [applyRequest] = await broker.nextToolBatch(token);

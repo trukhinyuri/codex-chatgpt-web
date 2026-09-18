@@ -43,6 +43,10 @@ const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly 
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+// write_stdin is a poll: returning earlier leaves the native command session alive for another
+// poll. Keep each forwarded poll comfortably inside the 90-second MCP invocation deadline even
+// though the outer Codex tool accepts a much longer wait budget.
+export const CHATGPT_WEB_WRITE_STDIN_MAX_FORWARD_YIELD_MS = 60_000;
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -701,10 +705,13 @@ export async function runChatGptMcpServer(options: {
         const { session_id, chars, yield_time_ms, max_output_tokens } = input;
         const bound = claimed.environment;
         const tool = exactTool(bound, "write_stdin");
+        const forwardedYieldMs = yield_time_ms === undefined
+          ? undefined
+          : Math.min(yield_time_ms, CHATGPT_WEB_WRITE_STDIN_MAX_FORWARD_YIELD_MS);
         const payload = { arguments: {
           session_id,
           ...(chars !== undefined ? { chars } : {}),
-          ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
+          ...(forwardedYieldMs !== undefined ? { yield_time_ms: forwardedYieldMs } : {}),
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
         } };
         return tool
