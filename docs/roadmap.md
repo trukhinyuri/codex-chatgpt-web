@@ -25,6 +25,8 @@ Updated with every release. It lists where the product still falls short of [req
 
 ## Next
 
+- **Anonymous problem reports.** Today a report is opened through the user's own GitHub CLI login, so the public issue shows the user's GitHub account, and users without `gh` cannot report at all. Send reports through a small relay that files them under the project's own identity, with the same closed allowlists, rate limits and deduplication; ask for consent once at setup. Until the relay exists, the consent dialog says plainly that the issue appears under the user's GitHub account.
+- **Autonomous maintainer runs.** The work queue fills itself (problem reports, the daily watch), but an agent works through it only when someone says "continue". Run the [agent playbook](agent-playbook.md) on a schedule in CI with a model API key stored as a repository secret: it fixes, opens pull requests, and merges only what passes every check, released through staged rollout with the kill switch. Default until a key is provided: off; maintainers' own agents run the playbook.
 - **Staged rollout and a kill switch** (practice gap): every installation now takes a new `main` within about an hour, so one bad release reaches everyone at once. Give each installation a stable random bucket, widen the eligible share with the age of the commit, halt a release through a file in the repository, and halt automatically when problem reports for the new commit rise.
 - **Several ChatGPT accounts** (requirement R9): a browser profile and connector per account, an account pool in the bridge that schedules turns by load and per-account limits, account-sticky continuations, and setup of additional accounts from the launcher. Design in progress (`plans/multi-account.md`).
 - ChatGPT Web reliability, wave 2:
@@ -47,6 +49,8 @@ Updated with every release. It lists where the product still falls short of [req
 ## Decisions for the owner
 
 Each item carries the default the project follows until the owner decides otherwise; none of them blocks work.
+
+- **Hosting for the anonymous report relay and a model API key for autonomous runs** (both cost money and hold secrets). Default: consent-based reports through the user's `gh` with a plain disclosure; autonomous runs off.
 
 - **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update. A Developer ID certificate would fix this and allow notarization. Default: stay ad-hoc signed and re-request permissions after an update.
 - **Legal positioning** for companies: OpenAI's Terms of Use (16 January 2026) forbid automatically or programmatically extracting output, sharing an account with anyone else, and circumventing rate limits. The ChatGPT Web route automates chatgpt.com for the account's owner; CLIProxyAPI rotates subscription accounts and reuses the public Antigravity OAuth client. Both carry a risk of account restrictions that companies will ask about. Default: operate transparently within limits (R3.4, R7.5) and document the risk for users.

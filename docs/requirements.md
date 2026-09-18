@@ -16,6 +16,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 1. Every failure the product can detect is either healed without the user (retry with the right delay, wait for a limit to end, reload a page, restart a component, roll back a build, fall back to the last good data) or reported with exactly what happens next and at most one action for the user.
 2. A failure the product cannot heal is reported to the maintainer automatically ([problem reports](../README.md#problem-reports)), without any user data (see R7).
 3. Error text shown to users never tells them to edit files, check tabs, disable features, or retry by hand when the product could do that itself.
+4. The whole loop runs without people: a problem is detected, reported anonymously (no user data, no user identity), triaged and planned by agents, fixed, released gradually and verified, and the same happens when an operating system, a technology or a harness changes. Users are told only what affects them, in their language, and never need to act.
 
 ## R3. Work is never lost or interrupted
 
@@ -48,7 +49,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 
 ## R7. Privacy and security
 
-1. Logs, diagnostics, problem reports and GitHub issues never contain prompts, answers, file contents, paths of user projects, account names, e-mail addresses, tokens or keys.
+1. Logs, diagnostics, problem reports and GitHub issues never contain prompts, answers, file contents, paths of user projects, account names, e-mail addresses, tokens or keys, and never reveal who sent them.
 2. Secrets stay with the human: agents never type, read, print or store passwords, one-time codes, API keys or cookies.
 3. No OAuth client secrets or other credentials are committed; build inputs from outside the repository are pinned by version and SHA-256.
 4. The bridge listens only on loopback and rejects foreign origins.
