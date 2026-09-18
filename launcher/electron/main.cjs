@@ -1530,6 +1530,15 @@ async function start() {
       }
       return;
     }
+    // "external" also covers a healthy codex-chatgpt-web daemon of this same release already
+    // serving the configured port (runtime-supervisor.cjs sets `healthy: true` only for that exact
+    // service/mode/version-checked case). Tearing down the Codex route as a defensive fail-safe
+    // there would silently break a model picker that is actually working; treat it as still routed
+    // instead of as a runtime failure.
+    if (runtime.status === "external" && runtime.healthy === true) {
+      logger.info("runtime.external_healthy_preserved", { detail: runtime.detail });
+      return;
+    }
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);

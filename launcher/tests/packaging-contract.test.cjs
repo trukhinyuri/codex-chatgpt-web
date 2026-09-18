@@ -52,6 +52,18 @@ test("macOS hidden-at-login start does not depend solely on the --hidden argv fl
   assert.match(startHiddenLine[1], /openedAtLoginOnMac\(app\)/);
 });
 
+// A healthy external codex-chatgpt-web daemon of this same release (runtime-supervisor.cjs's
+// `healthy: true`, see tests/runtime-supervisor.test.cjs) must not have its Codex route torn down
+// as though the runtime had failed to start; see tests/runtime-supervisor.test.cjs for the
+// startConfigured() side of this contract.
+test("a healthy external runtime owner skips the Codex-route fail-safe teardown", () => {
+  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+  const guardIndex = main.indexOf('runtime.status === "external" && runtime.healthy === true');
+  const teardownIndex = main.indexOf("restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });", guardIndex);
+  assert.ok(guardIndex >= 0, "main.cjs must check runtime.healthy before the fail-safe teardown");
+  assert.ok(teardownIndex > guardIndex, "the healthy-external guard must precede the route teardown call");
+});
+
 test("the full verification gate audits launcher dependencies", () => {
   const verify = fs.readFileSync(path.join(repositoryRoot, "scripts", "verify.ts"), "utf8");
   assert.equal(manifest.scripts.audit, "bun audit");
