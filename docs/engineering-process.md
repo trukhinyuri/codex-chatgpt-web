@@ -80,6 +80,7 @@ Installed updaters, users' data and Codex's configuration depend on these. Chang
 | Bridge home and CLI | `~/.codex-chatgpt-web`, `codex-chatgpt-web`, health `service: "codex-chatgpt-web"` |
 | Codex config markers | the managed comments in `src/codex-integration-shared.ts`, `src/codex-interrupt-hook.ts` |
 | Updater files | `source-update-state.json`, `source-update-health.json`, `rollback.noindex`, staging prefix `codex-web-gpt-update-` |
+| Embedded browser User-Agent | product token `CodexWebGPT/<version>` next to the unchanged `Chrome/…` and `Electron/…` tokens (`launcher/electron/user-agent.cjs`); Cloudflare binds its clearance on chatgpt.com to the User-Agent |
 
 The product's visible name is **Codex Superpower**; everything above keeps the old technical names on purpose.
 

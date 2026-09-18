@@ -5,8 +5,9 @@ editing Codex configuration, or opening a new issue.
 
 ## The first five minutes
 
-1. Update to the latest build of this fork ([Updates and rollback](README.md#updates-and-rollback)). Quit
-   **Codex Superpower** before running the installer again; updating preserves its private ChatGPT
+1. Update to the latest build of this fork's `main` ([Updates and rollback](README.md#updates-and-rollback)):
+   **Update to v…** in the launcher, or rerun this fork's installer with `WAIT_FOR_IDLE=1`, which
+   waits for Codex to go idle and quits the launcher itself. Updating preserves the private ChatGPT
    profile and launcher configuration. The app is still installed as `/Applications/Codex Web GPT.app`.
 2. In the launcher, confirm that ChatGPT sign-in, the browser smoke test, and **Install models** (or
    **Repair Codex setup**) are green.
@@ -79,7 +80,7 @@ The smoke test and real turns use the same current ChatGPT controls. Errors ment
 control, composer, send button, Temporary Chat, personalization, or an operational viewport usually
 mean that the ChatGPT UI did not expose a structure the bridge can safely prove.
 
-1. Update to the latest release.
+1. Update to the latest build of `main` (**Update to v…** in the launcher, if it offers one).
 2. Confirm that a normal Temporary Chat can be opened in the launcher and that the account is not
    showing a login, onboarding, capacity, or rate-limit dialog.
 3. Run the smoke test one more time with the launcher visible.
@@ -204,9 +205,19 @@ does not provide credentials or additional allowance for native Image Gen.
 
 ## Update, repair, and remove
 
-To update, quit **Codex Superpower** and run the same installer command from the [upstream README](docs/upstream/README.md) (this fork: [README](README.md#updates-and-rollback)). The installer
-replaces the application and runtime while preserving the launcher configuration and private
-ChatGPT profile.
+The launcher updates itself from this repository's `main` ([Updates and rollback](README.md#updates-and-rollback)).
+To install an update now, press **Update to v…** in the launcher. From a terminal, rerun this fork's
+installer; `WAIT_FOR_IDLE=1` waits until Codex has no running turn, then quits the launcher and
+replaces it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | WAIT_FOR_IDLE=1 bash
+```
+
+Both keep the launcher configuration and the private ChatGPT profile, and restore the previous build
+if the new one does not start cleanly. Do not use the installer or the release packages of the
+original codex-chatgpt-web project: they replace this build with one that lacks this fork's fixes
+and no longer updates from this repository.
 
 To repair a valid installation, use **Repair Codex setup** once and fully restart Codex. Avoid
 deleting configuration until **Run doctor** and a safe log identify which layer failed.

@@ -43,6 +43,7 @@ const {
 } = require("./source-update.cjs");
 const { createProblemReporter } = require("./problem-report.cjs");
 const { aboutPanelOptions } = require("./about.cjs");
+const { keepUserAgentProduct } = require("./user-agent.cjs");
 const { createCliProxyPanel, runCliProxy } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
@@ -88,6 +89,12 @@ const launchEnvironment = {
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
 app.setName(LAUNCHER_PROFILE.displayName);
+// The embedded ChatGPT browser keeps the User-Agent it sent before the rename; only the app's
+// product token differs, and Cloudflare would challenge a new one again (user-agent.cjs).
+app.userAgentFallback = keepUserAgentProduct(app.userAgentFallback, {
+  appName: LAUNCHER_PROFILE.displayName,
+  userAgentName: LAUNCHER_PROFILE.userAgentName,
+});
 if (process.platform === "win32") {
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");
 }

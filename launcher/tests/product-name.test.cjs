@@ -89,16 +89,20 @@ test("bridge and CLI messages that name the app say Codex Superpower", () => {
     ["src", "service.ts"],
     ["src", "adapters", "chatgpt-web", "turn-broker.ts"],
     ["src", "dev-chat", "cli.ts"],
+    // The "Local tools unavailable" notice is shown to the user in Codex; it is not sent to ChatGPT.
+    ["src", "adapters", "chatgpt-web", "prompt.ts"],
   ]) {
     const source = read(...file);
     assert.doesNotMatch(source, OLD_NAME, file.join("/"));
   }
   assert.match(read("src", "adapters", "chatgpt-web", "browser-worker.ts"), /Sign in again in Codex Superpower\./);
+  assert.match(read("src", "adapters", "chatgpt-web", "prompt.ts"), /Open `MCP` in `Codex Superpower`/);
 });
 
 test("text sent to ChatGPT keeps its wording, and both ends of the smoke phrase still agree", () => {
-  assert.match(read("src", "adapters", "chatgpt-web", "mcp-server.ts"), /pasted Codex Web GPT request/);
-  assert.match(read("src", "adapters", "chatgpt-web", "prompt.ts"), /`Codex Web GPT`/);
+  const mcpServer = read("src", "adapters", "chatgpt-web", "mcp-server.ts");
+  assert.match(mcpServer, /For each pasted Codex Web GPT request, begin with codex_turn_start/);
+  assert.match(mcpServer, /Connect the request_id included in the pasted Codex Web GPT request/);
   const worker = read("src", "adapters", "chatgpt-web", "browser-worker.ts");
   const expected = /const CHATGPT_SMOKE_EXPECTED = "([^"]+)";/.exec(worker)?.[1];
   assert.equal(expected, "CODEX WEB GPT READY");

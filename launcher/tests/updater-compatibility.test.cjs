@@ -76,6 +76,15 @@ function check(root, expectedCommit = COMMIT) {
   });
 }
 
+test("@electron/asar, which these tests pack archives with, is a declared dev dependency at its locked version", () => {
+  const launcherRoot = path.resolve(__dirname, "..");
+  const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
+  const locked = /"@electron\/asar": \["@electron\/asar@([^"]+)"/.exec(fs.readFileSync(path.join(launcherRoot, "bun.lock"), "utf8"))?.[1];
+  assert.ok(locked, "bun.lock resolves @electron/asar");
+  assert.equal(manifest.devDependencies["@electron/asar"], locked);
+  assert.equal(require("@electron/asar/package.json").version, locked);
+});
+
 test("readAsarFile reads a packed file exactly as @electron/asar wrote it", async () => {
   const root = workspace();
   const source = path.join(root, "app");

@@ -56,7 +56,14 @@ async function main() {
   fs.writeFileSync(prepared.jobPath, `${JSON.stringify({ ...job, launchCommand: ["/bin/sh", path.join(job.target, "Contents", "MacOS", job.executableName)] })}\n`);
   try {
     await controller.launchInstall(prepared);
-    result.workerStarted = fs.existsSync(path.join(prepared.tempRoot, "worker.started"));
+    const started = path.join(prepared.tempRoot, "worker.started");
+    result.workerStarted = fs.existsSync(started);
+    // The worker writes its PID into the marker; the test stops a worker it no longer waits for.
+    try {
+      result.workerPid = Number.parseInt(fs.readFileSync(started, "utf8"), 10) || null;
+    } catch {
+      result.workerPid = null;
+    }
   } catch (error) {
     result.launchError = error.message;
     result.workerStarted = fs.existsSync(path.join(prepared.tempRoot, "worker.started"));

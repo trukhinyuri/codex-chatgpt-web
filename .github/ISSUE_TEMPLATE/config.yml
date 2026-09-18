@@ -6,6 +6,9 @@ contact_links:
   - name: Setup and usage guide
     url: https://github.com/trukhinyuri/codex-superpower#readme
     about: Setup, updates, rollback and the AI-agent runbook for questions that are not confirmed bugs or focused feature requests.
+  - name: Report a vulnerability privately
+    url: https://github.com/trukhinyuri/codex-superpower/security/advisories/new
+    about: Credential exposure, authentication bypass or arbitrary tool execution go to a private GitHub advisory or by e-mail to yuri@trukhin.com, never into a public issue.
   - name: Security policy
     url: https://github.com/trukhinyuri/codex-superpower/blob/main/SECURITY.md
-    about: Report credential exposure, authentication bypass, or arbitrary tool-execution vulnerabilities privately to the maintainer, not in a public issue.
+    about: What to report privately and how, including the e-mail address that always works.

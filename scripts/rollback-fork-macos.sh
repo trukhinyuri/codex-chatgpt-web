@@ -70,7 +70,9 @@ if launcher_running; then
     # A normal quit asks first while turns run; NOW=1 means stop them, which SIGTERM does.
     pkill -TERM -f "$APP_PROC" >/dev/null 2>&1 || true
   else
-    osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+    # By bundle id, never by name: an older copy that LaunchServices still knows as "Codex Web GPT"
+    # (a backup, a download) would be the one AppleScript opens and quits.
+    osascript -e 'tell application id "dev.codexwebgpt.launcher" to quit' >/dev/null 2>&1 || true
   fi
   for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
   launcher_running && die "Codex Superpower did not quit; quit it from its menu and rerun"

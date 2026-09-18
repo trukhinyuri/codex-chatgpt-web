@@ -8,3 +8,5 @@
 *.ico binary
 *.mp4 binary
 *.zip binary
+# Byte-exact copies of the updater that installed launchers run; a test checks their git blob ids.
+launcher/tests/fixtures/updater-86f2d311/** -text

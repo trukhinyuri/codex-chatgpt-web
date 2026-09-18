@@ -155,7 +155,9 @@ if launcher_running; then
     sleep 5
   done
   say "Quitting Codex Superpower"
-  osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  # By bundle id, never by name: an older copy that LaunchServices still knows as "Codex Web GPT"
+  # (a backup, a download) would be the one AppleScript opens and quits.
+  osascript -e 'tell application id "dev.codexwebgpt.launcher" to quit' >/dev/null 2>&1 || true
   for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
   launcher_running && die "Codex Superpower did not quit; quit it from its menu and rerun"
 fi
@@ -186,7 +188,7 @@ open -a "$APP"
 # healthy one; otherwise the previous app goes back into place, exactly as the in-app updater does.
 restore_previous() {
   say "Restoring the previous app: $1"
-  osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application id "dev.codexwebgpt.launcher" to quit' >/dev/null 2>&1 || true
   for _ in $(seq 1 30); do launcher_running || break; sleep 1; done
   pkill -f "$APP_PROC" >/dev/null 2>&1 || true
   if [ -n "$SAVED" ] && [ -d "$SAVED/Codex Web GPT.app" ]; then

@@ -35,6 +35,8 @@ function resolveLauncherProfile({
     return {
       kind: PRODUCTION_PROFILE,
       displayName: "Codex Superpower",
+      // The app name in the embedded browser's User-Agent (user-agent.cjs): the one it always sent.
+      userAgentName: "Codex Web GPT",
       coreHome,
       codexHome: env.CODEX_HOME?.trim()
         ? resolveUserPath(env.CODEX_HOME.trim(), homeDir)
@@ -56,6 +58,7 @@ function resolveLauncherProfile({
   return {
     kind: DEVELOPMENT_PROFILE,
     displayName: "Codex Superpower DEV",
+    userAgentName: "Codex Web GPT DEV",
     coreHome,
     codexHome: path.join(coreHome, "codex-home"),
     userData: path.join(coreHome, "launcher"),

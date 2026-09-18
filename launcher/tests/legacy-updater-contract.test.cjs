@@ -24,7 +24,30 @@ const skip = process.platform !== "darwin" ? "the updater uses macOS ditto, plut
   : !["arm64", "x64"].includes(ARCH) ? `the updater supports arm64 and x64, not ${ARCH}`
     : false;
 const roots = [];
+const workers = [];
+
+function processCommand(pid) {
+  const listed = spawnSync("/bin/ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+  return listed.status === 0 ? listed.stdout.trim() : "";
+}
+
+/**
+ * Stop an update worker that still runs, so that it never writes into a folder the test deletes. Only
+ * a process whose command line names this test's own folder is signalled, never a reused PID.
+ */
+function stopWorker({ pid, root }) {
+  const ours = () => processCommand(pid).includes(root);
+  if (!Number.isInteger(pid) || pid <= 0 || !ours()) return;
+  try { process.kill(pid, "SIGTERM"); } catch {}
+  const deadline = Date.now() + 10_000;
+  while (ours() && Date.now() < deadline) spawnSync("/bin/sleep", ["0.1"]);
+  if (ours()) {
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
+}
+
 test.after(() => {
+  for (const worker of workers) stopWorker(worker);
   for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -143,7 +166,9 @@ function scenario({ build = manifest.build, packageName } = {}) {
     root, installed, installedExecutable, oldProfile, newProfile, newHealth, statePath, config,
     run() {
       const driver = spawnSync(process.execPath, [DRIVER, configPath], { encoding: "utf8", timeout: 60_000 });
-      return { status: driver.status, stderr: driver.stderr, result: JSON.parse(read(config.resultPath) || "null") };
+      const result = JSON.parse(read(config.resultPath) || "null");
+      if (result?.workerPid) workers.push({ pid: result.workerPid, root });
+      return { status: driver.status, stderr: driver.stderr, result };
     },
     /** The worker runs detached after the old launcher exits; wait until it has settled. */
     waitForWorker(tempRoot) {
@@ -188,6 +213,11 @@ test("an 86f2d311 launcher installs the renamed build over itself and keeps it a
   const install = scenario();
   const { status, stderr, result } = install.run();
   assert.equal(status, 0, `${stderr}\n${JSON.stringify(result)}\n${install.log()}`);
+  assert.equal(result.workerStarted, true, "the worker confirmed before the old launcher quit");
+  // The worker now runs detached. Let it finish before any assertion can end the test; test.after
+  // stops it if it still runs then.
+  const state = install.waitForWorker(result.job.tempRoot);
+
   assert.equal(result.check.status, "available");
   assert.equal(result.check.automatic, true);
   assert.ok(result.steps.some(step => step.includes("app:package")), "the new scripts package the app");
@@ -199,9 +229,7 @@ test("an 86f2d311 launcher installs the renamed build over itself and keeps it a
   assert.equal(result.job.healthPath, install.newHealth, "the old worker waits on the file the new launcher writes");
   assert.equal(result.job.healthPath, path.join(install.config.userData, "source-update-health.json"));
   assert.equal(path.basename(path.dirname(result.job.healthPath)), "Codex Web GPT");
-  assert.equal(result.workerStarted, true, "the worker confirmed before the old launcher quit");
 
-  const state = install.waitForWorker(result.job.tempRoot);
   assert.equal(state?.lastResult?.result, "installed", install.log());
   assert.equal(state.lastResult.commit, NEW);
   assert.deepEqual(state.failedCommits, {});

@@ -12,7 +12,8 @@ include isolated bug fixes, regression tests, documentation corrections, and nar
 platform-specific fixes.
 
 Before opening a bug report, work through [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and use the
-structured issue form. Reproduce once on the latest release and attach the privacy-safe export from
+structured issue form. Reproduce once on the latest build of `main`, give the version from
+**Codex Superpower → About** (for example `5.0.8 (abc1234)`), and attach the privacy-safe export from
 **Activity → Export safe log**; never upload raw browser state, credentials, or unredacted logs.
 
 Large feature branches, broad refactors, rewrites, new providers, and changes to core behavior or

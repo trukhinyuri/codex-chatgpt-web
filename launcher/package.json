@@ -32,6 +32,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -18,7 +18,7 @@ Updated with every release. It lists where the product still falls short of [req
    - Large Bigger Context messages failed with "Something went wrong" and were resent unchanged.
 
    Wave 1 makes errors final for Codex when they are final, holds turns in an account-wide admission gate with paced release instead of refusing them, serializes the heavy browser phases, keeps a last-good model catalog, and verifies the ChatGPT connector automatically.
-2. **Visible rename to Codex Superpower** with authors and About panel (branch `fork/rename-visible`). It is compatible with the updater at `86f2d311`, as the legacy-updater contract test shows, and is under review.
+2. **Visible rename to Codex Superpower** with authors and About panel (branch `fork/rename-visible-r2`, on top of R11). It is compatible with the updater at `86f2d311`, as the legacy-updater contract test shows; the review findings are fixed and it waits for CI in a draft pull request.
 3. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive; the menu-bar icon becomes optional (branch `fork/dock-autostart-keepalive`).
 4. **Failure-mode review for thousands of users**: every way a user can get stuck, from install to support, checked against the code. Result: `plans/failure-modes.md`.
 5. **Windows CI**: the proxy tests assumed POSIX paths and file modes. Fixed in pull request #1; it ships with the next release.
@@ -45,6 +45,7 @@ Updated with every release. It lists where the product still falls short of [req
 
 ## Decisions for the owner
 
+- **Private vulnerability reporting** is off in the repository settings (Settings → Code security → Private vulnerability reporting). Until it is on, the advisory link in SECURITY.md and in the issue form opens no form, and e-mail to yuri@trukhin.com is the only private channel. Turning it on is a repository setting only the owner can change.
 - **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update. A Developer ID certificate would fix this and allow notarization.
 - **Legal positioning** for companies: OpenAI's Terms of Use (16 January 2026) forbid automatically or programmatically extracting output, sharing an account with anyone else, and circumventing rate limits. The ChatGPT Web route automates chatgpt.com for the account's owner; CLIProxyAPI rotates subscription accounts and reuses the public Antigravity OAuth client. Both carry a risk of account restrictions that companies will ask about.
 - **Account pooling across people** was requested (any number of accounts shared by many users to raise limits). It conflicts with the terms above and would expose customers to account bans; requirement R9 implements several accounts per owner and horizontal scaling without pooling across people.

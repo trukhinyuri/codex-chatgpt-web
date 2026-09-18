@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
-const { checkMacUpdaterCompatibility, findSingleApplication } = require("./updater-compatibility.cjs");
+const { publishArtifacts } = require("./publish-artifacts.cjs");
+const { findSingleApplication } = require("./updater-compatibility.cjs");
 
 const root = path.resolve(__dirname, "..");
 const launcherManifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
@@ -108,35 +109,9 @@ try {
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
   if (target === "--mac") verifySignedMacArchive();
-
-  fs.mkdirSync(artifactsDirectory, { recursive: true });
-  for (const entry of fs.readdirSync(artifactsDirectory, { withFileTypes: true })) {
-    if (entry.isFile() && /\.(?:AppImage|dmg|exe|zip|blockmap)$/i.test(entry.name)) {
-      fs.rmSync(path.join(artifactsDirectory, entry.name), { force: true });
-    }
-  }
-  const artifacts = fs.readdirSync(staging, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /\.(?:AppImage|dmg|exe|zip|blockmap)$/i.test(entry.name));
-  if (!artifacts.some((entry) => /\.(?:AppImage|dmg|exe|zip)$/i.test(entry.name))) {
-    throw new Error(`electron-builder produced no distributable artifact in ${staging}`);
-  }
-  const published = [];
-  for (const artifact of artifacts) {
-    const publicName = artifact.name.replace(/-linux-x86_64(?=\.)/, "-linux-x64");
-    fs.copyFileSync(path.join(staging, artifact.name), path.join(artifactsDirectory, publicName));
-    published.push(publicName);
-  }
-  if (target === "--mac") {
-    // Launchers already installed update themselves from what this script leaves in artifacts/.
-    // A package they could not install is removed, and the build fails once instead.
-    try {
-      const checked = checkMacUpdaterCompatibility({ artifactsDirectory, arch: process.arch, expectedCommit: sourceCommit });
-      process.stdout.write(`Updater compatibility: ${checked.archive} -> ${checked.application} (CFBundleName ${checked.bundleName}, executable ${checked.executable}, commit ${checked.commit})\n`);
-    } catch (error) {
-      for (const name of published) fs.rmSync(path.join(artifactsDirectory, name), { force: true });
-      throw error;
-    }
-  }
+  // A macOS package that launchers already installed could not install is removed again, and the
+  // build fails once instead (scripts/publish-artifacts.cjs).
+  publishArtifacts({ staging, artifactsDirectory, target, arch: process.arch, sourceCommit });
 } finally {
   fs.rmSync(staging, { recursive: true, force: true });
 }

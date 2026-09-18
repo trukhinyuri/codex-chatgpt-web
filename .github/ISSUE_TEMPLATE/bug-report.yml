@@ -14,8 +14,8 @@ body:
     id: launcher-version
     attributes:
       label: Codex Superpower version
-      description: Use the version shown by the launcher or release installer, not "latest".
-      placeholder: x.y.z
+      description: Copy it from **Codex Superpower → About** in the menu bar, with the build in parentheses, not "latest".
+      placeholder: 5.0.8 (abc1234)
     validations:
       required: true
 
@@ -133,7 +133,7 @@ body:
     attributes:
       label: Preflight checklist
       options:
-        - label: I tested the latest release and, for catalog or turn failures, fully restarted Codex including its background process.
+        - label: I tested the latest build of `main` and, for catalog or turn failures, fully restarted Codex including its background process.
           required: true
         - label: I stated whether the failure also occurs in a fresh Codex task, or explained why that does not apply.
           required: true

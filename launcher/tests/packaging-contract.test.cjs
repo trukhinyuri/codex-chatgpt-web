@@ -108,7 +108,8 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /PLATFORM="linux"/);
   assert.match(shellInstaller, /codex-web-gpt\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
-  assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
+  const publisher = fs.readFileSync(path.join(launcherRoot, "scripts", "publish-artifacts.cjs"), "utf8");
+  assert.match(publisher, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /const executable = "node"/);
   assert.doesNotMatch(packager, /process\.execPath/);
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
@@ -182,12 +183,186 @@ test("the renamed product keeps every packaging identity installed launchers dep
   assert.match(packager, /--config\.mac\.extendInfo\.CodexWebGptSourceCommit=/);
   assert.match(packager, /--config\.mac\.extendInfo\.CodexWebGptSourceState=/);
   assert.match(packager, /--config\.extraMetadata\.sourceCommit=/);
-  assert.match(packager, /checkMacUpdaterCompatibility\(\{ artifactsDirectory, arch: process\.arch, expectedCommit: sourceCommit \}\)/);
+  // Published only after the signature check, and through the step tested below.
+  assert.match(packager, /verifySignedMacArchive\(\);[\s\S]*publishArtifacts\(\{ staging, artifactsDirectory, target, arch: process\.arch, sourceCommit \}\);\s*\} finally \{/);
   const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.doesNotMatch(smoke, /"Codex Web GPT\.app"|productName\}\.exe/);
   assert.match(smoke, /findSingleApplication\(stage\)/);
   const license = fs.readFileSync(path.join(repositoryRoot, "LICENSE"), "utf8");
-  assert.match(license, /^Copyright \(c\) 2026 codex-chatgpt-web contributors\nCopyright \(c\) 2026 Yuri Trukhin$/m);
+  assert.match(license, /^Copyright \(c\) 2026 codex-chatgpt-web contributors\r?\nCopyright \(c\) 2026 Yuri Trukhin\r?$/m);
+});
+
+// The fork's installer and rollback script quit the running launcher through AppleScript. By name,
+// "Codex Web GPT" could resolve to an older copy LaunchServices still knows under that CFBundleName
+// (a backup, a download) and open it; by bundle id it reaches the launcher that runs.
+test("the fork's install and rollback scripts quit the launcher by bundle id, never by name", () => {
+  const quit = `osascript -e 'tell application id "${manifest.build.appId}" to quit'`;
+  for (const [script, sites] of [["install-fork-macos.sh", 2], ["rollback-fork-macos.sh", 1]]) {
+    const source = fs.readFileSync(path.join(repositoryRoot, "scripts", script), "utf8");
+    assert.equal(source.split(quit).length - 1, sites, `${script} quits by bundle id at every quit site`);
+    assert.doesNotMatch(source, /tell application "/, `${script} never addresses the app by name`);
+  }
+});
+
+const { publishArtifacts } = require("../scripts/publish-artifacts.cjs");
+const PUBLISH_COMMIT = "c".repeat(40);
+const PUBLISH_ARCH = process.arch === "x64" ? "x64" : "arm64";
+const macOnly = { skip: process.platform !== "darwin" && "the check uses macOS ditto and plutil" };
+
+function publishWorkspace(t) {
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cwg-publish-")), "w.noindex");
+  t.after(() => fs.rmSync(path.dirname(root), { recursive: true, force: true }));
+  const staging = path.join(root, "staging");
+  const artifactsDirectory = path.join(root, "artifacts");
+  fs.mkdirSync(staging, { recursive: true });
+  fs.mkdirSync(artifactsDirectory, { recursive: true });
+  // What an earlier build left behind: its package goes, anything else stays.
+  fs.writeFileSync(path.join(artifactsDirectory, `codex-web-gpt-5.0.7-mac-${PUBLISH_ARCH}.zip`), "previous build");
+  fs.writeFileSync(path.join(artifactsDirectory, "notes.txt"), "not a package");
+  return { root, staging, artifactsDirectory };
+}
+
+const packagesIn = directory => fs.readdirSync(directory)
+  .filter(name => /\.(?:AppImage|dmg|exe|zip|blockmap)$/i.test(name))
+  .sort();
+
+/** A staged macOS zip laid out like electron-builder's, with app.asar as a folder the check also reads. */
+function stageMacZip(staging, { executableName = "Codex Web GPT", commit = PUBLISH_COMMIT } = {}) {
+  const build = fs.mkdtempSync(path.join(path.dirname(staging), "bundle-"));
+  const bundle = path.join(build, `${executableName}.app`);
+  fs.mkdirSync(path.join(bundle, "Contents", "MacOS"), { recursive: true });
+  fs.mkdirSync(path.join(bundle, "Contents", "Resources", "app.asar"), { recursive: true });
+  fs.writeFileSync(path.join(bundle, "Contents", "MacOS", executableName), "#!/bin/sh\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(bundle, "Contents", "Info.plist"), [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    `<plist version="1.0"><dict><key>CFBundleName</key><string>Codex Superpower</string><key>CFBundleExecutable</key><string>${executableName}</string><key>CodexWebGptSourceCommit</key><string>${commit}</string></dict></plist>`,
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(bundle, "Contents", "Resources", "app.asar", "package.json"), JSON.stringify({ sourceCommit: commit }));
+  const zip = path.join(staging, `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.zip`);
+  const zipped = spawnSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", bundle, zip], { encoding: "utf8" });
+  assert.equal(zipped.status, 0, zipped.stderr);
+  fs.writeFileSync(`${zip}.blockmap`, "blockmap");
+  fs.writeFileSync(path.join(staging, `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.dmg`), "dmg");
+}
+
+const macPackages = [
+  `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.dmg`,
+  `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.zip`,
+  `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.zip.blockmap`,
+];
+
+test("publishing replaces the previous packages and gives Linux packages their public names", (t) => {
+  const { staging, artifactsDirectory } = publishWorkspace(t);
+  fs.writeFileSync(path.join(staging, "codex-web-gpt-5.0.8-linux-x86_64.AppImage"), "appimage");
+  fs.writeFileSync(path.join(staging, "builder-debug.yml"), "not a package");
+  let checked = 0;
+  const published = publishArtifacts({
+    staging,
+    artifactsDirectory,
+    target: "--linux",
+    sourceCommit: PUBLISH_COMMIT,
+    checkMacPackage: () => { checked += 1; },
+  });
+  assert.deepEqual(published, ["codex-web-gpt-5.0.8-linux-x64.AppImage"]);
+  assert.deepEqual(packagesIn(artifactsDirectory), ["codex-web-gpt-5.0.8-linux-x64.AppImage"]);
+  assert.ok(fs.existsSync(path.join(artifactsDirectory, "notes.txt")));
+  assert.equal(checked, 0, "only macOS packages go through the updater check");
+});
+
+test("a staging folder without a package fails and publishes nothing", (t) => {
+  const { staging, artifactsDirectory } = publishWorkspace(t);
+  fs.writeFileSync(path.join(staging, "only.blockmap"), "blockmap");
+  assert.throws(
+    () => publishArtifacts({ staging, artifactsDirectory, target: "--linux", sourceCommit: PUBLISH_COMMIT }),
+    /produced no distributable artifact/,
+  );
+  assert.deepEqual(packagesIn(artifactsDirectory), []);
+});
+
+test("a macOS package the check refuses is removed with everything published beside it", (t) => {
+  const { root, staging, artifactsDirectory } = publishWorkspace(t);
+  for (const name of macPackages) fs.writeFileSync(path.join(staging, name), name);
+  const calls = [];
+  assert.throws(() => publishArtifacts({
+    staging,
+    artifactsDirectory,
+    target: "--mac",
+    arch: PUBLISH_ARCH,
+    sourceCommit: PUBLISH_COMMIT,
+    temporaryParent: root,
+    checkMacPackage: (options) => {
+      calls.push({ ...options, packages: packagesIn(artifactsDirectory) });
+      throw new Error("refused");
+    },
+  }), /refused/);
+  assert.deepEqual(calls, [{
+    artifactsDirectory,
+    arch: PUBLISH_ARCH,
+    expectedCommit: PUBLISH_COMMIT,
+    temporaryParent: root,
+    packages: macPackages,
+  }], "the check sees exactly the new packages");
+  assert.deepEqual(packagesIn(artifactsDirectory), [], "no package is left for an installed launcher to pick up");
+  assert.ok(fs.existsSync(path.join(artifactsDirectory, "notes.txt")));
+});
+
+test("a macOS zip that is not a readable archive fails the real check and leaves no artifacts", macOnly, (t) => {
+  const { root, staging, artifactsDirectory } = publishWorkspace(t);
+  fs.writeFileSync(path.join(staging, `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.zip`), "this is not a zip archive");
+  fs.writeFileSync(path.join(staging, `codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.dmg`), "dmg");
+  assert.throws(() => publishArtifacts({
+    staging,
+    artifactsDirectory,
+    target: "--mac",
+    arch: PUBLISH_ARCH,
+    sourceCommit: PUBLISH_COMMIT,
+    temporaryParent: root,
+    log: () => {},
+  }), /Could not extract/);
+  assert.deepEqual(packagesIn(artifactsDirectory), []);
+  assert.deepEqual(
+    fs.readdirSync(root).filter(name => name.startsWith("codex-web-gpt-updater-check-")),
+    [],
+    "the extraction is removed",
+  );
+});
+
+test("a macOS zip whose executable was renamed fails the real check and leaves no artifacts", macOnly, (t) => {
+  const { root, staging, artifactsDirectory } = publishWorkspace(t);
+  stageMacZip(staging, { executableName: "Codex Superpower" });
+  assert.throws(() => publishArtifacts({
+    staging,
+    artifactsDirectory,
+    target: "--mac",
+    arch: PUBLISH_ARCH,
+    sourceCommit: PUBLISH_COMMIT,
+    temporaryParent: root,
+    log: () => {},
+  }), /would not install under launchers already in use[\s\S]*Contents\/MacOS\/Codex Web GPT is missing/);
+  assert.deepEqual(packagesIn(artifactsDirectory), []);
+});
+
+test("a macOS zip that keeps the installed launchers' identities is published", macOnly, (t) => {
+  const { root, staging, artifactsDirectory } = publishWorkspace(t);
+  stageMacZip(staging);
+  const lines = [];
+  const published = publishArtifacts({
+    staging,
+    artifactsDirectory,
+    target: "--mac",
+    arch: PUBLISH_ARCH,
+    sourceCommit: PUBLISH_COMMIT,
+    temporaryParent: root,
+    log: line => lines.push(line),
+  });
+  assert.deepEqual([...published].sort(), macPackages);
+  assert.deepEqual(packagesIn(artifactsDirectory), macPackages);
+  assert.deepEqual(lines, [
+    `Updater compatibility: codex-web-gpt-5.0.8-mac-${PUBLISH_ARCH}.zip -> Codex Web GPT.app `
+      + `(CFBundleName Codex Superpower, executable Codex Web GPT, commit ${PUBLISH_COMMIT})`,
+  ]);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

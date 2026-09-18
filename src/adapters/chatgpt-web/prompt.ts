@@ -496,7 +496,7 @@ export function chatGptReadOnlyContextWarning(
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   const browserOnlyGuidance = !capabilities.localToolsEnabled
-    ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
+    ? "\n>\n> **Action:** Open `MCP` in `Codex Superpower` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
     : "";
   if (hasLocalEvidence) {
     return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
