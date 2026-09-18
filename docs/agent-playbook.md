@@ -30,11 +30,27 @@ Goal: the next most valuable change reaches users, verified, without asking the 
    2. `main` is red: failing CI on `main` blocks every user's update (`gh run list -R trukhinyuri/codex-superpower --branch main`).
    3. The outside world changed: open issues labelled `auto-watch` (a new Codex version, new upstream releases, active forks) opened by the daily watch workflow.
    4. Open work in roadmap.md "In progress", then "Next", in order.
-   5. When the queue is empty: run the [failure-mode review](engineering-process.md#when-something-breaks-for-users) and the [competitive review](engineering-process.md#staying-ahead) and add what they find to roadmap.md.
+   5. When the queue is empty: [research](#research) what would help users most (a failure-mode review from install to support, the [competitive review](engineering-process.md#staying-ahead), measurements of latency and throughput) and add what it finds to roadmap.md.
 3. **Do the first item** by engineering-process.md: branch, regression test first, implementation, isolated tests, the updater's build path, draft pull request for CI when the change is risky.
 4. **Release** it (engineering-process.md "Releasing"), watch CI on `main`, confirm an installed app picks it up if you can observe one.
 5. **Record.** Update roadmap.md (move the item, add what you learned), close or comment on the issues it resolves, update competitive-analysis.md when you ported or surpassed something.
 6. **Repeat** from step 1 until the person stops you or only owner decisions remain. Then summarise, in the person's language, what reached users and what waits for them.
+
+## Research
+
+Research turns an open question into a decision that ships. Do it before any change whose right answer is not obvious from the code, and whenever the queue is empty.
+
+1. **Frame the question** as the decision it serves: "What should the bridge do when X happens, so that requirement Rn holds?" Write down what would change the answer.
+2. **Gather evidence from primary sources**, never from memory:
+   - this repository's code and tests, and its history (`git log -S`, blame);
+   - behaviour of real installations: structural logs and diagnostics (`launcher.jsonl`, `diagnostics/browser-turns/`), problem-report issues. Never read or copy conversation content;
+   - the source of the software the product talks to, at the versions users run: openai/codex (`codex-rs`: catalog schema, retry rules, SSE events), Electron, Playwright, CLIProxyAPI;
+   - upstream projects, their issues, pull requests and active forks;
+   - provider documentation and terms (OpenAI, Anthropic, Google): what is allowed decides what is built.
+3. **Measure instead of guessing**: count events per class and hour, time the paths, reproduce the failure in a test or a sandbox (a separate app-server or bridge instance with its own home). Record the query or command that produced every number.
+4. **Challenge the conclusion**: give the question to independent reviewers with different lenses (correctness, compatibility with the other side of each boundary, risk and privacy, "try to break it") without showing them your answer; if your harness can run several agents, use them in parallel. Resolve contradictions with evidence, not votes.
+5. **Write it down** in `docs/plans/<date>-<topic>.md`: question, evidence with sources, options, decision, increments with tests and live checks, and what could not be verified. Add the increments to roadmap.md.
+6. **Decide yourself** everything a requirement already settles. Only the items in roadmap.md "Decisions for the owner" (legal positioning, paid certificates, platform order, anything that conflicts with a requirement) wait for a person; record the question there and continue with other work.
 
 ## Rules that never bend
 
