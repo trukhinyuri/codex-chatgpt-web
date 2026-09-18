@@ -20,7 +20,12 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError, chatGptRateLimitCause } from "./adapter-error";
+import {
+  ChatGptWebAdapterError,
+  chatGptRateLimitCause,
+  chatGptTurnRetiredError,
+  isChatGptTurnRetired,
+} from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -296,9 +301,42 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
 
 function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
-  if (normalized instanceof ChatGptWebAdapterError) return normalized;
   const phase = session.runtime.submission?.phase;
+  // Mutation authority outranks retryability. Once Send has been activated the prompt may already
+  // exist upstream, so nothing past this point may authorize another write: the browser guards
+  // that raise a structured retryable error (rate-limit dialog, terminal error alert) all run after
+  // the send press as well as before it. Returning an existing ChatGptWebAdapterError before this
+  // phase check let a `retryable: true` raised post-send escape the downgrade below and caused
+  // Codex to resend an already-accepted prompt.
   if (!phase || phase === "prepared") return normalized;
+  // A turn whose Codex-side binding went away did not stop because of anything ChatGPT did, and
+  // sending the user to the ChatGPT tab for it points at the one component that was still working.
+  if (isChatGptTurnRetired(normalized)) {
+    return new ChatGptWebAdapterError(
+      "The Codex request for this turn ended while ChatGPT was still working, so the turn was retired "
+      + "before ChatGPT could return its next tool call. ChatGPT is not at fault: check whether a proxy, "
+      + "wrapper or bridge between Codex and this route closed the response stream.",
+      {
+        status: 502,
+        errorType: "server_error",
+        code: "chatgpt_turn_retired",
+        retryable: false,
+        cause: normalized,
+      },
+    );
+  }
+  if (normalized instanceof ChatGptWebAdapterError) {
+    if (!normalized.retryable) return normalized;
+    // The originating code/status/message stay visible (folded in as `cause`) so the failure
+    // remains diagnosable even though the prompt will not be resent.
+    return new ChatGptWebAdapterError(normalized.message, {
+      status: normalized.status,
+      errorType: normalized.errorType,
+      code: normalized.code,
+      retryable: false,
+      cause: normalized,
+    });
+  }
   const ambiguous = phase === "send_activated";
   return new ChatGptWebAdapterError(
     ambiguous
@@ -484,7 +522,9 @@ export function createChatGptWebAdapter(
       observedCapabilityTokens.add(turnToken);
       void broker.waitForRetirement(turnToken).then(
         () => {
-          const retirement = new Error("Codex Native retired the turn binding before its tool work completed");
+          const retirement = chatGptTurnRetiredError(
+            "Codex Native retired the turn binding before its tool work completed",
+          );
           externalProgress.retire(retirement);
           if (!browserOwnerSettled && !browserAbort.signal.aborted) browserAbort.abort(retirement);
         },

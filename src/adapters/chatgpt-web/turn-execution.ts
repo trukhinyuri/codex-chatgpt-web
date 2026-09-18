@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
+import { chatGptBrowserTabClosedError, chatGptTurnAbortError, chatGptTurnSupersededError } from "./adapter-error";
 import {
   chatGptTurnUserRevisionHistory,
   extractChatGptCompactionSourceRevision,
@@ -18,10 +18,10 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
     // another owner may still depend on its eventual settlement and rejection must not become an
     // unhandled process-level error.
     void promise.catch(() => {});
-    return Promise.reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+    return Promise.reject(chatGptTurnAbortError(signal));
   }
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+    const onAbort = () => reject(chatGptTurnAbortError(signal));
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       value => {
@@ -546,7 +546,7 @@ export class ChatGptTurnSessions {
     instruction?: ChatGptInstructionLineage,
   ): Promise<ChatGptTurnSession> {
     for (;;) {
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (signal?.aborted) throw chatGptTurnAbortError(signal);
       const existing = this.entries.get(key);
       if (existing) {
         if (existing.supersededError) throw existing.supersededError;
@@ -581,7 +581,7 @@ export class ChatGptTurnSessions {
         await awaitWithAbort(ownedSession.physicalSettlement, signal);
         continue;
       }
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (signal?.aborted) throw chatGptTurnAbortError(signal);
       return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId, instruction?.current);
     }
   }

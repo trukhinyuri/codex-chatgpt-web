@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptTurnAbortError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 import {
@@ -209,9 +209,9 @@ export class LauncherBrowserHelperClient {
   }
 
   async run(turn: BrowserTurn): Promise<string> {
-    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.abortSignal?.aborted) throw chatGptTurnAbortError(turn.abortSignal);
     await this.ensureChild();
-    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.abortSignal?.aborted) throw chatGptTurnAbortError(turn.abortSignal);
     if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
       throw new Error(
         "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
@@ -239,7 +239,7 @@ export class LauncherBrowserHelperClient {
             if (!pending.sent) {
               this.finishWithError(
                 turn.traceId,
-                new DOMException("ChatGPT web turn aborted", "AbortError"),
+                chatGptTurnAbortError(turn.abortSignal),
               );
               return;
             }
