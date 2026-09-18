@@ -212,8 +212,31 @@ const DROPPED_IMAGE_NOTE =
  * survive.
  */
 interface ImageBudget {
-  seen: number;
-  dropped: number;
+  allowed: Set<string>;
+  refs: Map<string, string>;
+}
+
+function imageIdentity(part: Extract<CodexContentPart, { type: "image" }>): string {
+  // Detail changes the model-facing interpretation of an image attachment, so only exact
+  // image+detail replays share one physical upload/ref.
+  return `${part.detail ?? ""}\0${part.imageUrl}`;
+}
+
+function newestChatGptContextImageIdentities(
+  messages: readonly CodexMessage[],
+  limit = CHATGPT_MAX_INPUT_IMAGES,
+): Set<string> {
+  const selected = new Set<string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0 && selected.size < limit; messageIndex -= 1) {
+    const message = messages[messageIndex]!;
+    if (message.role === "assistant" || typeof message.content === "string") continue;
+    for (let partIndex = message.content.length - 1; partIndex >= 0 && selected.size < limit; partIndex -= 1) {
+      const part = message.content[partIndex]!;
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl)) continue;
+      selected.add(imageIdentity(part));
+    }
+  }
+  return selected;
 }
 
 function inputContent(
@@ -230,10 +253,14 @@ function inputContent(
   }
   return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
-    budget.seen += 1;
-    if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
-    const ref = `codex-input-image-${images.length + 1}`;
-    images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
+    const identity = imageIdentity(part);
+    if (!budget.allowed.has(identity)) return { type: "text", text: DROPPED_IMAGE_NOTE };
+    let ref = budget.refs.get(identity);
+    if (!ref) {
+      ref = `codex-input-image-${images.length + 1}`;
+      budget.refs.set(identity, ref);
+      images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
+    }
     return { type: "image_attachment", attachment_ref: ref, ...(part.detail ? { detail: part.detail } : {}) };
   });
 }
@@ -616,8 +643,8 @@ export function compileChatGptWebPrompt(
   const build = (sourceMessages: readonly CodexMessage[], omittedMessages = 0): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
     const budget: ImageBudget = {
-      seen: 0,
-      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES),
+      allowed: newestChatGptContextImageIdentities(sourceMessages),
+      refs: new Map(),
     };
     const skillFiles: ChatGptSkillFile[] = [];
     const messages = sourceMessages.map(message => {
