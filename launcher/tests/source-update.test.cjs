@@ -869,6 +869,8 @@ test("every updater test keeps staged builds out of the real temporary folder", 
     const constructions = source.split("createSourceUpdateController(").length - 1;
     const isolated = (source.match(/stagingParent: logs/g) || []).length;
     assert.ok(isolated >= Math.min(constructions, 1), `${file} passes stagingParent to its controllers`);
+    // A test that builds must not empty the private build home of a real update running on this Mac.
+    if (source.includes(".beginInstall(")) assert.match(source, /prepareBuildHome: \(\) =>/, `${file} passes prepareBuildHome to controllers that build`);
   }
 });
 
