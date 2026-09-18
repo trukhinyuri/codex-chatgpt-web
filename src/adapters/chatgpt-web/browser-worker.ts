@@ -796,16 +796,42 @@ export class ChatGptRateLimitCooldown {
     ));
   }
 
-  /** Records a rate-limit failure and restates it with the escalated delay; other errors pass through. */
+  /**
+   * Records a rate-limit failure and restates it with the escalated delay. While the account is still
+   * throttled, ChatGPT often answers the next attempts with a generic "Something went wrong" instead
+   * of the dialog; within the escalation window that answer is the same limit, so Codex must wait
+   * rather than retry at once. Other errors pass through unchanged.
+   */
   escalate<E>(error: E): E | ChatGptWebAdapterError {
-    if (!isChatGptRateLimitError(error)) return error;
-    return chatGptRateLimitError(withChatGptRetryDelay(error.message, this.record()), error);
+    if (isChatGptRateLimitError(error)) {
+      return chatGptRateLimitError(withChatGptRetryDelay(error.message, this.record()), error);
+    }
+    if (isChatGptUpstreamServerError(error) && this.throttledRecently()) {
+      return chatGptRateLimitError(withChatGptRetryDelay(
+        "ChatGPT rate limit: ChatGPT reported an error while this account was still throttled after \"Too many requests\".",
+        this.record(),
+      ), error);
+    }
+    return error;
   }
 
-  reset(): void {
-    this.until = 0;
+  /**
+   * A completed ChatGPT response proves the account is being served again, so the escalation starts
+   * over. An accepted submission proves nothing: ChatGPT can still fail it while throttled. A pause
+   * that was already announced to Codex runs out on its own.
+   */
+  recordResponse(): void {
     this.consecutive = 0;
+    this.lastLimitAt = 0;
   }
+
+  private throttledRecently(): boolean {
+    return this.lastLimitAt > 0 && this.now() - this.lastLimitAt <= CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS;
+  }
+}
+
+function isChatGptUpstreamServerError(error: unknown): error is ChatGptWebAdapterError {
+  return error instanceof ChatGptWebAdapterError && error.code === "upstream_server_error";
 }
 
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
@@ -4903,7 +4929,6 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      this.rateLimitCooldown.reset();
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5205,6 +5230,7 @@ export class ChatGptBrowserWorker {
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
       await diagnostics.capture(page, "turn-completed");
+      this.rateLimitCooldown.recordResponse();
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} completed`
         + ` (markdownChars=${finalText.length}, domFullScans=${responseDomCache.fullScans ?? 0}, domCacheHits=${responseDomCache.cacheHits ?? 0})`,
