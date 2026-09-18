@@ -111,17 +111,18 @@ if [ -n "$ZIP" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$COMMIT" ]; then
   say "Reusing the package built from ${COMMIT:0:7}: $ZIP"
 else
   say "Installing dependencies"
-  bun install --frozen-lockfile
-  (cd launcher && bun install --frozen-lockfile)
+  # Build at low CPU priority so running ChatGPT turns keep a responsive browser.
+  nice -n 15 bun install --frozen-lockfile
+  (cd launcher && nice -n 15 bun install --frozen-lockfile)
   if [ "$VERIFY" = 1 ]; then
     say "Running bun run verify (all tests, several minutes)"
-    bun run verify
+    nice -n 15 bun run verify
   else
     say "Skipping verification (VERIFY=0)"
   fi
   say "Packaging the macOS app"
   rm -f "$STAMP"
-  bun run app:package
+  nice -n 15 bun run app:package
   ZIP="$(zip_path)"
   [ -n "$ZIP" ] || die "the macOS package was not produced"
   printf '%s\n' "$COMMIT" > "$STAMP"

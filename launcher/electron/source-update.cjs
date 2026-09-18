@@ -169,10 +169,19 @@ function appendLog(logPath, line) {
   } catch {}
 }
 
+/**
+ * Builds and tests run at low CPU priority: they share the machine with the launcher's ChatGPT tabs,
+ * and a starved renderer makes live turns time out while an update is being prepared.
+ */
+function lowPriorityCommand(command, args) {
+  return { command: "/usr/bin/nice", args: ["-n", "15", command, ...args] };
+}
+
 function run(command, args, { cwd, env, log, timeoutMs = SOURCE_STEP_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     log?.(`$ ${[command, ...args].join(" ")} (in ${cwd})`);
-    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const niced = lowPriorityCommand(command, args);
+    const child = spawn(niced.command, niced.args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
     const forward = (chunk) => {
       for (const line of chunk.toString("utf8").split(/\r?\n/)) if (line.trim()) log?.(line);
@@ -461,6 +470,7 @@ module.exports = {
   acquireLock,
   createSourceUpdateController,
   defaultSourceRoot,
+  lowPriorityCommand,
   prepareCheckout,
   releaseLock,
   sourceBuildPath,
