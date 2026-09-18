@@ -26,7 +26,18 @@ Every branch named here is on GitHub. To continue one without earlier conversati
 3. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive, with the menu-bar icon optional. The implementation in `fork/dock-autostart-keepalive` is tested only with fakes. A real-launchd end-to-end test in CI is being built in `fork/dock-lifecycle-e2e`; do not release the lifecycle change before that test is green.
 4. **Watch automation:** a daily workflow opens `auto-watch` issues for new Codex versions, upstream changes and active forks, plus a weekly technology watch. Branch `fork/watch-automation`.
 5. **Failure-mode review for thousands of users** and the **multi-account design** (requirement R9). Their plans land in `docs/plans/failure-modes.md` and `docs/plans/multi-account.md`.
-6. **Consent text for problem reports** (the issue appears under the user's GitHub account), branch `fork/report-disclosure`; **Windows CI**, branch `fork/windows-ci-tests` (pull request #1); **these documents**, branch `fork/requirements-docs` (pull request #2).
+6. **Updates without the macOS "App Management" permission.** An update stopped at the system
+   permission request, which the user had to grant by hand (R4.6, R1.2). The bundle was replaced by
+   Bun from the user's home — a binary with no bundle, no Team ID and a path that changes with every
+   version — after the launcher had already quit. It is now replaced by a process of the app's own
+   bundle, the way Sparkle and ShipIt do it, and an installation that may not replace its bundle
+   keeps running with its verified build staged and reports `bundle-not-writable` instead of quitting
+   into a half-finished update. Branch `fork/update-without-app-management`,
+   [plan](plans/2026-09-19-update-without-app-management.md). The prompt disappears for good only
+   with a Developer ID certificate (Apple's exemption is keyed to a Team ID, which an ad-hoc
+   signature cannot have) — see **Signing** under *Decisions for the owner*; the packaging already
+   takes one through `CSC_LINK`/`CSC_NAME` without a code change.
+7. **Consent text for problem reports** (the issue appears under the user's GitHub account), branch `fork/report-disclosure`; **Windows CI**, branch `fork/windows-ci-tests` (pull request #1); **these documents**, branch `fork/requirements-docs` (pull request #2).
 
 
 ## Next
@@ -60,7 +71,7 @@ Each item carries the default the project follows until the owner decides otherw
 
 - **Private vulnerability reporting** is off in the repository settings (Settings → Code security → Private vulnerability reporting). Until it is on, the advisory link in SECURITY.md and in the issue form opens no form, and e-mail to yuri@trukhin.com is the only private channel. Turning it on is a repository setting only the owner can change.
 
-- **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update. A Developer ID certificate would fix this and allow notarization. Default: stay ad-hoc signed and re-request permissions after an update.
+- **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update, and the app has no Team ID. Apple's exemption that lets an app replace its own bundle without the "App Management" permission is keyed to the Team ID ([WWDC22 10096](https://developer.apple.com/videos/play/wwdc2022/10096/)), so without a certificate an update can be stopped by that permission request on a user's Mac — the manual step R4.6 forbids ([analysis](plans/2026-09-19-update-without-app-management.md)). A Developer ID certificate fixes both and allows notarization; `launcher/scripts/package.cjs` already uses one when `CSC_LINK` or `CSC_NAME` is set, so it needs the secret, not a code change. Default until then: stay ad-hoc signed, re-request permissions after an update, and never half-install — an installation that may not replace its bundle keeps its verified build and reports it.
 - **Legal positioning** for companies: OpenAI's Terms of Use (16 January 2026) forbid automatically or programmatically extracting output, sharing an account with anyone else, and circumventing rate limits. The ChatGPT Web route automates chatgpt.com for the account's owner; CLIProxyAPI rotates subscription accounts and reuses the public Antigravity OAuth client. Both carry a risk of account restrictions that companies will ask about. Default: operate transparently within limits (R3.4, R7.5) and document the risk for users.
 - **Account pooling across people** was requested (any number of accounts shared by many users to raise limits). It conflicts with the terms above and would expose customers to account bans; requirement R9 implements several accounts per owner and horizontal scaling without pooling across people. Default: accounts are used by their owner only.
 

@@ -28,6 +28,7 @@ const CODES = new Set([
   "commit-mismatch", "package-missing", "checkout-foreign", "network", "git-failed", "extract-failed",
   "startup-runtime-error", "startup-launcher-error", "exited-during-startup", "startup-timeout",
   "stage-failed", "runtime-start-error", "cliproxy-unhealthy", "startup-cliproxy-unhealthy", "other",
+  "bundle-not-writable",
   ...RUNTIME_STATUSES.map(status => `runtime-${status}`),
   ...RUNTIME_STATUSES.map(status => `startup-runtime-${status}`),
 ]);
@@ -44,6 +45,10 @@ function classifyUpdateFailure(message) {
   const text = String(message || "");
   if (/Another source update or install is running/.test(text)) return null;
   const rules = [
+    // macOS refuses to let one program change another program's application bundle until the user
+    // grants "App Management" (Privacy & Security). It has to be told apart from a broken build:
+    // no commit is at fault, and no retry of the same commit can help.
+    [/EPERM|EACCES|Operation not permitted|Permission denied|could not replace its own application bundle/, "bundle-not-writable"],
     [/run all tests \(bun run verify\) failed/, "verify-failed"],
     [/install launcher dependencies failed/, "launcher-dependencies-failed"],
     [/install dependencies failed/, "dependencies-failed"],

@@ -48,7 +48,13 @@ CURRENT_COMMIT="$(plist_commit "$APP")"
 TARGET_COMMIT="$(plist_commit "$SOURCE")"
 say "Rolling back from ${CURRENT_COMMIT:-an unstamped build} to ${TARGET_COMMIT:-an unstamped build} ($ENTRY)"
 
-launcher_running() { pgrep -f "$APP_PROC" >/dev/null 2>&1; }
+# The launcher's update worker runs from the app's own executable (launcher/electron/source-update.cjs
+# starts it so that macOS sees the bundle replace itself, not a foreign program). Its command line
+# begins with the same path, so every check below ignores it: it is not a running launcher.
+launcher_pids() {
+  pgrep -af "$APP_PROC" 2>/dev/null | grep -v source-update-worker.cjs | awk '{print $1}'
+}
+launcher_running() { [ -n "$(launcher_pids)" ]; }
 active_turns() {
   local health http browser
   health="$(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null)" || { echo 0; return; }
@@ -68,7 +74,7 @@ if launcher_running; then
   say "Quitting Codex Superpower"
   if [ "${NOW:-0}" = 1 ]; then
     # A normal quit asks first while turns run; NOW=1 means stop them, which SIGTERM does.
-    pkill -TERM -f "$APP_PROC" >/dev/null 2>&1 || true
+    launcher_pids | while IFS= read -r pid; do kill -TERM "$pid" >/dev/null 2>&1 || true; done
   else
     # By bundle id, never by name: an older copy that LaunchServices still knows as "Codex Web GPT"
     # (a backup, a download) would be the one AppleScript opens and quits.

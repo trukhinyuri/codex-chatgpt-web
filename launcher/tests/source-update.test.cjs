@@ -26,6 +26,8 @@ const {
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  probeBundleWritable,
+  updateWorkerCommand,
   isTransientBuildFailure,
   prepareBuildHome,
   sourceBuildEnvironment,
@@ -94,7 +96,10 @@ function controller(overrides = {}, dependencies = {}) {
         fs.writeFileSync(path.join(destination, "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"), "");
       },
       readPackagedCommit: () => MAIN,
-      spawnWorker: (_runtime, workerPath, jobPath) => {
+      // Never probe the real installed bundle from a test; the probe has its own tests below.
+      probeBundleWritable: () => ({ writable: true, code: null }),
+      spawnWorker: (command, workerPath, jobPath) => {
+        calls.push(["worker-executable", command.executable, command.env?.ELECTRON_RUN_AS_NODE || ""]);
         calls.push(["worker", path.basename(workerPath), path.basename(jobPath)]);
         // The real worker confirms that it read its job before the launcher may quit.
         fs.writeFileSync(path.join(path.dirname(workerPath), "worker.started"), "4242\n");
@@ -912,4 +917,107 @@ test("a quit asks first while Codex has turns in flight; signals and idle quits 
   assert.deepEqual(await run({ active: 2, answer: 1 }), [["dialog", "Codex is running 2 task(s)", 0, 0], ["quit"]]);
   assert.match(main, /app\.on\("before-quit", \(event\) => \{\n\s*if \(exitCommitted\) return;\n\s*event\.preventDefault\(\);\n\s*void quitAfterConfirmation\(\);/);
   assert.match(main, /process\.once\("SIGTERM", \(\) => \{ void requestQuit\(\); \}\);/);
+});
+
+// macOS asks the user for the "App Management" permission when a program changes an application
+// bundle that is not its own. These tests hold the shape that keeps updates unattended: the bundle
+// is replaced by a process of that same bundle, and an installation that may not replace it keeps
+// working instead of quitting into a half-finished update.
+
+test("the update worker runs from the launcher's own bundle, not from the Bun in the user's home", () => {
+  const command = updateWorkerCommand({
+    platform: "darwin",
+    executablePath: "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
+    runtimeExecutable: "/Users/someone/.codex-chatgpt-web/versions/5.0.8-darwin-arm64/runtime/bun",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.equal(command.executable, "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT");
+  assert.equal(command.insideBundle, true);
+  // Electron's own executable, told to behave as Node: no window, no single-instance lock.
+  assert.equal(command.env.ELECTRON_RUN_AS_NODE, "1");
+  assert.equal(command.env.PATH, "/usr/bin");
+});
+
+test("a launcher that does not run from a bundle still has an executable for its worker", () => {
+  const outside = updateWorkerCommand({
+    platform: "darwin",
+    executablePath: "/usr/local/bin/codex-web-gpt",
+    runtimeExecutable: "/runtime/bun-root/runtime/bun",
+    baseEnv: {},
+  });
+  assert.equal(outside.executable, "/runtime/bun-root/runtime/bun");
+  assert.equal(outside.insideBundle, false);
+  assert.equal(outside.env.ELECTRON_RUN_AS_NODE, undefined);
+
+  const elsewhere = updateWorkerCommand({
+    platform: "linux",
+    executablePath: "/opt/codex/codex-web-gpt",
+    runtimeExecutable: "/runtime/bun-root/runtime/bun",
+    baseEnv: {},
+  });
+  assert.equal(elsewhere.executable, "/runtime/bun-root/runtime/bun");
+  assert.equal(elsewhere.insideBundle, false);
+
+  assert.throws(
+    () => updateWorkerCommand({ platform: "darwin", executablePath: "relative/app", runtimeExecutable: null, baseEnv: {} }),
+    /No executable is available to run the update worker/,
+  );
+});
+
+test("the launcher starts its update worker with the bundle's own executable", async () => {
+  const { instance, calls } = controller();
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  await instance.launchInstall(prepared);
+  assert.deepEqual(
+    calls.find(call => call[0] === "worker-executable"),
+    ["worker-executable", "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT", "1"],
+  );
+  instance.cancelInstall(prepared);
+});
+
+test("the bundle probe reports whether the launcher may replace its own application bundle", () => {
+  const root = tempDir("cwg-probe-");
+  const bundle = path.join(root, "Codex Web GPT.app");
+  fs.mkdirSync(path.join(bundle, "Contents"), { recursive: true });
+  assert.deepEqual(probeBundleWritable(bundle), { writable: true, code: null });
+  assert.deepEqual(fs.readdirSync(path.join(bundle, "Contents")), [], "the probe leaves nothing behind");
+
+  // macOS answers a refused bundle change with EPERM; a read-only folder answers EACCES. Both mean
+  // the same thing to the updater: this process may not replace the bundle.
+  fs.chmodSync(path.join(bundle, "Contents"), 0o500);
+  try {
+    const refused = probeBundleWritable(bundle);
+    assert.equal(refused.writable, false);
+    assert.ok(["EACCES", "EPERM"].includes(refused.code), `unexpected code ${refused.code}`);
+  } finally {
+    fs.chmodSync(path.join(bundle, "Contents"), 0o700);
+  }
+});
+
+test("an update that may not replace the bundle keeps the verified build and never quits the launcher", async () => {
+  const problems = [];
+  const { instance, calls } = controller({ onProblem: problem => problems.push(problem) }, {
+    probeBundleWritable: () => ({ writable: false, code: "EPERM" }),
+  });
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  await assert.rejects(
+    instance.launchInstall(prepared),
+    error => error.keepStaged === true && /could not replace its own application bundle \(EPERM\)/.test(error.message),
+  );
+  assert.ok(!calls.some(call => call[0] === "worker"), "nothing is spawned when the bundle may not be replaced");
+  assert.equal(fs.existsSync(prepared.jobPath), true, "the verified build waits for the next window");
+  assert.deepEqual(problems, [{
+    kind: "update-install-failed",
+    code: "bundle-not-writable",
+    stage: "install",
+    version: "5.0.8+2222222",
+    commit: MAIN,
+  }]);
+  assert.ok(
+    calls.some(call => call[0] === "warn" && call[1] === "launcher.update_bundle_not_writable"),
+    "the maintainer hears that this installation cannot replace its own bundle",
+  );
+  instance.cancelInstall(prepared);
 });
