@@ -225,6 +225,65 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
+test("capability detection reopens the effort menu behind a stale aria-expanded flag (Gao327 fix)", async () => {
+  let opened = false;
+  const events: string[] = [];
+  const modelRows = { count: async () => 3 };
+  const menu = {
+    filter() { return this; }, last() { return this; },
+    isVisible: async () => opened,
+    locator: () => modelRows,
+  };
+  const sliderControl = { press: async () => {} };
+  const slider = {
+    filter() { return this; }, last() { return this; },
+    waitFor: async ({ state }: { state: string }) => {
+      if (!opened) throw new Error("timed out waiting for the effort slider to attach");
+      expect(state).toBe("attached");
+    },
+    getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": "4", "aria-valuenow": "2" } as Record<string, string>)[name] ?? null,
+    locator: () => sliderControl,
+  };
+  const sliderContainer = {
+    filter() { return this; }, last() { return this; },
+    isVisible: async () => opened,
+    waitFor: async ({ state }: { state: string }) => {
+      if (!opened) throw new Error("timed out waiting for the effort container to become visible");
+      expect(state).toBe("visible");
+    },
+    locator: () => slider,
+  };
+  const effortButton = {
+    last() { return this; },
+    isVisible: async () => true,
+    // The account's picker reports aria-expanded="true" even though the menu is actually
+    // closed (e.g. left over on a background surface). The old code trusted this attribute
+    // and never reopened the menu, so the capability probe hung waiting on a closed surface.
+    getAttribute: async (name: string) => (name === "aria-expanded" ? "true" : null),
+    click: async () => { events.push("click"); opened = true; },
+    dispatchEvent: async () => { events.push("pointerdown"); opened = true; },
+  };
+  const composerForm = { count: async () => 1, locator: () => effortButton };
+  const composers = {
+    filter() { return this; }, last() { return this; }, count: async () => 1, locator: () => composerForm,
+  };
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === CHATGPT_COMPOSER_SELECTOR) return composers;
+      if (selector === CHATGPT_EFFORT_MENU_SELECTOR) return menu;
+      if (selector === CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR) return sliderContainer;
+      return hidden;
+    },
+    keyboard: { press: async () => { events.push("escape"); } },
+    evaluate: async () => true,
+  };
+
+  await expect(detectChatGptAccountCapabilities(page as never, { selectorTimeoutMs: 500 }))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  expect(events).toContain("click");
+});
+
 function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean } = {}) {
   let value = 0;
   const keys: string[] = [];
