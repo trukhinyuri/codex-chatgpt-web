@@ -59,7 +59,9 @@ import {
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
-  parseChatGptEffortSliderState,
+  readChatGptEffortSliderState,
+  type ChatGptEffortActivation,
+  type ChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
@@ -210,6 +212,39 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
       retryable: false,
       cause: new Error(diagnostic),
     },
+  );
+}
+
+/**
+ * Reads the effort slider's ARIA state, reopening the effort menu and retrying when ChatGPT
+ * replaces or closes the popover between locating the slider and reading it. Three sequential
+ * `getAttribute` round-trips used to race a disappearing popover: each one could independently
+ * hang or read a stale/removed element instead of failing fast with a retryable signal. Bounded
+ * to a few attempts so a genuinely broken control still fails the turn instead of hanging.
+ */
+async function readEffortSliderStateOrReopen(
+  page: Page,
+  control: Locator,
+  activation: ChatGptEffortActivation,
+  captureDiagnostic?: (checkpoint: string) => Promise<void>,
+): Promise<{ activation: ChatGptEffortActivation; state: ChatGptEffortSliderState }> {
+  let current = activation;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const state = await readChatGptEffortSliderState(current.slider);
+    if (state === "detached") {
+      await captureDiagnostic?.("effort-slider-reopen-retry");
+      current = await activateChatGptEffortMenu(page, control);
+      continue;
+    }
+    if (!state) {
+      throw chatGptModelControlUnavailableAdapterError(
+        "ChatGPT effort slider exposed an invalid ARIA range",
+      );
+    }
+    return { activation: current, state };
+  }
+  throw chatGptModelControlUnavailableAdapterError(
+    "ChatGPT effort slider kept disappearing before its ARIA state could be read",
   );
 }
 
@@ -2582,19 +2617,19 @@ export class ChatGptBrowserWorker {
     } finally {
       waitAbort.abort();
     }
-    let sliderState = parseChatGptEffortSliderState(
-      await effortSlider.getAttribute("aria-valuemin"),
-      await effortSlider.getAttribute("aria-valuemax"),
-      await effortSlider.getAttribute("aria-valuenow"),
-    );
-    if (!sliderState) {
-      throw chatGptModelControlUnavailableAdapterError(
-        "ChatGPT effort slider exposed an invalid ARIA range",
-      );
-    }
+    let currentActivation = activation;
+    let effortSliderLocator = effortSlider;
+    let sliderState: ChatGptEffortSliderState;
+    ({ activation: currentActivation, state: sliderState } = await readEffortSliderStateOrReopen(
+      page,
+      currentEffort,
+      currentActivation,
+      captureDiagnostic,
+    ));
+    effortSliderLocator = currentActivation.slider;
     const targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
-      const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(activation.menu) : undefined;
+      const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(currentActivation.menu) : undefined;
       const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
         ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
         : "";
@@ -2605,7 +2640,7 @@ export class ChatGptBrowserWorker {
         detail,
       );
     }
-    const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+    let sliderControl = effortSliderLocator.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
       await throwIfChatGptRateLimitDialog(page);
       const direction = targetValue > sliderState.value ? 1 : -1;
@@ -2613,20 +2648,38 @@ export class ChatGptBrowserWorker {
       const previousValue = sliderState.value;
       await sliderControl.press(key);
       const changeDeadline = Date.now() + 5_000;
+      let detachedDuringWait = false;
       do {
-        sliderState = parseChatGptEffortSliderState(
-          await effortSlider.getAttribute("aria-valuemin"),
-          await effortSlider.getAttribute("aria-valuemax"),
-          await effortSlider.getAttribute("aria-valuenow"),
-        );
-        if (!sliderState) {
+        const read = await readChatGptEffortSliderState(effortSliderLocator);
+        if (read === "detached") {
+          detachedDuringWait = true;
+          break;
+        }
+        if (!read) {
           throw chatGptModelControlUnavailableError(
             "ChatGPT effort slider lost its semantic ARIA state",
           );
         }
+        sliderState = read;
         if (sliderState.value !== previousValue) break;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
       } while (Date.now() < changeDeadline);
+      if (detachedDuringWait) {
+        // ChatGPT replaced the popover between the keypress and this read (the race the
+        // maintainer flagged as left unguarded by the original PR). Reopen and trust the
+        // reopened state instead of asserting on a now-stale slider reference.
+        const reopened = await readEffortSliderStateOrReopen(
+          page,
+          currentEffort,
+          currentActivation,
+          captureDiagnostic,
+        );
+        currentActivation = reopened.activation;
+        effortSliderLocator = currentActivation.slider;
+        sliderControl = effortSliderLocator.locator("xpath=ancestor::*[@role='menuitem'][1]");
+        sliderState = reopened.state;
+        continue;
+      }
       if (sliderState.value !== previousValue + direction) {
         throw chatGptModelControlUnavailableError(
           `ChatGPT effort slider did not move exactly one step with ${key}`

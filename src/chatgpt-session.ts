@@ -151,6 +151,27 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+/**
+ * ChatGPT can replace or close the effort popover between the moment a caller resolves the
+ * slider locator and the moment it reads that slider's ARIA attributes. Reading `aria-valuemin`,
+ * `-valuemax` and `-valuenow` as three separate round-trips lets that race turn into either a
+ * false "invalid ARIA range" failure or, on the removed element, a hang. Reading all three in one
+ * `evaluate` call makes the read atomic with respect to the page; a rejected `evaluate` means the
+ * element detached mid-read, which callers can distinguish from a genuinely invalid range and
+ * recover from by reopening the menu, instead of failing the whole turn.
+ */
+export async function readChatGptEffortSliderState(
+  slider: Locator,
+): Promise<ChatGptEffortSliderState | undefined | "detached"> {
+  const raw = await slider.evaluate(element => ({
+    min: element.getAttribute("aria-valuemin"),
+    max: element.getAttribute("aria-valuemax"),
+    value: element.getAttribute("aria-valuenow"),
+  })).catch(() => undefined);
+  if (raw === undefined) return "detached";
+  return parseChatGptEffortSliderState(raw.min, raw.max, raw.value);
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {

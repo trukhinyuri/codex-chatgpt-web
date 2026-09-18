@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { Locator } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import {
   CHATGPT_COMPOSER_SELECTOR,
@@ -7,6 +8,7 @@ import {
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
+  readChatGptEffortSliderState,
 } from "../src/chatgpt-session";
 
 test("composer and effort selectors exclude unrelated editable fields and menu buttons", () => {
@@ -227,6 +229,7 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
     filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
     waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },
     getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": options.max ?? "4", "aria-valuenow": String(value), "aria-hidden": "true" })[name] ?? null,
+    evaluate: async () => ({ min: "0", max: options.max ?? "4", value: String(value) }),
     locator: () => sliderControl,
   };
   const container = {
@@ -286,4 +289,114 @@ test("Pro selection changes the hidden slider through its visible owner, never t
   await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
+});
+
+test("readChatGptEffortSliderState distinguishes a detached popover from a valid or invalid ARIA read", async () => {
+  const detached = { evaluate: async () => { throw new Error("element is not attached to the DOM"); } };
+  await expect(readChatGptEffortSliderState(detached as unknown as Locator)).resolves.toBe("detached");
+
+  const valid = { evaluate: async () => ({ min: "0", max: "4", value: "2" }) };
+  await expect(readChatGptEffortSliderState(valid as unknown as Locator)).resolves.toEqual({ min: 0, max: 4, value: 2 });
+
+  const invalid = { evaluate: async () => ({ min: "0", max: "9", value: "2" }) };
+  await expect(readChatGptEffortSliderState(invalid as unknown as Locator)).resolves.toBeUndefined();
+});
+
+/**
+ * ChatGPT can replace or close the effort popover between locating the slider and reading its
+ * ARIA state (upstream PR #133). The old code read `aria-valuemin`/`-valuemax`/`-valuenow` as
+ * three separate `getAttribute` round-trips, so this fixture always fails `getAttribute` on the
+ * slider element -- exactly the pattern the port removes -- while `evaluate` (the new atomic
+ * read) succeeds except on the call indexes the test asks it to simulate as detached.
+ */
+function detachRacingReasoningPicker(options: { detachOnEvaluateCalls: number[] }) {
+  let value = 0;
+  let evaluateCalls = 0;
+  const keys: string[] = [];
+  const hidden = {
+    filter() { return this; }, last() { return this; }, getByText() { return this; },
+    isVisible: async () => false,
+    waitFor: ({ signal }: { signal: AbortSignal }) => new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }),
+  };
+  const sliderControl = { press: async (key: string) => { keys.push(key); value += key === "ArrowRight" ? 1 : -1; } };
+  const slider = {
+    isVisible: async () => false,
+    filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
+    waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },
+    getAttribute: async () => { throw new Error("ChatGPT effort slider element is not attached to the DOM"); },
+    evaluate: async () => {
+      evaluateCalls += 1;
+      if (options.detachOnEvaluateCalls.includes(evaluateCalls)) {
+        throw new Error("ChatGPT effort slider element is not attached to the DOM");
+      }
+      return { min: "0", max: "4", value: String(value) };
+    },
+    locator: () => sliderControl,
+  };
+  const container = {
+    filter() { return this; }, last() { return this; },
+    locator: () => slider,
+    isVisible: async () => true,
+    waitFor: async ({ state }: { state: string }) => { expect(state).toBe("visible"); },
+  };
+  const control = {
+    last() { return this; }, waitFor: async () => {}, isVisible: async () => true,
+    getAttribute: async (name: string) => name === "aria-expanded" ? "true" : null,
+  };
+  const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
+  const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === CHATGPT_COMPOSER_SELECTOR) return composer;
+      if (selector === CHATGPT_EFFORT_MENU_SELECTOR) return menu;
+      if (selector === CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR) return container;
+      return hidden;
+    },
+    keyboard: { press: async () => {} },
+  };
+  return { page, composer, keys };
+}
+
+test("effort selection reopens the popover when ChatGPT detaches it before the first ARIA read (PR #133)", async () => {
+  const fixture = detachRacingReasoningPicker({ detachOnEvaluateCalls: [1] });
+  const diagnostics: string[] = [];
+  const select = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+  }).selectModelAndEffort;
+  const mode = await select.call(
+    { activeComposer: async () => fixture.composer },
+    fixture.page,
+    "gpt-5.6-sol",
+    "high",
+    { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    async (checkpoint: string) => { diagnostics.push(checkpoint); },
+  );
+  expect(mode).toMatchObject({ displayLabel: "High", uiEffortIndex: 2 });
+  expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
+  expect(diagnostics).toContain("effort-slider-reopen-retry");
+});
+
+test("effort selection reopens the popover when ChatGPT detaches it right after a keypress (PR #133)", async () => {
+  // Call 2 is the post-keypress read that discovers the detachment; call 3 is the recovery
+  // helper's own first attempt, also detached, so it must actually reopen the menu (not just
+  // get lucky on a second read) before call 4 succeeds.
+  const fixture = detachRacingReasoningPicker({ detachOnEvaluateCalls: [2, 3] });
+  const diagnostics: string[] = [];
+  const select = (ChatGptBrowserWorker.prototype as unknown as {
+    selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+  }).selectModelAndEffort;
+  const mode = await select.call(
+    { activeComposer: async () => fixture.composer },
+    fixture.page,
+    "gpt-5.6-sol",
+    "high",
+    { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    async (checkpoint: string) => { diagnostics.push(checkpoint); },
+  );
+  expect(mode).toMatchObject({ displayLabel: "High", uiEffortIndex: 2 });
+  expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
+  expect(diagnostics).toContain("effort-slider-reopen-retry");
 });
