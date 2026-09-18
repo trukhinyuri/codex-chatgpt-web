@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -3170,8 +3170,9 @@ test("Bigger Context fits mixed-density whole records within both token and comp
     const maxStageMessageTokens = Math.max(...stages.map(text => estimateTokens(text)));
     const maxStageChars = Math.max(...stages.map(text => text.length));
     const stagingMode = resolveChatGptWebMultipartStagingMode(
-      CHATGPT_WEB_MODEL_ID, capabilities, maxStageMessageTokens, maxStageChars,
+      CHATGPT_WEB_MODEL_ID, capabilities, "high", maxStageMessageTokens, maxStageChars,
     );
+    expect(stagingMode.effort).toBe("high");
     const finalMessageTokens = estimateTokens(final);
     expect(() => assertChatGptWebMultipartInputWithinLimits(
       estimateCompiledChatGptWebInputTokens(compiled, CHATGPT_WEB_MODEL_ID),
@@ -3279,39 +3280,44 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
   )).toThrow("unavailable for Luna");
 });
 
-test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
+test("Bigger Context stages run in the selected mode and fail closed when it cannot carry them", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 200_000).effort).toBe("low");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 300_000).effort).toBe("medium");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 80_000, 300_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "low", 30_000, 200_000).effort).toBe("low");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 80_000, 300_000).effort).toBe("medium");
   // The same text must have the same available input budget inline, staged or in the final part.
   // 80k is the early compaction trigger; the remaining input budget includes an 8192-token reserve.
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 80_169, 276_680).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 80_169, 276_680).effort).toBe("high");
   for (const tokens of [81_807, 81_808]) {
     const inline = () => assertChatGptWebInputWithinLimits(tokens + 8_192, tokens, "gpt-5.6-sol", "high", plus, 300_000);
-    const stage = () => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, tokens, 300_000);
+    const stage = () => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", tokens, 300_000);
     const final = () => assertChatGptWebMultipartInputWithinLimits(
       tokens + 10_000, tokens, "gpt-5.6-sol", "high", plus, 300_000, 3,
-      { stagingEffort: "medium", maxStageMessageTokens: 500, maxStageChars: 2_000, finalMessageTokens: tokens, finalMessageChars: 300_000 },
+      { stagingEffort: "high", maxStageMessageTokens: 500, maxStageChars: 2_000, finalMessageTokens: tokens, finalMessageChars: 300_000 },
     );
     for (const preflight of [inline, stage, final]) {
       if (tokens === 81_807) expect(preflight).not.toThrow();
       else expect(preflight).toThrow();
     }
   }
-  expect(() => resolveChatGptWebMultipartStagingMode(
-    "gpt-5.6-sol",
-    plus,
-    81_808,
-    300_000,
-  )).toThrow("No ChatGPT effort");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 500_000).effort).toBe("low");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 600_000).effort).toBe("medium");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000).effort).toBe("max");
+  // A larger mode could carry these stages, but the task must not move to another mode.
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "low", 30_000, 300_000))
+    .toThrow("The selected ChatGPT Instant mode cannot carry a Bigger Context stage");
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 81_808, 300_000))
+    .toThrow("The selected ChatGPT High mode cannot carry a Bigger Context stage");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 100_000, 500_000).effort).toBe("max");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "high", 100_000, 600_000).effort).toBe("high");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_000, 1_200_000).effort).toBe("max");
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "low", 100_000, 600_000))
+    .toThrow("The selected ChatGPT Instant mode cannot carry a Bigger Context stage");
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_001, 1_000))
+    .toThrow("The selected ChatGPT Pro mode cannot carry a Bigger Context stage");
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "max", 1_000, 1_000))
+    .toThrow("ChatGPT Pro effort is not available for this account");
   expect(() => resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
     { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
+    "low",
     10_000,
     20_000,
   )).toThrow("Luna-only");
@@ -3321,16 +3327,24 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     "gpt-5.6-sol",
     "low",
     plus,
-    300_000,
+    200_000,
     3,
     {
-      stagingEffort: "medium",
+      stagingEffort: "low",
       maxStageMessageTokens: 30_000,
-      maxStageChars: 300_000,
+      maxStageChars: 200_000,
       finalMessageTokens: 1_000,
       finalMessageChars: 4_000,
     },
   )).not.toThrow();
+});
+
+test("a stage acknowledged by a reasoning mode gets more time than an Instant stage", () => {
+  expect(chatGptMultipartAcknowledgementTimeoutMs("low")).toBe(browserStageTimeouts.multipartStageAcknowledgement);
+  for (const effort of ["medium", "high", "xhigh", "max"] as const) {
+    expect(chatGptMultipartAcknowledgementTimeoutMs(effort)).toBe(CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS);
+  }
+  expect(CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS).toBeGreaterThan(browserStageTimeouts.multipartStageAcknowledgement);
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

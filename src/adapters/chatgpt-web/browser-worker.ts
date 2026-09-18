@@ -1069,10 +1069,15 @@ export function assertChatGptWebMultipartInputWithinLimits(
   );
 }
 
-/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
+/**
+ * Every inert multipart stage uses the mode the user selected for the task, so the whole ChatGPT
+ * conversation runs in that mode and the selector never shows another one. A stage that the
+ * selected mode cannot carry fails closed instead of moving to a different mode.
+ */
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
+  requestedEffort: ChatGptWebModelMode["effort"],
   maxStageMessageTokens: number,
   maxStageChars: number,
 ): ChatGptWebModelMode {
@@ -1085,22 +1090,32 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
-    ? ["low", "medium", "max"]
-    : ["low", "medium"];
-  for (const effort of efforts) {
-    const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
-    const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
-    const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
-    const tokenFits = maxStageMessageTokens <= messageTokenLimit;
-    const charsFit = limits.browserComposerCharLimit === undefined
-      || maxStageChars <= limits.browserComposerCharLimit;
-    if (tokenFits && charsFit) return mode;
-  }
+  const mode = resolveChatGptWebModelMode(modelId, requestedEffort, capabilities);
+  const limits = resolveChatGptWebTransportLimits(modelId, mode.effort, capabilities);
+  const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, mode.effort, capabilities);
+  const tokenFits = maxStageMessageTokens <= messageTokenLimit;
+  const charsFit = limits.browserComposerCharLimit === undefined
+    || maxStageChars <= limits.browserComposerCharLimit;
+  if (tokenFits && charsFit) return mode;
   throw new ChatGptWebAdapterError(
-    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
+    `The selected ChatGPT ${mode.displayLabel} mode cannot carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
+}
+
+/**
+ * Instant answers an inert stage within the DOM grace. A reasoning mode, Pro in particular, may
+ * think before it returns the one-line acknowledgement, so its stage gets a longer bound. DOM
+ * health still fails a stage early when no response appears or the response disappears.
+ */
+export const CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS = 10 * 60_000;
+
+export function chatGptMultipartAcknowledgementTimeoutMs(
+  effort: ChatGptWebModelMode["effort"],
+): number {
+  return effort === "low"
+    ? browserStageTimeouts.multipartStageAcknowledgement
+    : CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS;
 }
 
 export const browserStageTimeouts = {
@@ -4494,6 +4509,7 @@ export class ChatGptBrowserWorker {
         ? resolveChatGptWebMultipartStagingMode(
           turn.modelId,
           browserCapabilities,
+          requestedMode.effort,
           maxStageMessageTokens!,
           maxStageChars!,
         )
@@ -4742,7 +4758,7 @@ export class ChatGptBrowserWorker {
           await this.runStage(
             turn.traceId,
             `multipart_stage_${index + 1}_acknowledgement`,
-            browserStageTimeouts.multipartStageAcknowledgement,
+            chatGptMultipartAcknowledgementTimeoutMs(stagingMode.effort),
             async (stageSignal) => {
               const acknowledgementSignal = turn.abortSignal
                 ? AbortSignal.any([stageSignal, turn.abortSignal])
@@ -4780,21 +4796,22 @@ export class ChatGptBrowserWorker {
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
-        if (mode.effort !== requestedMode.effort) {
-          mode = await this.runStage(
-            turn.traceId,
-            "final_part_effort_selection",
-            browserStageTimeouts.effortSelection,
-            () => this.selectModelAndEffort(
-              page,
-              turn.modelId,
-              requestedMode.effort,
-              browserCapabilities,
-              checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
-            ),
-          );
-          await diagnostics.capture(page, "final-part-effort-selected");
-        }
+        // The stages already ran in the requested mode. Reconcile the live control once more before
+        // the task starts: ChatGPT can withdraw a mode, such as Pro after a usage limit, while the
+        // stages are acknowledged, and the task must fail closed rather than run in another mode.
+        mode = await this.runStage(
+          turn.traceId,
+          "final_part_effort_selection",
+          browserStageTimeouts.effortSelection,
+          () => this.selectModelAndEffort(
+            page,
+            turn.modelId,
+            requestedMode.effort,
+            browserCapabilities,
+            checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
+          ),
+        );
+        await diagnostics.capture(page, "final-part-effort-selected");
         finalPrompt = multipartFinalPrompt;
       }
 
