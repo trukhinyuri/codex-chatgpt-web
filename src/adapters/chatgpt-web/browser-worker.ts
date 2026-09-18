@@ -2313,19 +2313,12 @@ export class ChatGptBrowserWorker {
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
   /**
-   * ChatGPT's rich-text composer performs two confirmed, same-width typographic substitutions on
-   * pasted text: it may render an ASCII space as NBSP (Lexical's whitespace-preservation, seen both
-   * within multi-space runs and, per real occurrence traceId 6ee7bb84c46e, on an isolated single
-   * space), and it may autocorrect a lone ASCII hyphen into a typographic dash (seen in two
-   * separate real occurrences). Both are cosmetic-only and directional: only expected-ASCII /
-   * observed-substitute is tolerated, never the reverse, and every other mutation -- tabs,
-   * newlines, quotes/ellipsis (also autocorrect targets, but never yet confirmed live), or any
-   * other divergence -- remains exact and fails closed.
+   * ChatGPT's rich-text composer may render an ASCII space as NBSP (Lexical's whitespace
+   * preservation, seen within multi-space runs and, per real occurrence traceId 6ee7bb84c46e, on an
+   * isolated single space). That substitution is tolerated in one direction only. Every other
+   * mutation fails closed, including a hyphen autocorrected into a dash: in code, `--flag` turned
+   * into `—flag` would silently change what ChatGPT reads, so that prompt is retried instead.
    */
-  private static readonly PROMPT_DASH_SUBSTITUTES = new Set([
-    "\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212",
-  ]);
-
   private promptCodeUnitEquivalent(
     expected: string,
     observed: string,
@@ -2336,9 +2329,6 @@ export class ChatGptBrowserWorker {
 
     if (expectedUnit === observedUnit) return true;
     if (expectedUnit === " " && observedUnit === "\u00A0") return true;
-    if (expectedUnit === "-" && ChatGptBrowserWorker.PROMPT_DASH_SUBSTITUTES.has(observedUnit!)) {
-      return true;
-    }
 
     return false;
   }

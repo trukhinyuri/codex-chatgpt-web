@@ -1279,12 +1279,12 @@ test("prompt verification accepts Lexical NBSP preservation without weakening ot
   expect(promptTextEquivalent.call(worker, "a b", "a\u00A0b")).toBeTrue();
   expect(promptTextEquivalent.call(worker, "a\u00A0b", "a b")).toBeFalse();
 
-  // Confirmed live by two occurrences: ChatGPT's composer autocorrects a lone ASCII hyphen into a
-  // typographic dash. Tolerate exactly the closed whitelist already used for diagnostics.
-  expect(promptTextEquivalent.call(worker, "a-b", "a\u2010b")).toBeTrue(); // hyphen
-  expect(promptTextEquivalent.call(worker, "a-b", "a\u2013b")).toBeTrue(); // en dash
-  expect(promptTextEquivalent.call(worker, "a-b", "a\u2014b")).toBeTrue(); // em dash
-  expect(promptTextEquivalent.call(worker, "a\u2013b", "a-b")).toBeFalse(); // directional only
+  // A hyphen autocorrected into a dash changes code (`--flag` → `—flag`): never equivalent, so the
+  // integrity retry prepares the prompt again instead of sending a corrupted one.
+  expect(promptTextEquivalent.call(worker, "a-b", "a\u2010b")).toBeFalse();
+  expect(promptTextEquivalent.call(worker, "a-b", "a\u2013b")).toBeFalse();
+  expect(promptTextEquivalent.call(worker, "git log --oneline", "git log \u2014oneline")).toBeFalse();
+  expect(promptTextEquivalent.call(worker, "a\u2013b", "a-b")).toBeFalse();
   // Quotes/ellipsis are on the diagnostic whitelist but never confirmed by a real occurrence --
   // they stay fail closed until they are.
   expect(promptTextEquivalent.call(worker, "a'b", "a\u2019b")).toBeFalse();
