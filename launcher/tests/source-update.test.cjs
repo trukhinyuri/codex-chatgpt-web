@@ -27,6 +27,7 @@ const {
   sourceUpdateVersion,
   writeStartupHealth,
 } = require("../electron/source-update.cjs");
+const { createTurnOutcomeLog, updateQuietWindow, SHORT_QUIET_MS, LONG_WAIT_MS } = require("../electron/update-idle-policy.cjs");
 
 const INSTALLED = "1".repeat(40);
 const MAIN = "2".repeat(40);
@@ -437,6 +438,8 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     setTimeout,
     updateIdleWait: null,
     updateInstallRequested: false,
+    turnOutcomes: createTurnOutcomeLog(),
+    updateQuietWindow,
     activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
     runtimeActivity: async () => {
       const next = activity.shift() ?? { active_http_turns: 0, active_browser_turns: 0 };
@@ -454,7 +457,7 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     },
   };
   const quitWhenIdleForUpdate = loadQuitWhenIdle(context);
-  await quitWhenIdleForUpdate({ version: "5.0.8+2222222" }, { info: () => events.push("wait") });
+  await quitWhenIdleForUpdate({ version: "5.0.8+2222222" }, { info: event => { if (event === "launcher.update_waiting_for_idle") events.push("wait"); } });
   assert.deepEqual(events.filter(event => !event.startsWith("activity")), [
     "launch:5.0.8+2222222",
     'quit:{"preserveActiveTurns":true,"quiet":true}',
@@ -479,6 +482,8 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
       setTimeout,
       updateIdleWait: null,
       updateInstallRequested: false,
+      turnOutcomes: createTurnOutcomeLog(),
+      updateQuietWindow,
       activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
       runtimeActivity: async () => activity(),
       launcherLanguage: () => "en",
@@ -537,6 +542,61 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
     assert.equal(await context.installPendingUpdateSooner(), true);
     assert.equal(context.updateInstallRequested, true);
   }
+});
+
+test("a build whose turns only fail installs its fix after one quiet minute, and a busy healthy one still waits", () => {
+  let clock = 1_000_000_000;
+  const outcomes = createTurnOutcomeLog({ now: () => clock });
+  const window = () => updateQuietWindow({ baseQuietMs: 10 * 60_000, outcomes, waitingSince: 1_000_000_000, now: clock });
+  assert.deepEqual(window(), { quietMs: 10 * 60_000, reason: "idle" }, "no evidence: the long unattended window");
+  outcomes.record("failed");
+  outcomes.record("aborted");
+  assert.equal(window().reason, "idle", "two failures are not yet a failing build");
+  outcomes.record("failed");
+  assert.deepEqual(window(), { quietMs: SHORT_QUIET_MS, reason: "failing" });
+  outcomes.record("completed");
+  assert.equal(window().reason, "idle", "one completed turn means there is work to protect");
+  clock += 16 * 60_000;
+  outcomes.record("failed");
+  assert.equal(window().reason, "idle", "failures older than fifteen minutes no longer count");
+  clock = 1_000_000_000 + LONG_WAIT_MS;
+  assert.deepEqual(window(), { quietMs: SHORT_QUIET_MS, reason: "long-wait" }, "after six hours a one-minute lull is enough");
+  assert.equal(updateQuietWindow({ baseQuietMs: 30_000, outcomes, waitingSince: clock, now: clock + LONG_WAIT_MS }).quietMs, 30_000, "a click's shorter window is never lengthened");
+  outcomes.record("unknown");
+  assert.equal(outcomes.since(0).length, 5, "only known outcomes are recorded");
+});
+
+test("while turns keep failing, the waiting update installs in the first quiet minute instead of never", async () => {
+  const events = [];
+  const failing = createTurnOutcomeLog();
+  for (const status of ["failed", "failed", "aborted"]) failing.record(status);
+  const context = {
+    UPDATE_IDLE_QUIET_MS: 30_000,
+    UPDATE_IDLE_POLL_MS: 1,
+    Date,
+    setTimeout,
+    updateIdleWait: null,
+    updateInstallRequested: false,
+    turnOutcomes: failing,
+    // The real policy with its one-minute floor replaced by zero so the test runs at once.
+    updateQuietWindow: options => {
+      const decided = updateQuietWindow(options);
+      return decided.reason === "failing" ? { ...decided, quietMs: 0 } : decided;
+    },
+    activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
+    runtimeActivity: async () => ({ active_http_turns: 0, active_browser_turns: 0 }),
+    updateController: {
+      launchInstall: () => { events.push("launch"); return {}; },
+      abortLaunch: () => events.push("abort"),
+      noteInstallProgress: () => {},
+    },
+    requestQuit: async options => { events.push(`quit:${JSON.stringify(options)}`); return { ok: true }; },
+  };
+  const quitWhenIdleForUpdate = loadQuitWhenIdle(context);
+  await quitWhenIdleForUpdate({ version: "v" }, { info: (event, detail) => events.push(`${event}:${detail.reason}`) }, 10 * 60_000);
+  assert.deepEqual(events, ["launcher.update_quiet_window:failing", "launch", 'quit:{"preserveActiveTurns":true,"quiet":true}'], "the unattended ten minutes do not apply to a failing build, and nothing is cancelled");
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  assert.match(main, /onTurnEnded: status => turnOutcomes\.record\(status\),/);
 });
 
 test("the update quit drains without cancelling while an ordinary quit keeps cancelling", () => {

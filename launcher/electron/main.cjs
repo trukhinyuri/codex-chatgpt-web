@@ -20,6 +20,7 @@ const {
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, openedAtLoginOnMac, setAutostart } = require("./autostart.cjs");
+const { createTurnOutcomeLog, updateQuietWindow } = require("./update-idle-policy.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -121,6 +122,8 @@ let manualUpdateRunning = false;
 // The prepared update waiting for an idle Codex; a click on the update button shortens its wait.
 let updateIdleWait = null;
 let updateInstallRequested = false;
+// Outcomes of recent ChatGPT Web turns: a build whose turns only fail has no work to protect.
+const turnOutcomes = createTurnOutcomeLog();
 let problemReporter = null;
 let launcherStateStore = null;
 
@@ -1111,13 +1114,20 @@ async function runtimeActivity() {
 async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUIET_MS) {
   const wait = { quietMs: updateInstallRequested ? Math.min(quietMs, UPDATE_IDLE_QUIET_MS) : quietMs, now: false };
   updateIdleWait = wait;
+  const waitingSince = Date.now();
   let idleSince = null;
+  let windowReason = null;
   try {
     for (;;) {
       const running = activeTurnCount(await runtimeActivity());
       updateController.noteInstallProgress({ activeTurns: running, requested: wait.quietMs <= UPDATE_IDLE_QUIET_MS });
       idleSince = running === 0 ? (idleSince ?? Date.now()) : null;
-      if (wait.now || (idleSince !== null && Date.now() - idleSince >= wait.quietMs)) {
+      const window = updateQuietWindow({ baseQuietMs: wait.quietMs, outcomes: turnOutcomes, waitingSince, now: Date.now() });
+      if (window.reason !== windowReason) {
+        windowReason = window.reason;
+        logger?.info("launcher.update_quiet_window", { reason: window.reason, quietMs: window.quietMs });
+      }
+      if (wait.now || (idleSince !== null && Date.now() - idleSince >= window.quietMs)) {
         const launch = await updateController.launchInstall(prepared);
         const result = await requestQuit({ preserveActiveTurns: !wait.now, quiet: true });
         if (result.ok) return;
@@ -1417,6 +1427,7 @@ async function start() {
     startHidden,
   });
   browserControl = await new BrowserControlServer({
+    onTurnEnded: status => turnOutcomes.record(status),
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
