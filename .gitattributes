@@ -1,0 +1,10 @@
+# One line ending everywhere: tests read sources and compare them with patterns, and a Windows
+# checkout with CRLF must see the same text as macOS and Linux.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.icns binary
+*.ico binary
+*.mp4 binary
+*.zip binary
