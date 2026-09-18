@@ -1296,6 +1296,74 @@ export async function withChatGptBrowserObservationTimeout<T>(
   }
 }
 
+// The innermost browser stage an error surfaced from; diagnostic side channel for turn_ended.
+const chatGptBrowserErrorStages = new WeakMap<object, string>();
+
+export function tagChatGptBrowserStage<T>(error: T, stage: string): T {
+  if (error !== null && typeof error === "object" && !chatGptBrowserErrorStages.has(error)) {
+    chatGptBrowserErrorStages.set(error, stage);
+  }
+  return error;
+}
+
+export function chatGptBrowserStageOf(error: unknown): string | undefined {
+  return error !== null && typeof error === "object" ? chatGptBrowserErrorStages.get(error) : undefined;
+}
+
+/** Why a browser turn ended without an answer from ChatGPT, when it was cancelled rather than failed. */
+export type ChatGptTurnAbortClass =
+  | "compaction_handoff"
+  | "tab_closed"
+  | "codex_cancelled"
+  | "internal_abort";
+
+export interface ChatGptTurnEndDiagnostics {
+  code: string;
+  stage: string;
+  abortClass?: ChatGptTurnAbortClass;
+}
+
+const CHATGPT_TURN_END_FIELD = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/**
+ * Structural fields the launcher logs with `browser.turn_ended`: a code, the browser stage the
+ * turn ended in and, for a cancellation, who cancelled it. Never a message, prompt or path.
+ */
+export function chatGptTurnEndDiagnostics(
+  error: unknown,
+  signal: AbortSignal | undefined,
+  fallbackStage: string,
+): ChatGptTurnEndDiagnostics {
+  const aborted = (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
+  const code = error instanceof ChatGptCompactionHandoffAccepted
+    ? "compaction_handoff_accepted"
+    : error instanceof ChatGptWebAdapterError
+      ? (CHATGPT_TURN_END_FIELD.test(error.code) ? error.code : "adapter_error")
+      : aborted
+        ? "aborted"
+        : error instanceof ChatGptBrowserObservationTimeoutError
+          ? "observation_timeout"
+          : error instanceof Error && error.message.startsWith("ChatGPT browser stage timed out:")
+            ? "stage_timeout"
+            : "error";
+  const stage = chatGptBrowserStageOf(error);
+  const abortClass: ChatGptTurnAbortClass | undefined = error instanceof ChatGptCompactionHandoffAccepted
+    || signal?.reason instanceof ChatGptCompactionHandoffAccepted
+    ? "compaction_handoff"
+    : error instanceof ChatGptWebAdapterError && error.code === "client_cancelled"
+      ? "tab_closed"
+      : signal?.aborted
+        ? "codex_cancelled"
+        : aborted
+          ? "internal_abort"
+          : undefined;
+  return {
+    code,
+    stage: stage && CHATGPT_TURN_END_FIELD.test(stage) ? stage : fallbackStage,
+    ...(abortClass ? { abortClass } : {}),
+  };
+}
+
 export async function connectAfterClosingBrowserConnection<T>(
   previousConnection: Pick<Browser, "close"> | undefined,
   connect: () => Promise<T>,
@@ -1939,7 +2007,96 @@ export function sanitizeChatGptBrowserDiagnosticState(value: unknown): unknown {
   }));
 }
 
-const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
+/**
+ * Browser-turn traces are structure only, but a failure is usually examined after the fact: keep
+ * the newest traces of any outcome plus a longer tail of failed ones, bounded by age and size.
+ */
+export const CHATGPT_BROWSER_DIAGNOSTIC_RETENTION = Object.freeze({
+  recentTraces: 10,
+  failedTraces: 20,
+  maxAgeMs: 48 * 60 * 60 * 1_000,
+  maxBytes: 64 * 1024 * 1024,
+});
+export interface ChatGptBrowserDiagnosticRetention {
+  recentTraces: number;
+  failedTraces: number;
+  maxAgeMs: number;
+  maxBytes: number;
+}
+// Not a numbered `.json` checkpoint: readers list checkpoints by that suffix and their order.
+export const CHATGPT_BROWSER_DIAGNOSTIC_FAILURE_MARKER = "turn-outcome.failed";
+
+export interface ChatGptBrowserDiagnosticTrace {
+  name: string;
+  modifiedAtMs: number;
+  failed: boolean;
+  bytes: number;
+}
+
+/** The trace directories to delete; `protectedName` is the trace being written right now. */
+export function chatGptBrowserDiagnosticTracesToPrune(
+  traces: readonly ChatGptBrowserDiagnosticTrace[],
+  nowMs: number,
+  protectedName?: string,
+  retention: ChatGptBrowserDiagnosticRetention = CHATGPT_BROWSER_DIAGNOSTIC_RETENTION,
+): string[] {
+  const newestFirst = [...traces].sort((left, right) => right.modifiedAtMs - left.modifiedAtMs);
+  const recent = new Set(newestFirst.slice(0, retention.recentTraces).map(trace => trace.name));
+  const failed = new Set(
+    newestFirst.filter(trace => trace.failed).slice(0, retention.failedTraces).map(trace => trace.name),
+  );
+  const prune: string[] = [];
+  // The trace being written claims its share of the size cap before any older one.
+  let bytes = newestFirst.find(trace => trace.name === protectedName)?.bytes ?? 0;
+  for (const trace of newestFirst) {
+    if (trace.name === protectedName) continue;
+    const retained = (recent.has(trace.name) || failed.has(trace.name))
+      && nowMs - trace.modifiedAtMs <= retention.maxAgeMs
+      && bytes + trace.bytes <= retention.maxBytes;
+    if (!retained) {
+      prune.push(trace.name);
+      continue;
+    }
+    bytes += trace.bytes;
+  }
+  return prune;
+}
+
+// Traces written before the failure marker existed still name their terminal checkpoint.
+const LEGACY_FAILED_TRACE_FILE = /-(?:turn-failed|connector-verification-failed)\.json$/;
+
+function readChatGptBrowserDiagnosticTraces(root: string): ChatGptBrowserDiagnosticTrace[] {
+  return readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9_-]{6,128}$/.test(entry.name))
+    .flatMap(entry => {
+      const path = join(root, entry.name);
+      try {
+        const files = readdirSync(path, { withFileTypes: true }).filter(file => file.isFile());
+        return [{
+          name: entry.name,
+          modifiedAtMs: statSync(path).mtimeMs,
+          failed: files.some(file => file.name === CHATGPT_BROWSER_DIAGNOSTIC_FAILURE_MARKER
+            || LEGACY_FAILED_TRACE_FILE.test(file.name)),
+          bytes: files.reduce((total, file) => {
+            try { return total + statSync(join(path, file.name)).size; } catch { return total; }
+          }, 0),
+        }];
+      } catch {
+        // A concurrent turn pruned it first; there is nothing left to account for.
+        return [];
+      }
+    });
+}
+
+export function pruneChatGptBrowserDiagnostics(root: string, protectedName?: string, nowMs = Date.now()): string[] {
+  const pruned = chatGptBrowserDiagnosticTracesToPrune(
+    readChatGptBrowserDiagnosticTraces(root),
+    nowMs,
+    protectedName,
+  );
+  for (const name of pruned) rmSync(join(root, name), { recursive: true, force: true });
+  return pruned;
+}
 
 export function browserDiagnosticCheckpoint(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
@@ -1951,21 +2108,32 @@ function privateDirectory(path: string): void {
   try { chmodSync(path, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
 }
 
-function pruneBrowserDiagnostics(root: string): void {
-  const traces = readdirSync(root, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9_-]{6,128}$/.test(entry.name))
-    .map(entry => {
-      const path = join(root, entry.name);
-      return { path, modifiedAt: statSync(path).mtimeMs };
-    })
-    .sort((left, right) => right.modifiedAt - left.modifiedAt);
-  for (const trace of traces.slice(CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT)) {
-    rmSync(trace.path, { recursive: true, force: true });
-  }
+/** Diagnostic side channel only: which trace owns a page, so a Stop press can name its turn. */
+const chatGptPageTraces = new WeakMap<Page, string>();
+
+export type ChatGptStopPressReason =
+  | "abort_before_response"
+  | "send_aborted"
+  | "send_failed"
+  | "multipart_stage_aborted"
+  | "response_aborted";
+
+/**
+ * Press ChatGPT's Stop button when it is visible, and log it: a Stop press cancels work ChatGPT is
+ * doing, so every press must be attributable to its turn and reason.
+ */
+export async function pressVisibleChatGptStop(page: Page, reason: ChatGptStopPressReason): Promise<boolean> {
+  const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+  if (!await stop.isVisible().catch(() => false)) return false;
+  const pressed = await stop.press("Enter").then(() => true, () => false);
+  const traceId = chatGptPageTraces.get(page);
+  console.info(`[chatgpt-web] stop_pressed ${JSON.stringify({ ...(traceId ? { traceId } : {}), reason, pressed })}`);
+  return pressed;
 }
 
 class ChatGptBrowserDiagnostics {
   private readonly directory: string;
+  private readonly directoryName: string;
   private sequence = 0;
   private initialized = false;
 
@@ -1977,15 +2145,35 @@ class ChatGptBrowserDiagnostics {
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) {
       throw new Error("ChatGPT browser diagnostic trace id is invalid");
     }
-    this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
+    this.directoryName = `${traceId}-${randomUUID().slice(0, 8)}`;
+    this.directory = join(this.root, this.directoryName);
+  }
+
+  /** Mark this trace as a failure so retention keeps it longer; structural fields only. */
+  recordFailure(details: { code?: string; stage?: string }): void {
+    if (!this.initialized) return;
+    try {
+      atomicWriteFile(join(this.directory, CHATGPT_BROWSER_DIAGNOSTIC_FAILURE_MARKER), `${JSON.stringify({
+        version: 1,
+        failedAt: new Date().toISOString(),
+        traceId: this.traceId,
+        ...details,
+      })}\n`);
+    } catch (error) {
+      console.warn(
+        `[chatgpt-web] browser diagnostic failure marker not written trace=${this.traceId}:`
+        + ` ${error instanceof Error ? error.name : "Error"}`,
+      );
+    }
   }
 
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
+    chatGptPageTraces.set(page, this.traceId);
     try {
       if (!this.initialized) {
         privateDirectory(this.root);
         privateDirectory(this.directory);
-        pruneBrowserDiagnostics(this.root);
+        pruneChatGptBrowserDiagnostics(this.root, this.directoryName);
         this.initialized = true;
       }
       const sequence = String(++this.sequence).padStart(2, "0");
@@ -2170,12 +2358,15 @@ class ChatGptBrowserDiagnostics {
           + ` checkpoint=${stem} failures=${Object.keys(captureErrors).join(",")}`,
         );
       }
-      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
+      // The directory name, not its absolute path: log lines carry no local paths.
+      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} dir=${this.directoryName}`);
     } catch (captureError) {
+      const code = (captureError as NodeJS.ErrnoException | undefined)?.code;
       console.warn(
         `[chatgpt-web] browser diagnostic capture failed trace=${this.traceId}`
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
-        + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
+        + ` ${captureError instanceof Error ? captureError.name : "Error"}`
+        + `${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? ` ${code}` : ""}`,
       );
     }
   }
@@ -2524,7 +2715,7 @@ export class ChatGptBrowserWorker {
         }
       }
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
-      throw surfacedError;
+      throw tagChatGptBrowserStage(surfacedError, stage);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -3069,8 +3260,7 @@ export class ChatGptBrowserWorker {
         // Send was already accepted here, so the server-side generation is still running; without
         // this press it keeps going after the local capability is retired and later claims a dead
         // MCP binding. Same pattern as the post-binding monitoring loop below.
-        const stop = observationPage.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+        await pressVisibleChatGptStop(observationPage, "abort_before_response");
         throw new DOMException("ChatGPT web turn aborted", "AbortError");
       }
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
@@ -3714,8 +3904,7 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       // Neither an aborted send nor a failed one has any local consumer left for a remote
       // generation ChatGPT may still be running; stop it instead of leaving it to burn quota.
-      const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-      if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+      await pressVisibleChatGptStop(page, abortSignal?.aborted ? "send_aborted" : "send_failed");
       throw error;
     }
   }
@@ -3742,8 +3931,7 @@ export class ChatGptBrowserWorker {
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
-        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+        await pressVisibleChatGptStop(page, "multipart_stage_aborted");
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
@@ -3960,6 +4148,10 @@ export class ChatGptBrowserWorker {
       return this.config.appName;
     } catch (error) {
       await diagnostics.capture(page, "connector-verification-failed", error);
+      diagnostics.recordFailure({
+        code: chatGptTurnEndDiagnostics(error, undefined, "connector_verification").code,
+        stage: "connector_verification",
+      });
       throw error;
     }
   }
@@ -4559,6 +4751,7 @@ export class ChatGptBrowserWorker {
     const reused = lease.reused === true;
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
+    let terminalDiagnostics: ChatGptTurnEndDiagnostics | undefined;
     let originalError: unknown;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
@@ -4602,6 +4795,8 @@ export class ChatGptBrowserWorker {
         ? "aborted"
         : "failed";
       terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      // Anything thrown before the browser turn itself ran belongs to the launcher lease.
+      terminalDiagnostics = chatGptTurnEndDiagnostics(error, turn.abortSignal, "lease");
       throw error;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -4612,6 +4807,7 @@ export class ChatGptBrowserWorker {
           helperPid: process.pid,
           status: terminal,
           ...(terminalMessage ? { message: terminalMessage } : {}),
+          ...(terminalDiagnostics ?? {}),
           ...(terminal === "completed" && turn.retainConversation ? { retain: true } : {}),
           ...(terminal === "completed" && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
             ? { connectorBound: true }
@@ -4667,6 +4863,9 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    // Outside any named stage, a failure belongs to setup until the final message was accepted,
+    // and to the response afterwards.
+    let responsePhase = false;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       // Validate only the selected physical message, not canonical history used for usage estimates.
@@ -4752,6 +4951,7 @@ export class ChatGptBrowserWorker {
           browserStageTimeouts.browserPage,
           launcherSurfaceId,
           abortSignal,
+          turn.traceId,
         );
         if (abortSignal.aborted) {
           await connection.browser.close().catch(() => {});
@@ -4803,6 +5003,7 @@ export class ChatGptBrowserWorker {
                   browserStageTimeouts.browserPage,
                   launcherSurfaceId,
                   signal,
+                  turn.traceId,
                 );
                 // Own the connection before validating its page: viewport failure still needs
                 // the outer diagnostic capture and finally block to release this exact transport.
@@ -5091,6 +5292,7 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+      responsePhase = true;
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5164,8 +5366,7 @@ export class ChatGptBrowserWorker {
           throw chatGptBrowserTabClosedError();
         }
         if (turn.abortSignal?.aborted) {
-          const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-          if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+          await pressVisibleChatGptStop(page, "response_aborted");
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
@@ -5368,11 +5569,13 @@ export class ChatGptBrowserWorker {
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {
             loggedCompletionWait = true;
-            await diagnostics.capture(page, "response-stalled-60s");
+            // A response still generating after a minute is normal for long reasoning; this is a
+            // progress checkpoint, not a stall verdict.
+            await diagnostics.capture(page, "response-still-generating-60s");
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
-            console.warn(
+            console.info(
               `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
             );
           }
@@ -5430,9 +5633,12 @@ export class ChatGptBrowserWorker {
         if (diagnosticPage && !diagnosticPage.isClosed()) {
           await diagnostics.capture(diagnosticPage, "compaction-handoff-accepted");
         }
-        throw turn.abortSignal.reason;
+        throw tagChatGptBrowserStage(turn.abortSignal.reason, responsePhase ? "response" : "setup");
       }
-      const surfaced = this.rateLimitCooldown.escalate(error);
+      const surfaced = tagChatGptBrowserStage(
+        this.rateLimitCooldown.escalate(error),
+        chatGptBrowserStageOf(error) ?? (responsePhase ? "response" : "setup"),
+      );
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(surfaced instanceof Error ? surfaced.message : String(surfaced))}`,
@@ -5440,6 +5646,9 @@ export class ChatGptBrowserWorker {
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", surfaced);
       }
+      const ended = chatGptTurnEndDiagnostics(surfaced, turn.abortSignal, "setup");
+      // A cancellation is not a failure worth keeping longer; everything else is.
+      if (!ended.abortClass) diagnostics.recordFailure({ code: ended.code, stage: ended.stage });
       throw surfaced;
     } finally {
       prepared.release();

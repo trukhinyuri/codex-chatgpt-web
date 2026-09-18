@@ -27,6 +27,22 @@ async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   return JSON.parse(text);
 }
 
+const TURN_END_DIAGNOSTIC_FIELD = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/**
+ * The structural fields a helper reports with a turn end (code, browser stage, abort class). They
+ * only annotate the log: an absent or malformed value is dropped, never a reason to refuse the end
+ * and strand the lease.
+ */
+function turnEndDiagnostics(body) {
+  const fields = {};
+  for (const key of ["code", "stage", "abortClass"]) {
+    const value = body?.[key];
+    if (typeof value === "string" && TURN_END_DIAGNOSTIC_FIELD.test(value)) fields[key] = value;
+  }
+  return fields;
+}
+
 function writeJson(response, status, body) {
   const encoded = Buffer.from(`${JSON.stringify(body)}\n`);
   response.writeHead(status, {
@@ -322,7 +338,11 @@ class BrowserControlServer {
           body.retain === true,
           body.connectorBound === true,
         );
-        this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
+        this.logger.info("browser.turn_ended", {
+          traceId: body.traceId,
+          status: body.status,
+          ...turnEndDiagnostics(body),
+        });
         writeJson(response, 200, { ok: true, ...release });
         return;
       }

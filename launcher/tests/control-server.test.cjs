@@ -154,6 +154,57 @@ test("browser control server authenticates and owns turn visibility", async () =
   }
 });
 
+test("browser.turn_ended carries the helper's code, stage and abort class, and drops malformed ones", async () => {
+  const logs = [];
+  const ended = [];
+  const server = await new BrowserControlServer({
+    logger: {
+      info: (event, detail) => logs.push([event, detail]),
+      warn: (event, detail) => logs.push([event, detail]),
+    },
+    getBrowserHost: () => ({
+      browserInteractionMode: () => "automatic",
+      endTurn: (...args) => { ended.push(args); return { cancelledByUser: false }; },
+    }),
+    getPreferences: () => ({ showBrowserDuringTurns: false }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const end = (body) => fetch(`${endpoint}/v1/turn/end`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ phase: "end", helperPid: process.pid, ...body }),
+  });
+  try {
+    const aborted = await end({
+      traceId: "abcdef123456",
+      status: "aborted",
+      message: "ChatGPT web turn aborted",
+      code: "aborted",
+      stage: "response",
+      abortClass: "codex_cancelled",
+    });
+    assert.equal(aborted.status, 200);
+    const malformed = await end({
+      traceId: "abcdef654321",
+      status: "failed",
+      code: "stage timed out at /Users/private.user/.codex",
+      stage: 42,
+      abortClass: "x".repeat(200),
+    });
+    // The fields only annotate the log; a malformed one never strands the turn's lease.
+    assert.equal(malformed.status, 200);
+    assert.equal(ended.length, 2);
+    const turnEnded = logs.filter(([event]) => event === "browser.turn_ended").map(([, detail]) => detail);
+    assert.deepEqual(turnEnded, [
+      { traceId: "abcdef123456", status: "aborted", code: "aborted", stage: "response", abortClass: "codex_cancelled" },
+      { traceId: "abcdef654321", status: "failed" },
+    ]);
+    assert.doesNotMatch(JSON.stringify(turnEnded), /ChatGPT web turn aborted|Users/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("browser control server withholds a new turn lease until its browser surface is ready", async () => {
   let releaseSurface;
   let reportBegin;

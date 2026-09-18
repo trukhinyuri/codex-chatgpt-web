@@ -251,25 +251,78 @@ export async function selectLauncherPage(
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }
 
+/**
+ * One structural line per CDP connection attempt: how long each step took and where it stopped.
+ * Whether a long-lived connection per helper is worth it is decided from these durations.
+ */
+function logCdpConnect(detail: {
+  traceId?: string;
+  outcome: "connected" | "failed" | "aborted";
+  step: "descriptor" | "cdp_ready" | "connect" | "select_page" | "done";
+  cdpReadyMs?: number;
+  connectMs?: number;
+  selectPageMs?: number;
+  totalMs: number;
+}): void {
+  const safe = {
+    ...(detail.traceId && /^[A-Za-z0-9_-]{6,128}$/.test(detail.traceId) ? { traceId: detail.traceId } : {}),
+    outcome: detail.outcome,
+    step: detail.step,
+    ...(detail.cdpReadyMs === undefined ? {} : { cdpReadyMs: detail.cdpReadyMs }),
+    ...(detail.connectMs === undefined ? {} : { connectMs: detail.connectMs }),
+    ...(detail.selectPageMs === undefined ? {} : { selectPageMs: detail.selectPageMs }),
+    totalMs: detail.totalMs,
+  };
+  console.info(`[chatgpt-web] cdp_connect ${JSON.stringify(safe)}`);
+}
+
 export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
   surfaceId?: string,
   abortSignal?: AbortSignal,
+  diagnosticTraceId?: string,
 ): Promise<LauncherBrowserConnection> {
   if (abortSignal?.aborted) {
     throw new DOMException("Launcher browser connection aborted", "AbortError");
   }
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-  await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
+  const startedAt = performance.now();
+  const elapsed = (from: number) => Math.round(performance.now() - from);
+  const timing: { cdpReadyMs?: number; connectMs?: number; selectPageMs?: number } = {};
+  let step: "descriptor" | "cdp_ready" | "connect" | "select_page" = "descriptor";
+  const report = (outcome: "connected" | "failed" | "aborted", reached: typeof step | "done") => {
+    try {
+      logCdpConnect({ traceId: diagnosticTraceId, outcome, step: reached, ...timing, totalMs: elapsed(startedAt) });
+    } catch { /* Diagnostics never replace the connection outcome. */ }
+  };
   let browser: Browser;
+  let descriptor: LauncherBrowserHostDescriptor;
   try {
-    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
+    descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+    step = "cdp_ready";
+    const readyStartedAt = performance.now();
+    try {
+      await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
+    } finally {
+      timing.cdpReadyMs = elapsed(readyStartedAt);
+    }
+    step = "connect";
+    const connectStartedAt = performance.now();
+    try {
+      browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
+    } catch (error) {
+      throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      timing.connectMs = elapsed(connectStartedAt);
+    }
   } catch (error) {
-    throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
+    report(abortSignal?.aborted ? "aborted" : "failed", step);
+    throw error;
   }
+  step = "select_page";
   const closeOnAbort = () => { void browser.close().catch(() => {}); };
   abortSignal?.addEventListener("abort", closeOnAbort, { once: true });
+  const selectStartedAt = performance.now();
   try {
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
@@ -281,8 +334,12 @@ export async function connectLauncherBrowserHost(
       surfaceId,
       abortSignal,
     );
+    timing.selectPageMs = elapsed(selectStartedAt);
+    report("connected", "done");
     return { descriptor, browser, context, page };
   } catch (error) {
+    timing.selectPageMs = elapsed(selectStartedAt);
+    report(abortSignal?.aborted ? "aborted" : "failed", step);
     await browser.close().catch(() => {});
     throw error;
   } finally {
@@ -380,6 +437,10 @@ export type LauncherTurnActivity =
       message?: string;
       retain?: boolean;
       connectorBound?: boolean;
+      /** Structural diagnostics the launcher logs with browser.turn_ended; never message text. */
+      code?: string;
+      stage?: string;
+      abortClass?: string;
     };
 
 export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
