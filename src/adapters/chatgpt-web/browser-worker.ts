@@ -2313,11 +2313,19 @@ export class ChatGptBrowserWorker {
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
   /**
-   * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
-   * through DOM textContent. Treat that DOM-only representation as equivalent only when the
-   * expected U+0020 belongs to a multi-space run. Single spaces, tabs, newlines, intentional
-   * expected NBSP characters, and every other mutation remain exact and fail closed.
+   * ChatGPT's rich-text composer performs two confirmed, same-width typographic substitutions on
+   * pasted text: it may render an ASCII space as NBSP (Lexical's whitespace-preservation, seen both
+   * within multi-space runs and, per real occurrence traceId 6ee7bb84c46e, on an isolated single
+   * space), and it may autocorrect a lone ASCII hyphen into a typographic dash (seen in two
+   * separate real occurrences). Both are cosmetic-only and directional: only expected-ASCII /
+   * observed-substitute is tolerated, never the reverse, and every other mutation -- tabs,
+   * newlines, quotes/ellipsis (also autocorrect targets, but never yet confirmed live), or any
+   * other divergence -- remains exact and fails closed.
    */
+  private static readonly PROMPT_DASH_SUBSTITUTES = new Set([
+    "\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212",
+  ]);
+
   private promptCodeUnitEquivalent(
     expected: string,
     observed: string,
@@ -2327,9 +2335,12 @@ export class ChatGptBrowserWorker {
     const observedUnit = observed[index];
 
     if (expectedUnit === observedUnit) return true;
-    if (expectedUnit !== " " || observedUnit !== "\u00A0") return false;
+    if (expectedUnit === " " && observedUnit === "\u00A0") return true;
+    if (expectedUnit === "-" && ChatGptBrowserWorker.PROMPT_DASH_SUBSTITUTES.has(observedUnit!)) {
+      return true;
+    }
 
-    return expected[index - 1] === " " || expected[index + 1] === " ";
+    return false;
   }
 
   private promptTextEquivalent(
@@ -3790,7 +3801,7 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async resetCompactionComposerForRetry(
+  private async resetComposerForIntegrityRetry(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     abortSignal?: AbortSignal,
@@ -3799,7 +3810,7 @@ export class ChatGptBrowserWorker {
     const before = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (before) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared after prompt attachment failed: ${before}`),
       );
     }
@@ -3813,23 +3824,27 @@ export class ChatGptBrowserWorker {
     const after = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (after) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being reset. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being reset. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared while resetting the prompt: ${after}`),
       );
     }
     const observed = await this.attachedPromptText(page, abortSignal);
     if (observed.length > 0) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        `ChatGPT composer could not reset cleanly for compaction retry (actualChars=${observed.length})`,
+        `ChatGPT composer could not reset cleanly for retry (actualChars=${observed.length})`,
       );
     }
   }
 
-  private async attachPromptWithCompactionRetry(
+  /**
+   * Every prompt attachment gets exactly one retry on a `ChatGptPromptAttachmentIntegrityError`
+   * (ChatGPT's Lexical composer occasionally fails to preserve pasted text intact, independent of
+   * turn size), provided there's no DOM evidence the prompt was already submitted.
+   */
+  private async attachPromptWithIntegrityRetry(
     page: Page,
     prompt: string,
     localTools: boolean,
-    compaction: boolean,
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
@@ -3838,7 +3853,7 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
     requireThink = false,
   ): Promise<void> {
-    let retryAvailable = compaction;
+    let retryAvailable = true;
     for (;;) {
       try {
         await this.attachPrompt(
@@ -3859,12 +3874,12 @@ export class ChatGptBrowserWorker {
         const evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
         if (evidence) {
           throw new ChatGptPromptAttachmentIntegrityError(
-            "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+            "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
             new Error(`Prompt attachment failed before submission evidence appeared: ${evidence}`, { cause: error }),
           );
         }
         await captureDiagnostic?.("prompt-attachment-integrity-retry");
-        await this.resetCompactionComposerForRetry(page, baseline, abortSignal);
+        await this.resetComposerForIntegrityRetry(page, baseline, abortSignal);
       }
     }
   }
@@ -4973,11 +4988,10 @@ export class ChatGptBrowserWorker {
               const promptAbortSignal = turn.abortSignal
                 ? AbortSignal.any([stageSignal, turn.abortSignal])
                 : stageSignal;
-              return this.attachPromptWithCompactionRetry(
+              return this.attachPromptWithIntegrityRetry(
                 page,
                 finalPrompt,
                 mode.localTools,
-                turn.compaction === true,
                 submissionBaseline,
                 checkpoint => diagnostics.capture(page, checkpoint),
                 promptAbortSignal,
