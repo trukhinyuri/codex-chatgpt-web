@@ -4,6 +4,8 @@ Instructions for AI coding agents (Codex, Claude Code and others) that install, 
 
 The app shows the name **Codex Superpower**, but its bundle is still `/Applications/Codex Web GPT.app`, its data folder `~/Library/Application Support/Codex Web GPT`, its runtime home `~/.codex-chatgpt-web` and its CLI `codex-chatgpt-web`. The paths and commands below use those names on purpose.
 
+**If the person only says "continue" or "set up" (in any language), follow [docs/agent-playbook.md](docs/agent-playbook.md).** It tells you where the work queue is and how to finish it without earlier conversation.
+
 Before changing anything in this repository, read [docs/requirements.md](docs/requirements.md) (what must always hold), [docs/engineering-process.md](docs/engineering-process.md) (how to change, test, release and repair) and [docs/roadmap.md](docs/roadmap.md) (current state and open work). They are the complete record: no earlier conversation is needed to continue the work.
 
 ## Rules

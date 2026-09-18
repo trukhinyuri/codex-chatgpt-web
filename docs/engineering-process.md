@@ -89,6 +89,27 @@ The product's visible name is **Codex Superpower**; everything above keeps the o
 - **codex-chatgpt-web** (`upstream` = miuuyy/codex-chatgpt-web): a fix useful upstream starts from `upstream/main` in `fix/<topic>` with a regression test, is merged here, and may be offered upstream as a pull request. Review upstream pull requests and active forks regularly for fixes to port; do not port a change that sends tokens to third parties or updates from someone else's repository.
 - **CLIProxyAPI**: sync through the `superpower` branch of trukhinyuri/vibeflow as described in [../AGENTS.md](../AGENTS.md#develop); never `git subtree pull` from upstream directly (its history carries OAuth client secrets that GitHub push protection rejects, and this repository must never contain them).
 
+## Practices
+
+The practices the project follows, and the ones still to adopt. An agent applies every practice that fits a change even when nobody asked for it; a practice that does not fit is skipped with a reason in the pull request.
+
+| Area | Practice | Status |
+| --- | --- | --- |
+| Testing | Regression test first; isolated HOME/TMPDIR; contract tests against the Codex source users run; adversarial review by independent reviewers | In place |
+| Testing | Real end-to-end tests on CI runners for lifecycle (launchd, Dock, crash restart, update, rollback) | In progress |
+| Testing | Fuzzing of everything parsed from outside (catalog rows, SSE, ChatGPT DOM snapshots, problem-report fields); property-based tests for the admission gate and schedulers | Planned |
+| Release | CI-gated automatic updates, full tests on the user's Mac, health check, automatic rollback, private build home | In place |
+| Release | Staged rollout: a new commit reaches a small, stable share of installations first and widens over time; a kill switch in the repository halts a release everywhere; automatic halt when problem reports rise | Planned (first priority) |
+| Reliability | Self-healing before reporting; pacing and queues instead of refusals; no automatic action interrupts a running turn | In progress |
+| Reliability | Service objectives per route (turn success rate, latency percentiles) measured from structural logs; a release that worsens them is halted | Planned |
+| Observability | Structural logs and diagnostics without user content; consent-based problem reports with closed allowlists | In place |
+| Security | No secrets in the tree; build inputs pinned by SHA-256; loopback-only bridge with origin checks | In place |
+| Security | Software bill of materials and license notices for every bundled component (npm and Go); dependency updates reviewed and pinned | Partly (npm notices in place; Go modules planned) |
+| Decisions | Architecture decisions recorded in `docs/plans/` with evidence and what was not verified | In place |
+| Incidents | Every user-visible incident gets a short postmortem in `docs/plans/` (what happened, why, what prevents it next time) and a regression test | Planned |
+| Documentation | Requirements, process, playbook, roadmap and competitive analysis kept current with every release | In place |
+| Localization | Launcher text in five languages; agents answer people in their language | In place |
+
 ## Staying ahead
 
 Each release cycle: list new releases, merged and open pull requests, and actively developed forks of codex-chatgpt-web and CLIProxyAPI (for example `gh api repos/miuuyy/codex-chatgpt-web/forks --paginate`, sorted by recent pushes), and tools that solve the same problem. For each change that helps users, port it with a regression test, do better, or record why not in [competitive-analysis.md](competitive-analysis.md). Never port a change that sends credentials or content to third parties, or that updates from someone else's repository.

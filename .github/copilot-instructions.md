@@ -1,0 +1,1 @@
+The instructions for all agents working on this repository are in [AGENTS.md](../AGENTS.md). If you are asked only to "continue" or "set up" (in any language), follow [docs/agent-playbook.md](../docs/agent-playbook.md).
