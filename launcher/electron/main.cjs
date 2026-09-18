@@ -1267,6 +1267,9 @@ function reportLauncherStartup(status, reason = null) {
  */
 async function syncCliProxyService(logger) {
   if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "darwin") return { status: "off" };
+  // Only a proxy this app manages (`cliproxy service adopt`) has a record; without one there is
+  // nothing to sync, and a start must not depend on running the runtime for it.
+  if (!fs.existsSync(path.join(CORE_HOME, "cliproxyapi", "service.json"))) return { status: "off" };
   try {
     const result = await runCliProxy(
       runtimeSupervisor.runtimeCommand(["cliproxy", "service", "sync", "--bundle", path.join(process.resourcesPath, "cliproxyapi")]),

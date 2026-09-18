@@ -648,6 +648,8 @@ test("the launcher reports its start, installs unattended updates only after a l
   assert.match(main, /app\.quit\(\);\n\s*return;\n\s*\}\n\s*reportLauncherStartup\("starting"\);/);
   assert.match(main, /const runtimeHealthy = runtime\.status === "ready" \|\| runtime\.status === "not-configured";/);
   assert.match(main, /reportLauncherStartup\(\n\s*runtimeHealthy && proxyHealthy \? "healthy" : "unhealthy",/);
+  // Without a managed proxy nothing runs for it, so a start never fails on its account.
+  assert.match(main, /if \(!fs\.existsSync\(path\.join\(CORE_HOME, "cliproxyapi", "service\.json"\)\)\) return \{ status: "off" \};/);
   // A managed CLIProxyAPI is brought to the bundled binary before the bridge starts taking turns.
   assert.ok(main.indexOf("const cliproxy = await syncCliProxyService(logger);") < main.indexOf("const runtime = await runtimeSupervisor.startIfConfigured();"));
   assert.match(main, /reportLauncherStartup\("unhealthy", "runtime-start-error"\);/);
