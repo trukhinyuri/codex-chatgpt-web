@@ -1,10 +1,10 @@
 # Codex Superpower
 
-Use the ChatGPT models on your ChatGPT plan, from Instant to Pro, as models inside [Codex](https://developers.openai.com/codex) (app and CLI). Codex keeps its sign-in, files, tools, approvals and tasks; ChatGPT web answers each turn through a local bridge and the embedded browser of the **Codex Web GPT** desktop app.
+One model list in [Codex](https://developers.openai.com/codex) (app and CLI) for everything you pay for: the ChatGPT models on your ChatGPT plan, from Instant to Pro, and, through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), Claude, Gemini, GLM and other subscription models. Codex keeps its own sign-in, features, files, tools, approvals and tasks; a local bridge in the **Codex Web GPT** desktop app sends each turn to ChatGPT web, to OpenAI, or to CLIProxyAPI.
 
 Codex Superpower started as a fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) (formerly `trukhinyuri/codex-chatgpt-web`). It fixes failures seen in daily use, installs from source on macOS, and keeps itself up to date from this repository's `main` branch: every update must pass the full test suite and start cleanly, or the previous build stays in place.
 
-[Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [What this fork changes](#what-this-fork-changes) · [Updates](#updates-and-rollback) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [CLIProxyAPI models](#models-from-cliproxyapi) · [What this fork changes](#what-this-fork-changes) · [Updates](#updates-and-rollback) · [Problem reports](#problem-reports) · [Troubleshooting](#troubleshooting)
 
 ## Quick start
 
