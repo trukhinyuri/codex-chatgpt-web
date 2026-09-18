@@ -1,6 +1,6 @@
 > Plan of 2026-09-18 for the reliability of the ChatGPT Web route, written in Russian during the investigation. The evidence
 > comes from one heavily used installation (structural logs only). Section numbers are referenced from
-> [../roadmap.md](../roadmap.md) and from commit messages. Status: wave 1 (1.1–1.4, 2.1–2.2, 5.1–5.6) in progress.
+> [../roadmap.md](../roadmap.md) and from commit messages. Status: wave 1 (1.1–1.4, 2.1–2.2, 5.1–5.6) released as R13 (`9c9eb015`). Wave 2 (2.3–2.4, section 3, section 4, 5.7) not started.
 
 # План реализации: мост ChatGPT Web в Codex Superpower, 18.09
 

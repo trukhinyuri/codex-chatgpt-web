@@ -350,6 +350,96 @@ test("completed model setup remains a repeatable capability probe", () => {
   );
 });
 
+test("the launcher re-checks the connector by itself after a connector failure and only then", async () => {
+  const vm = require("node:vm");
+  const start = electronMain.indexOf("function connectorMonitorEnabled(");
+  const end = electronMain.indexOf("function trayImage()", start);
+  const source = electronMain.slice(start, end);
+  const { isConnectorFailureCode, connectorFailureKind } = require("../electron/connector-readiness.cjs");
+  const state = { browserInteractionMode: "automatic", coreSetupComplete: true, mcpSetupComplete: true };
+  const monitorCalls = [];
+  const sent = [];
+  let config = { mode: "full", browserInteractionMode: "automatic" };
+  let health = { active_browser_turns: 0 };
+  const context = {
+    IS_DEV_PROFILE: false,
+    shutdownInProgress: false,
+    quitting: false,
+    exitCommitted: false,
+    runtimeHost: { currentOperation: () => null },
+    runtimeSupervisor: { readConfig: () => config },
+    browserHost: { backgroundCheckAllowed: () => true },
+    runtimeActivity: async () => health,
+    connectorMonitor: {
+      noteTurnEnded: () => monitorCalls.push(["ended"]),
+      noteTurnFailure: code => monitorCalls.push(["failure", code]),
+      clearResendHint: () => monitorCalls.push(["clear"]),
+      stop: reason => monitorCalls.push(["stop", reason]),
+      settled: async () => monitorCalls.push(["settled"]),
+    },
+    send: (channel, value) => sent.push([channel, value]),
+    isConnectorFailureCode,
+    connectorFailureKind,
+    createConnectorReadinessMonitor: () => ({}),
+    setTimeout,
+    Promise,
+  };
+  vm.runInNewContext(`${source}
+    globalThis.api = { connectorMonitorEnabled, connectorCheckIdle, handleBrowserTurnEnded, pauseConnectorMonitorForQuit };`, context);
+  const { api } = context;
+  const stateStore = { read: () => ({ ...state }), update: patch => Object.assign(state, patch) };
+
+  api.handleBrowserTurnEnded({ status: "failed", failureCode: "connector_not_found:not_listed" }, stateStore);
+  assert.equal(state.mcpSetupComplete, false);
+  assert.equal(state.connectorLastFailureKind, "not_listed");
+  assert.deepEqual(monitorCalls, [["ended"], ["failure", "connector_not_found:not_listed"]]);
+  assert.equal(sent.at(-1)[0], "launcher:state-changed");
+
+  monitorCalls.length = 0;
+  state.mcpSetupComplete = true;
+  api.handleBrowserTurnEnded({ status: "failed", failureCode: null }, stateStore);
+  api.handleBrowserTurnEnded({ status: "completed", failureCode: null }, stateStore);
+  assert.equal(state.mcpSetupComplete, true, "other failures leave the connector state alone");
+  assert.deepEqual(monitorCalls, [["ended"], ["ended"], ["clear"]]);
+
+  assert.equal(api.connectorMonitorEnabled(stateStore), true);
+  state.browserInteractionMode = "manual";
+  assert.equal(api.connectorMonitorEnabled(stateStore), false, "never in Zero Risk");
+  state.browserInteractionMode = "automatic";
+  config = { mode: "browser-only", browserInteractionMode: "automatic" };
+  assert.equal(api.connectorMonitorEnabled(stateStore), false);
+  config = { mode: "full", browserInteractionMode: "automatic" };
+  context.IS_DEV_PROFILE = true;
+  assert.equal(api.connectorMonitorEnabled(stateStore), false);
+  context.IS_DEV_PROFILE = false;
+
+  assert.equal(await api.connectorCheckIdle(), true);
+  health = { active_browser_turns: 1 };
+  assert.equal(await api.connectorCheckIdle(), false);
+  health = null;
+  assert.equal(await api.connectorCheckIdle(), true, "an unreachable bridge does not block a browser-only check");
+  context.runtimeHost.currentOperation = () => "mcp-setup";
+  assert.equal(await api.connectorCheckIdle(), false);
+  context.runtimeHost.currentOperation = () => null;
+  context.browserHost.backgroundCheckAllowed = () => false;
+  assert.equal(await api.connectorCheckIdle(), false);
+
+  monitorCalls.length = 0;
+  await api.pauseConnectorMonitorForQuit();
+  assert.deepEqual(monitorCalls, [["stop", "quit"], ["settled"]]);
+
+  // The rest of the wiring: every place that should start, feed or consult the monitor does.
+  assert.match(electronMain, /connectorTunnel: \(request\) => \{[\s\S]*?connectorTunnelService\(request\)/);
+  assert.match(electronMain, /onTurnEnded: \(outcome\) => \{[\s\S]*?handleBrowserTurnEnded\(outcome, stateStore\);/);
+  assert.match(electronMain, /onTunnelStarted: \(\) => connectorMonitor\?\.noteTunnelRestarted\(\)/);
+  const setupMcp = electronMain.slice(electronMain.indexOf('handle("launcher:setup-mcp"'), electronMain.indexOf('handle("launcher:set-mcp-step"'));
+  assert.match(setupMcp, /connectorVerifiedAt: null[\s\S]*?connectorMonitor\?\.start\("setup-mcp"\)/);
+  const updateWait = electronMain.slice(electronMain.indexOf("async function quitWhenIdleForUpdate("), electronMain.indexOf("async function installPendingUpdateSooner("));
+  assert.match(updateWait, /wait\.quietMs > UPDATE_IDLE_QUIET_MS && !wait\.now && connectorMonitor\?\.restartDeferralActive\(\) === true/);
+  assert.match(updateWait, /idleSince = running === 0 && !pairing/);
+  assert.match(electronMain, /await pauseConnectorMonitorForQuit\(\);[\s\S]*?const activeOperation = runtimeHost\?\.currentOperation\(\)/);
+});
+
 test("catalog verification reports a failed request instead of requesting another restart, then recovers", async () => {
   const vm = require("node:vm");
   const start = electronMain.indexOf("function startCatalogVerificationMonitor(");
@@ -391,4 +481,48 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.equal(state.codexCatalogVerified, true);
   assert.equal(state.codexRestartRequired, false);
   assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
+});
+
+test("catalog verification ignores a catalog request Codex abandoned and still reports a real failure", async () => {
+  const vm = require("node:vm");
+  const start = electronMain.indexOf("function startCatalogVerificationMonitor(");
+  const end = electronMain.indexOf("\nfunction ", start + 1);
+  const source = electronMain.slice(start, end);
+  const state = { coreSetupComplete: true, codexCatalogVerified: false, codexRestartRequired: true, language: "en" };
+  const operations = [];
+  const warnings = [];
+  let tick;
+  let payload = { pid: 10, successful_model_catalog_requests: 0, model_catalog_requests: 0, last_model_catalog_result: null };
+  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", {
+    catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
+    stopCatalogVerificationMonitor() {},
+    runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
+    stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
+    setInterval: callback => { tick = callback; return { unref() {} }; },
+    logger: { info() {}, warn: (...args) => warnings.push(args), debug() {} },
+    send() {}, publishOperation: op => operations.push(op),
+    nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason})." }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  for (const [request, result] of [
+    [1, { status: 499, failure: { stage: "client_aborted" } }],
+    [2, { status: 502, failure: { stage: "client_aborted" } }],
+    [3, { status: 499 }],
+  ]) {
+    payload = { ...payload, model_catalog_requests: request, last_model_catalog_result: { request, at: `2026-09-18T10:00:0${request}Z`, ...result } };
+    await tick();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(operations.length, 0, "an abandoned request is not a catalog failure");
+  assert.equal(warnings.length, 0);
+  assert.equal(state.codexRestartRequired, true);
+  payload = { ...payload, model_catalog_requests: 4, last_model_catalog_result: {
+    request: 4, at: "2026-09-18T10:00:04Z", status: 502,
+    failure: { stage: "transport", code: "ECONNRESET", name: "TypeError", origin: "upstream_fetch" },
+  } };
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(operations[0]?.status, "failed");
+  assert.match(operations[0].message, /502.*ECONNRESET/);
+  assert.deepEqual(warnings.map(([event]) => event), ["codex.model_catalog_failed"]);
 });

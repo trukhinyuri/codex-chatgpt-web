@@ -2,12 +2,20 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultConfig } from "../src/config";
 import {
+  connectorDoctorCheck,
+  formatDoctorReport,
   inspectCodexCatalogRoutingFromText,
   modelCatalogDoctorCheck,
   readCatalogRequestCount,
   readCodexCatalogRouting,
+  readTunnelContactRecord,
+  tunnelContactStatus,
+  tunnelFingerprint,
 } from "../src/doctor";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 
 const roots: string[] = [];
 
@@ -222,5 +230,94 @@ describe("healthz catalog counters", () => {
     });
     expect(check.status).toBe("warning");
     expect(check.message).toBe("Responses proxy did not report model catalog request counts");
+  });
+});
+
+describe("connector evidence from the tunnel's own counters", () => {
+  const config = {
+    ...defaultConfig("full"),
+    appName: "Codex Native2",
+    tunnel: {
+      binaryPath: "/bin/tunnel-client",
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: "/secrets/runtime.key",
+      profileDir: "/profiles",
+      profileName: "codex-chatgpt-web",
+      alias: "codex-chatgpt-web",
+    },
+  };
+  const now = Date.parse("2026-09-18T08:45:00.000Z");
+  const base = {
+    version: 1 as const,
+    tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+    lastContactAt: null,
+    observedAt: new Date(now - 5_000).toISOString(),
+    metricsReadable: true,
+    metricsVerified: true,
+    processStartSeconds: Date.parse("2026-09-18T08:22:33.000Z") / 1_000,
+  };
+
+  test("ChatGPT reaching the tunnel proves the connector locally", () => {
+    const check = connectorDoctorCheck(config, { ...base, lastContactAt: "2026-09-18T08:27:03.000Z" }, now);
+    expect(check).toMatchObject({ id: "connector", status: "ok", message: "ChatGPT reached this tunnel at 2026-09-18T08:27:03.000Z" });
+    expect(check.unprovenLocally).toBeUndefined();
+    expect(formatDoctorReport({ ok: true, mode: "full", checks: [check], unproven: [] }).trimEnd().split("\n").at(-1))
+      .toBe("Doctor result: ready");
+  });
+
+  test("a fresh reading with no ChatGPT command is a warning that names the next step", () => {
+    const check = connectorDoctorCheck(config, base, now);
+    expect(check).toMatchObject({
+      id: "connector",
+      status: "warning",
+      unprovenLocally: true,
+      message: "ChatGPT has not connected to this tunnel since it started at 2026-09-18T08:22:33.000Z",
+    });
+    expect(check.detail).toContain("create it in ChatGPT for this tunnel");
+  });
+
+  test("missing, stale or unverified metrics are NOT_OBSERVED, never proof of no contact", () => {
+    for (const record of [
+      undefined,
+      { ...base, metricsReadable: false },
+      { ...base, metricsVerified: false },
+      { ...base, observedAt: new Date(now - 10 * 60_000).toISOString() },
+    ]) {
+      const check = connectorDoctorCheck(config, record, now);
+      expect(check).toMatchObject({ status: "warning", unprovenLocally: true });
+      expect(check.message).toBe('Local checks cannot prove that ChatGPT connector "Codex Native2" is attached to this tunnel');
+    }
+  });
+
+  test("the launcher's contact record is read only for the configured tunnel", () => {
+    const { root } = fixture();
+    const path = join(root, "tunnel-contact.json");
+    writeFileSync(path, JSON.stringify({ ...base, lastContactAt: "2026-09-18T08:27:03.000Z" }));
+    expect(readTunnelContactRecord(config, path)?.lastContactAt).toBe("2026-09-18T08:27:03.000Z");
+    writeFileSync(path, JSON.stringify({ ...base, tunnel: tunnelFingerprint("tunnel_ffffffffffffffffffffffffffffffff") }));
+    expect(readTunnelContactRecord(config, path)).toBeUndefined();
+    writeFileSync(path, "not json");
+    expect(readTunnelContactRecord(config, path)).toBeUndefined();
+    expect(readTunnelContactRecord(defaultConfig("browser-only"), path)).toBeUndefined();
+  });
+
+  test("the doctor reads contact records exactly as the launcher that writes them", async () => {
+    const load = createRequire(import.meta.url);
+    const launcher = load("../launcher/electron/runtime-supervisor.cjs") as {
+      tunnelContactStatus: (record: unknown, now: number) => { status: string; at: string | null };
+    };
+    for (const record of [
+      { ...base, lastContactAt: "2026-09-18T08:27:03.000Z" },
+      base,
+      { ...base, metricsVerified: false },
+      { ...base, observedAt: new Date(now - 61_000).toISOString() },
+      { ...base, processStartSeconds: null },
+    ]) {
+      const doctor = tunnelContactStatus(record, now);
+      const expected = launcher.tunnelContactStatus(record, now);
+      expect(String(doctor.status)).toBe(expected.status);
+      expect("at" in doctor ? doctor.at : null).toBe(expected.at);
+    }
+    expect(createHash("sha256").update(config.tunnel.tunnelId).digest("hex")).toBe(base.tunnel);
   });
 });

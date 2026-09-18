@@ -9,36 +9,19 @@ Updated with every release. It lists where the product still falls short of [req
 | R9 | `10a30a6b` | The update button explains what a pending update waits for and installs it 30 s after Codex's tasks; network failures, new advisories and a test that fails once under load no longer block updates. |
 | R10 | `b158e12e` | CLIProxyAPI is part of the repository and the app; the Go toolchain and the Antigravity OAuth client are fetched at build time, pinned by SHA-256, so the repository holds no secrets and needs no local Go. |
 | R11 | `38dcd221` | A failing installation receives its fix in the first quiet minute; update builds run in a private home and cannot touch user state; one invalid proxy model can no longer empty Codex's model list; the catalog stays within the 100 rows Codex Desktop reads. First release checked by CI on macOS. |
+| R13 | `9c9eb015` | ChatGPT Web reliability, wave 1 ([plan](plans/2026-09-18-bridge-reliability.md), [work items](plans/2026-09-18-bridge-reliability-wave1.md)): a bridge-terminal failure now reaches Codex with a code it will not retry, instead of being read back as "at capacity"; Send no longer carries its own 15 s timeout and Stop is never pressed on a prompt ChatGPT already accepted but whose Send press failed or was unconfirmed; diagnostics keep a bounded, less noisy trace history and the model catalog survives a ChatGPT outage by serving the last-good rows instead of emptying Codex's picker; ChatGPT rate-limit cooldown is now account-wide with a single probe turn and a FIFO queue instead of every parallel turn re-escalating it, and heavy browser phases (loading a page, staged Bigger Context sends) queue on one lock per account instead of failing with "at most 5 browser pages"; the launcher proves the ChatGPT connector is paired and that ChatGPT has actually reached the tunnel before a turn sends, with a waiting ladder and a live MCP checklist instead of a 30 s personalization timeout. |
+| R14 | `2e60f0e3` | An update is installed by a process of the app's own bundle instead of the Bun binary in the user's home, so macOS sees the application replace itself — the shape Sparkle and Squirrel.Mac use, and the one Apple's "same developer or team" exemption applies to as soon as the builds carry a Team ID ([plan](plans/2026-09-19-update-without-app-management.md)). An installation that may not replace its bundle no longer quits into a half-finished update: it keeps running with its verified build staged and reports `bundle-not-writable`, which the problem reports now tell apart from a broken build. |
 
 ## In progress
 
 Every branch named here is on GitHub. To continue one without earlier conversation: read its plan, check out the branch, run the full suites with an isolated short HOME/TMPDIR, finish what its plan or open pull request lists, then integrate and release by [engineering-process.md](engineering-process.md#releasing).
 
-1. **ChatGPT Web reliability, wave 1.** [Plan](plans/2026-09-18-bridge-reliability.md) (sections 1.1–1.4, 2.1–2.2, 5.1–5.6), [work items](plans/2026-09-18-bridge-reliability-wave1.md), [evidence](plans/2026-09-18-bridge-reliability-evidence.json). On 18.09 about twice as many ChatGPT Web turns failed as completed, for three reasons: the bridge refused turns during ChatGPT's rate-limit cooldown instead of waiting; Codex retried errors the bridge had marked final, and parallel sessions escalated the pause to five minutes; and large Bigger Context messages failed with "Something went wrong" and were resent unchanged. Items and branches:
-   - Codex error contract, `fork/rel-codex-contract`;
-   - send without the 15 s limit, `fork/rel-send` and its review fixes `fork/rel-send-r1`;
-   - diagnostics and last-good catalog, `fork/rel-diag-catalog`;
-   - admission gate and heavy-phase lock, `fork/rel-admission-gate`;
-   - connector readiness, `fork/rel-connector`.
-
-   Branches without commits yet must be implemented from the work items. The integration branch is `fork/reliability-wave1`.
-2. **Visible rename to Codex Superpower** with authors and About panel. Branch `fork/rename-visible` holds the first version, which the legacy-updater contract test shows is compatible with the updater at `86f2d311`. Review fixes merged with R11 go to `fork/rename-visible-r2`. [Analysis](plans/2026-09-18-rename.md).
-3. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive, with the menu-bar icon optional. The implementation in `fork/dock-autostart-keepalive` is tested only with fakes. A real-launchd end-to-end test in CI is being built in `fork/dock-lifecycle-e2e`; do not release the lifecycle change before that test is green.
-4. **Watch automation:** a daily workflow opens `auto-watch` issues for new Codex versions, upstream changes and active forks, plus a weekly technology watch. Branch `fork/watch-automation`.
-5. **Failure-mode review for thousands of users** and the **multi-account design** (requirement R9). Their plans land in `docs/plans/failure-modes.md` and `docs/plans/multi-account.md`.
-6. **Updates without the macOS "App Management" permission.** An update stopped at the system
-   permission request, which the user had to grant by hand (R4.6, R1.2). The bundle was replaced by
-   Bun from the user's home — a binary with no bundle, no Team ID and a path that changes with every
-   version — after the launcher had already quit. It is now replaced by a process of the app's own
-   bundle, the way Sparkle and ShipIt do it, and an installation that may not replace its bundle
-   keeps running with its verified build staged and reports `bundle-not-writable` instead of quitting
-   into a half-finished update. Branch `fork/update-without-app-management`,
-   [plan](plans/2026-09-19-update-without-app-management.md). The prompt disappears for good only
-   with a Developer ID certificate (Apple's exemption is keyed to a Team ID, which an ad-hoc
-   signature cannot have) — see **Signing** under *Decisions for the owner*; the packaging already
-   takes one through `CSC_LINK`/`CSC_NAME` without a code change.
-7. **Consent text for problem reports** (the issue appears under the user's GitHub account), branch `fork/report-disclosure`; **Windows CI**, branch `fork/windows-ci-tests` (pull request #1); **these documents**, branch `fork/requirements-docs` (pull request #2).
-
+1. **Visible rename to Codex Superpower** with authors and About panel. Branch `fork/rename-visible` holds the first version, which the legacy-updater contract test shows is compatible with the updater at `86f2d311`. Review fixes merged with R11 go to `fork/rename-visible-r2`. [Analysis](plans/2026-09-18-rename.md).
+2. **Dock, start at login, restart after a crash** through a LaunchAgent with KeepAlive, with the menu-bar icon optional. The implementation in `fork/dock-autostart-keepalive` is tested only with fakes. A real-launchd end-to-end test in CI is being built in `fork/dock-lifecycle-e2e`; do not release the lifecycle change before that test is green.
+3. **Watch automation:** a daily workflow opens `auto-watch` issues for new Codex versions, upstream changes and active forks, plus a weekly technology watch. Branch `fork/watch-automation`.
+4. **Failure-mode review for thousands of users** and the **multi-account design** (requirement R9). Their plans land in `docs/plans/failure-modes.md` and `docs/plans/multi-account.md`.
+5. **Consent text for problem reports** (the issue appears under the user's GitHub account), branch `fork/report-disclosure`; **Windows CI**, branch `fork/windows-ci-tests` (pull request #1); **these documents**, branch `fork/requirements-docs` (pull request #2).
+6. **Windows tunnel-lifecycle test fixture uses a POSIX broker-socket path.** `launcher/tests/tunnel-connector.test.cjs` (landed with R13) builds its runtime config with a filesystem `brokerSocketPath`, which `RuntimeSupervisor.validateConfig` correctly rejects on Windows as an invalid broker pipe; give the fixture a `\\.\pipe\...`-style path on Windows so the tunnel-lifecycle behaviour it tests (readiness, restart-on-config-change, supervising after a failed stop) is exercised on every platform. Windows CI is red on this PR's tests for that reason alone; do not weaken the assertions to hide it.
 
 ## Next
 

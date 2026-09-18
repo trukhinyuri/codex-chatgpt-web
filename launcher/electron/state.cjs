@@ -1,6 +1,7 @@
 const languages = require("./languages.json");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { CONNECTOR_FAILURE_KINDS } = require("./connector-readiness.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -89,6 +90,19 @@ function readState(filePath) {
       "codexRestartRequired",
     ]) {
       if (state[key] !== undefined && typeof state[key] !== "boolean") delete state[key];
+    }
+    // Connector readiness evidence written by the background monitor: timestamps and one kind from
+    // a fixed list, never connector names, page text or error messages.
+    for (const key of ["connectorVerifiedAt", "connectorLastCheckedAt"]) {
+      if (state[key] !== undefined && state[key] !== null
+        && (typeof state[key] !== "string" || !Number.isFinite(Date.parse(state[key])))) {
+        delete state[key];
+      }
+    }
+    if (state.connectorLastFailureKind !== undefined && state.connectorLastFailureKind !== null
+      && !CONNECTOR_FAILURE_KINDS.includes(state.connectorLastFailureKind)
+      && state.connectorLastFailureKind !== "unknown") {
+      delete state.connectorLastFailureKind;
     }
     return state;
   } catch {

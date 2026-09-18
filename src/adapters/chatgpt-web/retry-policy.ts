@@ -1,4 +1,5 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { isChatGptLocalAdmissionRefusal } from "./rate-limit-gate";
 
 /** Maximum number of automatic browser-turn retries after the initial send. */
 export const MAX_CHATGPT_WEB_TURN_RETRIES = 3;
@@ -37,6 +38,9 @@ export class ChatGptWebTurnRetryPolicy {
   constructor(private readonly ttlMs = RETRY_BUDGET_TTL_MS) {}
 
   recordRetryableFailure(key: string, error: ChatGptWebAdapterError, now = Date.now()): ChatGptWebAdapterError {
+    // The bridge's own refusal sent nothing to ChatGPT, so it proves nothing about ChatGPT and
+    // must not use up an attempt the turn may need after the account cools down.
+    if (isChatGptLocalAdmissionRefusal(error)) return error;
     this.prune(now);
     const previous = this.entries.get(key);
     const entry: RetryBudgetEntry = {

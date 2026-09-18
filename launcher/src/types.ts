@@ -28,6 +28,9 @@ export interface LauncherState {
   mcpSetupComplete?: boolean;
   mcpRuntimeInstalled?: boolean;
   codexRestartRequired?: boolean;
+  connectorVerifiedAt?: string | null;
+  connectorLastCheckedAt?: string | null;
+  connectorLastFailureKind?: string | null;
   mcpGuideStep: number;
   sessionRefreshReminderAt: string | null;
 }
@@ -93,6 +96,35 @@ export interface OperationState {
   message: string;
 }
 
+export type ConnectorFailureKind =
+  | "tunnel_unavailable"
+  | "never_contacted"
+  | "not_listed"
+  | "other_name"
+  | "menu_unavailable"
+  | "personalization_unavailable"
+  | "selection_failed"
+  | "unknown";
+
+/** The launcher's background proof that ChatGPT lists the Codex Native connector. */
+export interface ConnectorReadiness {
+  status: "idle" | "disabled" | "waiting" | "checking" | "paused" | "verified";
+  reason: string | null;
+  armedAt: string | null;
+  lastCheckedAt: string | null;
+  nextCheckAt: string | null;
+  verifiedAt: string | null;
+  lastFailureKind: ConnectorFailureKind | null;
+  checks: number;
+  tunnelReady: boolean | null;
+  contact: { status: "observed" | "not-observed" | "unknown"; at: string | null };
+  connectorListed: boolean | null;
+  /** A Codex task failed on the connector; after it is listed again, the person resends it. */
+  resendHint: boolean;
+  /** A Codex task is waiting for ChatGPT to list the connector. */
+  waitingTurn: { step: number; total: number } | null;
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   | {
@@ -138,6 +170,7 @@ export interface LauncherSnapshot {
   version: string;
   smokePassed: boolean;
   operation: OperationState | null;
+  connectorReadiness: ConnectorReadiness | null;
   update: UpdateState;
   /** Consent for GitHub problem reports; "unavailable" outside installed builds of this fork. */
   problemReports: ProblemReportConsent;
@@ -238,6 +271,7 @@ export interface LauncherApi {
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
+  onConnectorReadiness(listener: (state: ConnectorReadiness) => void): () => void;
 }
 
 declare global {

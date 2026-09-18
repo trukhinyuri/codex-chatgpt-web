@@ -14,7 +14,7 @@ import {
   isChatGptTurnRetired,
 } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
-import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptSendPressUnconfirmedError, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
 import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, rateLimitStaysRetryableAfterSend } from "../src/adapters/chatgpt-web/index";
@@ -1165,6 +1165,54 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  for (
+    const unconfirmed of [
+      {
+        label: "a Send key press ChatGPT never confirmed",
+        error: () => new ChatGptSendPressUnconfirmedError(
+          new DOMException("renderer did not finish the key press", "TimeoutError"),
+          new Error("ChatGPT conversation turn has no stable data-turn-id identity"),
+        ),
+      },
+      {
+        label: "a staged part whose send stage ran out of budget",
+        error: () => new Error("ChatGPT browser stage timed out: multipart_stage_1_send"),
+      },
+    ] as const
+  ) {
+    test(`${unconfirmed.label} is reported once as an ambiguous submission and never sent again`, async () => {
+      const provider: CodexProviderConfig = {
+        adapter: "chatgpt-web",
+        baseUrl: `browser://chatgpt-unconfirmed-send-${Date.now()}-${Math.random()}`,
+        chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      };
+      const worker = ChatGptBrowserWorker.forProvider(provider);
+      const originalRun = worker.run.bind(worker);
+      let browserStarts = 0;
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+        browserStarts += 1;
+        await turn.onSendActivated?.();
+        throw unconfirmed.error();
+      };
+
+      try {
+        const adapter = createChatGptWebAdapter(provider);
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const events: AdapterEvent[] = [];
+          await adapter.runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
+          expect(events.at(-1)).toMatchObject({
+            type: "error",
+            code: "chatgpt_submission_ambiguous",
+            retryable: false,
+          });
+        }
+        expect(browserStarts).toBe(1);
+      } finally {
+        (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      }
+    });
+  }
+
   // Mutation authority must outrank retryability: the browser guards that raise structured
   // retryable 429/5xx errors (rate-limit dialog, "Something went wrong") run after the send press
   // as well as before it, so a structured `retryable: true` raised past the mutation boundary must
@@ -2310,6 +2358,23 @@ describe("ChatGPT outer-native harness v4", () => {
     await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: ordinary });
     await callTurnBroker(socketPath, { method: "activity_complete", token, activityId: ordinary });
     expect(broker.beginCompletionFence(token)).toBe(3);
+    await broker.close();
+  });
+
+  test("counts MCP requests in flight across turns so a tunnel restart can wait for them", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-active-tools-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const first = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000, "tools-a");
+    const second = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000, "tools-b");
+    expect(broker.activeToolCallCount()).toBe(0);
+    const a = await callTurnBroker<{ activityId: string }>(socketPath, { method: "claim", token: first });
+    const b = await callTurnBroker<{ activityId: string }>(socketPath, { method: "claim", token: second });
+    expect(broker.activeToolCallCount()).toBe(2);
+    await callTurnBroker(socketPath, { method: "activity_complete", token: first, activityId: a.activityId });
+    expect(broker.activeToolCallCount()).toBe(1);
+    broker.revoke(second);
+    expect(broker.activeToolCallCount()).toBe(0);
+    void b;
     await broker.close();
   });
 
