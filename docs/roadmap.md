@@ -40,4 +40,5 @@ Updated with every release. It lists where the product still falls short of [req
 ## Decisions for the owner
 
 - **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update. A Developer ID certificate would fix this and allow notarization.
-- **Legal positioning** for companies: automation of chatgpt.com, and reuse of the public Antigravity OAuth client by CLIProxyAPI.
+- **Legal positioning** for companies: OpenAI's Terms of Use (16 January 2026) forbid automatically or programmatically extracting output, sharing an account with anyone else, and circumventing rate limits. The ChatGPT Web route automates chatgpt.com for the account's owner; CLIProxyAPI rotates subscription accounts and reuses the public Antigravity OAuth client. Both carry a risk of account restrictions that companies will ask about.
+- **Account pooling across people** was requested (any number of accounts shared by many users to raise limits). It conflicts with the terms above and would expose customers to account bans; requirement R9 implements several accounts per owner and horizontal scaling without pooling across people.
