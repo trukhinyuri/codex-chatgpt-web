@@ -3,6 +3,8 @@ import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
 import { join } from "node:path";
 import { inspectCodexIntegration } from "./codex-integration";
+import { findTopLevelAssignment, parseDocument } from "./codex-integration-document";
+import { getCodexConfigPath } from "./codex-integration-shared";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
@@ -13,6 +15,8 @@ import {
   readLauncherBrowserHostDescriptor,
 } from "./launcher-browser-host";
 import { processRunning } from "./process";
+
+const BUILTIN_CODEX_MODEL_PROVIDER = "openai";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -27,6 +31,18 @@ export interface DoctorReport {
   ok: boolean;
   mode?: AppConfig["mode"];
   checks: DoctorCheck[];
+}
+
+/** Whether Codex's own config routes model discovery somewhere other than this daemon. */
+export type CodexCatalogRouting =
+  | { status: "default" }
+  | { status: "custom-provider"; provider: string; explicitCatalog: boolean }
+  | { status: "explicit-catalog" }
+  | { status: "unreadable"; detail: string };
+
+interface ProxyInspection {
+  check: DoctorCheck;
+  body?: Record<string, unknown>;
 }
 
 function secureFile(path: string): boolean {
@@ -61,40 +77,148 @@ function launcherOwnershipError(config: AppConfig, health: Record<string, unknow
   return undefined;
 }
 
-async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
+async function inspectProxy(config: AppConfig): Promise<ProxyInspection> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2_000);
   try {
     const response = await fetch(`http://${config.host}:${config.port}/healthz`, { signal: controller.signal });
-    if (!response.ok) return { id: "proxy", status: "error", message: `Responses proxy returned HTTP ${response.status}` };
+    if (!response.ok) return { check: { id: "proxy", status: "error", message: `Responses proxy returned HTTP ${response.status}` } };
     const body = await response.json() as Record<string, unknown>;
     if (body.service !== "codex-chatgpt-web" || body.status !== "ok") {
-      return { id: "proxy", status: "error", message: "The configured port belongs to another service" };
+      return { check: { id: "proxy", status: "error", message: "The configured port belongs to another service" } };
     }
     if (body.mode !== config.mode) {
-      return { id: "proxy", status: "error", message: `Daemon is running in ${String(body.mode)} mode; config requires ${config.mode}` };
+      return { check: { id: "proxy", status: "error", message: `Daemon is running in ${String(body.mode)} mode; config requires ${config.mode}` } };
     }
     if (body.version !== config.releaseVersion) {
-      return { id: "proxy", status: "error", message: `Daemon version is ${String(body.version)}; config requires ${config.releaseVersion}` };
+      return { check: { id: "proxy", status: "error", message: `Daemon version is ${String(body.version)}; config requires ${config.releaseVersion}` } };
     }
     if (body.accepting_turns !== true) {
       return {
-        id: "proxy",
-        status: "error",
-        message: "Responses proxy is still drained and is not accepting Codex turns",
+        check: {
+          id: "proxy",
+          status: "error",
+          message: "Responses proxy is still drained and is not accepting Codex turns",
+        },
       };
     }
     const ownershipError = launcherOwnershipError(config, body);
     if (ownershipError) {
-      return { id: "proxy", status: "error", message: "Responses proxy ownership could not be verified", detail: ownershipError };
+      return { check: { id: "proxy", status: "error", message: "Responses proxy ownership could not be verified", detail: ownershipError } };
     }
-    return { id: "proxy", status: "ok", message: `Responses proxy is healthy on 127.0.0.1:${config.port}` };
+    return {
+      check: { id: "proxy", status: "ok", message: `Responses proxy is healthy on 127.0.0.1:${config.port}` },
+      body,
+    };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    return { id: "proxy", status: "error", message: "Responses proxy is not reachable", detail };
+    return { check: { id: "proxy", status: "error", message: "Responses proxy is not reachable", detail } };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * A green `doctor` result and a healthy `/healthz` response only prove the daemon is up, not that
+ * Codex ever actually requested this daemon's model catalog: Codex can be running on a stale or
+ * missing ChatGPT Web model set while every other check stays green. `/healthz` already reports
+ * `successful_model_catalog_requests`; this reads it defensively (a stale or foreign daemon could
+ * shape the field differently).
+ */
+export function readCatalogRequestCount(health: Record<string, unknown>): number | undefined {
+  const value = health.successful_model_catalog_requests;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function inspectCodexCatalogRoutingFromText(text: string): CodexCatalogRouting {
+  try {
+    const lines = parseDocument(text).lines;
+    const provider = findTopLevelAssignment(lines, "model_provider");
+    const catalog = findTopLevelAssignment(lines, "model_catalog_json");
+    if (provider.present && !provider.value?.trim()) {
+      return { status: "unreadable", detail: "top-level model_provider is empty" };
+    }
+    if (catalog.present && !catalog.value?.trim()) {
+      return { status: "unreadable", detail: "top-level model_catalog_json is empty" };
+    }
+    // A [model_providers.<name>] table alone only defines a provider; it does not select one.
+    const customProvider = provider.present && provider.value && provider.value !== BUILTIN_CODEX_MODEL_PROVIDER
+      ? provider.value
+      : undefined;
+    if (customProvider) {
+      return { status: "custom-provider", provider: customProvider, explicitCatalog: catalog.present };
+    }
+    if (catalog.present) return { status: "explicit-catalog" };
+    return { status: "default" };
+  } catch (error) {
+    return { status: "unreadable", detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function readCodexCatalogRouting(
+  readText: (path: string) => string = path => readFileSync(path, "utf8"),
+): CodexCatalogRouting {
+  const path = getCodexConfigPath();
+  if (!existsSync(path)) return { status: "default" };
+  try {
+    return inspectCodexCatalogRoutingFromText(readText(path));
+  } catch {
+    return { status: "unreadable", detail: "Codex config could not be read" };
+  }
+}
+
+export function modelCatalogDoctorCheck(input: {
+  successfulModelCatalogRequests: number | undefined;
+  routing: CodexCatalogRouting;
+}): DoctorCheck {
+  if (input.successfulModelCatalogRequests === undefined) {
+    return {
+      id: "model-catalog",
+      status: "warning",
+      message: "Responses proxy did not report model catalog request counts",
+      detail: "Doctor cannot prove whether Codex requested /v1/models.",
+    };
+  }
+  if (input.successfulModelCatalogRequests > 0) {
+    return {
+      id: "model-catalog",
+      status: "ok",
+      message: "Codex has requested the ChatGPT Web model catalog from this daemon",
+    };
+  }
+
+  if (input.routing.status === "custom-provider") {
+    return {
+      id: "model-catalog",
+      status: "warning",
+      message: `Codex is obtaining its model catalog from the selected provider ${JSON.stringify(input.routing.provider)}`,
+      detail: [
+        "A top-level model_provider other than the built-in openai provider owns model discovery, so zero requests to this daemon's /v1/models endpoint are expected.",
+        "A [model_providers.*] table definition alone does not select a provider.",
+        ...(input.routing.explicitCatalog
+          ? ["Codex also has a top-level model_catalog_json assignment, which may bypass this daemon's catalog route."]
+          : []),
+      ].join(" "),
+    };
+  }
+  if (input.routing.status === "explicit-catalog") {
+    return {
+      id: "model-catalog",
+      status: "warning",
+      message: "Codex has a top-level model_catalog_json assignment that may bypass this daemon's model catalog",
+      detail: "Zero requests to /v1/models can be expected in this configuration.",
+    };
+  }
+
+  const unreadable = input.routing.status === "unreadable"
+    ? ` Codex catalog routing could not be inspected (${input.routing.detail}); doctor did not assume an alternate catalog owner.`
+    : "";
+  return {
+    id: "model-catalog",
+    status: "warning",
+    message: "Codex has not requested the ChatGPT Web model catalog since this daemon started",
+    detail: `The ChatGPT Web models in the Codex picker are not proven. Setup and a healthy proxy are not catalog evidence. Fully restart Codex, including its background process, while this launcher remains open, then run doctor again.${unreadable}`,
+  };
 }
 
 export async function runDoctor(): Promise<DoctorReport> {
@@ -174,7 +298,16 @@ export async function runDoctor(): Promise<DoctorReport> {
   } else {
     checks.push({ id: "service", status: "ok", message: "macOS background service is loaded" });
   }
-  checks.push(await proxyCheck(config));
+  const proxy = await inspectProxy(config);
+  checks.push(proxy.check);
+  // Catalog evidence is only meaningful once the proxy is healthy and this daemon actually owns
+  // the active Codex route; otherwise Codex requesting nothing from it proves nothing.
+  if (proxy.check.status === "ok" && proxy.body && codex.installed && codex.active && codex.errors.length === 0) {
+    checks.push(modelCatalogDoctorCheck({
+      successfulModelCatalogRequests: readCatalogRequestCount(proxy.body),
+      routing: readCodexCatalogRouting(),
+    }));
+  }
 
   if (config.mode === "full") {
     const settings = config.tunnel!;
