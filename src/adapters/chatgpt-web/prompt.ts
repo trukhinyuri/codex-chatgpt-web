@@ -249,6 +249,35 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
   return total;
 }
 
+/**
+ * The images a non-compaction turn will actually attach, in the same order `messageEnvelope`
+ * assigns them `codex-input-image-N` refs: one-pixel PNG placeholders never attach, and — mirroring
+ * the `ImageBudget` overflow rule in `build()` below — only the newest `CHATGPT_MAX_INPUT_IMAGES`
+ * real images across the whole (model-switch-deduplicated) context survive; older overflow becomes
+ * a text note instead of an attachment. Lets the HTTP boundary validate real attachments up front
+ * without running the full compiler, so an image the compiler will correctly drop is never
+ * rejected. Compaction requests further trim history by a JSON byte budget that this does not
+ * replicate, so callers should only rely on this for ordinary (non-compaction) turns.
+ */
+export function chatGptWebAttachedInputImages(
+  messages: readonly CodexMessage[],
+): Array<{ imageUrl: string; role: CodexMessage["role"] }> {
+  const sourceMessages = withoutSupersededModelSwitchContracts(messages);
+  const dropped = Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES);
+  const attached: Array<{ imageUrl: string; role: CodexMessage["role"] }> = [];
+  let seen = 0;
+  for (const message of sourceMessages) {
+    if (message.role === "assistant" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl)) continue;
+      seen += 1;
+      if (seen <= dropped) continue;
+      attached.push({ imageUrl: part.imageUrl, role: message.role });
+    }
+  }
+  return attached;
+}
+
 function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };

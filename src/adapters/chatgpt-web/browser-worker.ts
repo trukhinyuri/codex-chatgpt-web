@@ -2182,16 +2182,29 @@ const imageExtensions = new Map([
   ["image/webp", "webp"],
 ]);
 
+/**
+ * Single source of truth for the format constraint every ChatGPT Web transport enforces: an
+ * inline base64 data URL in one of the supported image mime types. The HTTP boundary
+ * (findInvalidChatGptWebInputImage in server.ts) calls this to reject an invalid image with an
+ * early 400 instead of failing the turn deep inside the browser worker.
+ */
+export function validateChatGptWebInputImage(imageUrl: string): string | undefined {
+  const parsed = parseDataUrl(imageUrl);
+  if (!parsed) return "must be an inline base64 data URL";
+  if (!imageExtensions.has(parsed.mediaType.toLowerCase())) return `has unsupported media type: ${parsed.mediaType}`;
+  return undefined;
+}
+
 export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array<{ name: string; mimeType: string; buffer: Buffer }> {
   if (images.length > CHATGPT_MAX_INPUT_IMAGES) {
     throw new Error(`ChatGPT web accepts at most ${CHATGPT_MAX_INPUT_IMAGES} input images per Codex turn`);
   }
   let totalBytes = 0;
   return images.map(image => {
-    const parsed = parseDataUrl(image.imageUrl);
-    if (!parsed) throw new Error(`ChatGPT web input image ${image.ref} must be an inline base64 data URL`);
-    const extension = imageExtensions.get(parsed.mediaType.toLowerCase());
-    if (!extension) throw new Error(`ChatGPT web input image ${image.ref} has unsupported media type: ${parsed.mediaType}`);
+    const invalid = validateChatGptWebInputImage(image.imageUrl);
+    if (invalid) throw new Error(`ChatGPT web input image ${image.ref} ${invalid}`);
+    const parsed = parseDataUrl(image.imageUrl)!;
+    const extension = imageExtensions.get(parsed.mediaType.toLowerCase())!;
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(parsed.base64) || parsed.base64.length % 4 !== 0) {
       throw new Error(`ChatGPT web input image ${image.ref} contains invalid base64 data`);
     }

@@ -1,5 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
-import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { closeChatGptBrowserWorkers, validateChatGptWebInputImage } from "./adapters/chatgpt-web/browser-worker";
+import { chatGptWebAttachedInputImages } from "./adapters/chatgpt-web/prompt";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
@@ -497,6 +498,29 @@ async function nativeImagesRequest(
   }
 }
 
+/**
+ * Fail fast at the HTTP boundary: an image ChatGPT Web will actually attach to this turn must
+ * already satisfy the browser worker's format constraint (chatGptImageFilePayloads in
+ * browser-worker.ts), otherwise the turn dies mid-flight -- browser tab opened, quota spent --
+ * with an adapter error instead of an immediate, retryable 400. Only checks images
+ * chatGptWebAttachedInputImages proves will actually be attached (the compiler's own
+ * one-pixel-placeholder and oldest-overflow-drop rules), so a historical image the compiler will
+ * correctly omit from this turn's attachments is never rejected. Compaction requests further trim
+ * history by a JSON byte budget this does not replicate; they are left to the deep validation in
+ * chatGptImageFilePayloads instead of this early check.
+ */
+function findInvalidChatGptWebInputImage(parsed: CodexParsedRequest): string | undefined {
+  if (parsed._compactionRequest) return undefined;
+  for (const [index, image] of chatGptWebAttachedInputImages(parsed.context.messages).entries()) {
+    const invalid = validateChatGptWebInputImage(image.imageUrl);
+    if (invalid) {
+      return `ChatGPT web input image ${index + 1} (${image.role} message) ${invalid}. `
+        + "Inline the image bytes as a base64 data URL (png, jpeg, gif, or webp) before retrying.";
+    }
+  }
+  return undefined;
+}
+
 function toolBridgeMaps(parsed: CodexParsedRequest): {
   toolNsMap: Map<string, { namespace: string; name: string }>;
   freeformToolNames: Set<string>;
@@ -616,6 +640,10 @@ export async function responseRequest(
       "invalid_request_error",
       "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
     );
+  }
+  const invalidWebImage = findInvalidChatGptWebInputImage(parsed);
+  if (invalidWebImage) {
+    return formatErrorResponse(400, "invalid_request_error", invalidWebImage);
   }
 
   const compaction = parsed._compactionRequest === true;
