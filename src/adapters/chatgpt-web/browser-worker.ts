@@ -138,11 +138,6 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
-/**
- * Sending is a bounded browser action, not the open-ended stage that owns it. A stalled renderer
- * must fail this one action instead of leaving the composer looking frozen for the whole budget.
- */
-export const CHATGPT_SEND_ACTION_TIMEOUT_MS = 15_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -1279,6 +1274,54 @@ export class ChatGptBrowserObservationTimeoutError extends Error {
   }
 }
 
+/**
+ * The Send key press threw and ChatGPT then showed no sign of the prompt. The prompt may still have
+ * reached ChatGPT, so Send is never pressed again; the adapter reports an ambiguous submission.
+ */
+export class ChatGptSendPressUnconfirmedError extends Error {
+  constructor(pressFailure: unknown, observationFailure: unknown) {
+    super(
+      "The ChatGPT Send key press failed and ChatGPT showed no sign that it accepted the prompt;"
+      + " Send was not pressed again",
+      { cause: new AggregateError([pressFailure, observationFailure], "Send press and acceptance check failed") },
+    );
+    this.name = "ChatGptSendPressUnconfirmedError";
+  }
+}
+
+/** Where a Stop press came from; every press writes one log line naming it. */
+export type ChatGptStopSite =
+  | "send"
+  | "submission_observation"
+  | "multipart_acknowledgement"
+  | "response_observation";
+
+/**
+ * Presses ChatGPT's Stop button if a generation is visible and logs the press, so a live run can
+ * count every Stop. Stop discards work ChatGPT already accepted: the caller decides that the turn
+ * really has no consumer left.
+ */
+export async function pressVisibleChatGptStop(
+  page: Pick<Page, "locator">,
+  traceId: string | undefined,
+  site: ChatGptStopSite,
+): Promise<boolean> {
+  const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+  if (!await stop.isVisible().catch(() => false)) return false;
+  const turn = traceId ?? "unknown";
+  try {
+    await stop.press("Enter");
+  } catch (error) {
+    console.warn(
+      `[chatgpt-web] browser turn ${turn} could not press Stop site=${site}: `
+      + redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
+    );
+    return false;
+  }
+  console.warn(`[chatgpt-web] browser turn ${turn} pressed Stop site=${site}`);
+  return true;
+}
+
 export async function withChatGptBrowserObservationTimeout<T>(
   operation: Promise<T>,
   timeoutMs = CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS,
@@ -1390,6 +1433,15 @@ interface ChatGptSubmissionBaseline {
   responseTurns: Locator;
   initialTurnIdentities: readonly string[];
   domCache: ChatGptSubmissionDomCache;
+}
+
+interface ChatGptSendContext {
+  traceId?: string;
+  /**
+   * The Codex-side cancellation of the turn, already part of the send's abort signal. Only this
+   * abort may stop a visible generation; the stage deadline shares the abort signal but never does.
+   */
+  cancelSignal?: AbortSignal;
 }
 
 interface ChatGptSubmissionObservationRecovery {
@@ -3056,6 +3108,7 @@ export class ChatGptBrowserWorker {
     graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    traceId?: string,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3069,8 +3122,7 @@ export class ChatGptBrowserWorker {
         // Send was already accepted here, so the server-side generation is still running; without
         // this press it keeps going after the local capability is retired and later claims a dead
         // MCP binding. Same pattern as the post-binding monitoring loop below.
-        const stop = observationPage.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+        await pressVisibleChatGptStop(observationPage, traceId, "submission_observation");
         throw new DOMException("ChatGPT web turn aborted", "AbortError");
       }
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
@@ -3669,6 +3721,7 @@ export class ChatGptBrowserWorker {
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    sendContext: ChatGptSendContext = {},
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
@@ -3691,31 +3744,58 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
+    const traceLabel = sendContext.traceId ?? "unknown";
     try {
       await submissionLifecycle?.onSendActivated?.();
-      await sendButton.press("Enter", {
-        noWaitAfter: true,
-        signal: abortSignal,
-        // runStage still owns the 180-second Bigger Context budget; this only bounds the browser
-        // action itself so a stalled renderer cannot make the whole stage look frozen forever.
-        timeout: CHATGPT_SEND_ACTION_TIMEOUT_MS,
-      });
-      const evidence = await this.waitForSubmissionAcceptedWithRecovery(
-        page,
-        baseline,
-        abortSignal,
-        externalProgress,
-        initialToolBatchRevision,
-        completionTracker,
-        recoverObservation,
-      );
+      // Send is pressed exactly once per attached prompt, whatever happens below.
+      let pressFailure: unknown;
+      try {
+        await sendButton.press("Enter", {
+          noWaitAfter: true,
+          signal: abortSignal,
+          // No action timeout of its own. A renderer busy with a very large message can finish the
+          // key press long after ChatGPT accepted it, so a fixed bound here failed accepted
+          // prompts. runStage owns the budget: 180 s for Bigger Context, 20 s inline.
+          timeout: 0,
+        });
+      } catch (error) {
+        // A stage deadline or a cancellation leaves nothing to observe. Any other press failure
+        // is ambiguous: only the page can tell whether ChatGPT took the prompt.
+        if (abortSignal?.aborted) throw error;
+        pressFailure = error;
+        console.warn(
+          `[chatgpt-web] browser turn ${traceLabel} Send key press failed; checking whether ChatGPT accepted the prompt: `
+          + redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
+        );
+      }
+      let evidence: ChatGptSubmissionEvidence;
+      try {
+        evidence = await this.waitForSubmissionAcceptedWithRecovery(
+          page,
+          baseline,
+          abortSignal,
+          externalProgress,
+          initialToolBatchRevision,
+          completionTracker,
+          recoverObservation,
+        );
+      } catch (error) {
+        if (pressFailure === undefined || abortSignal?.aborted || error instanceof ChatGptWebAdapterError) throw error;
+        throw new ChatGptSendPressUnconfirmedError(pressFailure, error);
+      }
+      if (pressFailure !== undefined) {
+        console.warn(
+          `[chatgpt-web] browser turn ${traceLabel} Send key press failed but ChatGPT accepted the prompt`
+          + ` evidence=${evidence}; the turn continues`,
+        );
+      }
       submissionLifecycle?.onSubmitted?.();
       return evidence;
     } catch (error) {
-      // Neither an aborted send nor a failed one has any local consumer left for a remote
-      // generation ChatGPT may still be running; stop it instead of leaving it to burn quota.
-      const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-      if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+      // Stop discards work ChatGPT may already have accepted, so a local deadline or a failed
+      // browser action never presses it: the adapter reports the outcome instead. Only a turn that
+      // Codex itself cancelled has no consumer left for a generation still running upstream.
+      if (sendContext.cancelSignal?.aborted) await pressVisibleChatGptStop(page, sendContext.traceId, "send");
       throw error;
     }
   }
@@ -3729,6 +3809,7 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    traceId?: string,
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
@@ -3742,8 +3823,7 @@ export class ChatGptBrowserWorker {
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
-        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+        await pressVisibleChatGptStop(page, traceId, "multipart_acknowledgement");
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
@@ -4901,7 +4981,15 @@ export class ChatGptBrowserWorker {
       await diagnostics.capture(page, "effort-selection-complete");
 
       let finalPrompt = prepared.text;
+      const sendContext = { traceId: turn.traceId, cancelSignal: turn.abortSignal };
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
+        // A staged part cannot be taken back once Send is activated, exactly like the final prompt,
+        // so it reports the same send phase: nothing may replay this transaction on a fresh surface.
+        // Acceptance of a part is not acceptance of the task, so onSubmitted stays with the final
+        // prompt.
+        const stageSendLifecycle: Pick<BrowserTurn, "onSendActivated"> = {
+          onSendActivated: () => turn.onSendActivated?.(),
+        };
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
           let stageBaseline = await this.captureSubmissionBaseline(page);
@@ -4930,7 +5018,7 @@ export class ChatGptBrowserWorker {
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
-              undefined,
+              stageSendLifecycle,
               undefined,
               launcherObservationRecovery
                 ? async (...args) => {
@@ -4939,6 +5027,7 @@ export class ChatGptBrowserWorker {
                   return recovered;
                 }
                 : undefined,
+              sendContext,
             ),
           );
           console.info(
@@ -4969,6 +5058,7 @@ export class ChatGptBrowserWorker {
                     return recovered;
                   }
                   : undefined,
+                turn.traceId,
               );
               await this.waitForMultipartAcknowledgement(
                 page,
@@ -4978,6 +5068,8 @@ export class ChatGptBrowserWorker {
                 deadline,
                 acknowledgementSignal,
                 turn.externalProgress,
+                undefined,
+                turn.traceId,
               );
             },
             chatGptSuspensionClock,
@@ -5088,6 +5180,7 @@ export class ChatGptBrowserWorker {
               return recovered;
             }
             : undefined,
+          sendContext,
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
@@ -5106,6 +5199,7 @@ export class ChatGptBrowserWorker {
             return recovered;
           }
           : undefined,
+        turn.traceId,
       );
       await diagnostics.capture(page, "send-accepted");
 
@@ -5164,8 +5258,7 @@ export class ChatGptBrowserWorker {
           throw chatGptBrowserTabClosedError();
         }
         if (turn.abortSignal?.aborted) {
-          const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-          if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+          await pressVisibleChatGptStop(page, turn.traceId, "response_observation");
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
