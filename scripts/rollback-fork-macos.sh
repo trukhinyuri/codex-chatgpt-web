@@ -1,5 +1,6 @@
 #!/bin/bash
-# Put the previous build of Codex Web GPT back into /Applications.
+# Put the previous build of Codex Superpower back into /Applications (the app keeps its file name,
+# Codex Web GPT.app, and its data folder).
 #
 #   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/rollback-fork-macos.sh | bash
 #
@@ -64,7 +65,7 @@ if launcher_running; then
       sleep 5
     done
   fi
-  say "Quitting Codex Web GPT"
+  say "Quitting Codex Superpower"
   if [ "${NOW:-0}" = 1 ]; then
     # A normal quit asks first while turns run; NOW=1 means stop them, which SIGTERM does.
     pkill -TERM -f "$APP_PROC" >/dev/null 2>&1 || true
@@ -72,7 +73,7 @@ if launcher_running; then
     osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
   fi
   for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
-  launcher_running && die "Codex Web GPT did not quit; quit it from its menu and rerun"
+  launcher_running && die "Codex Superpower did not quit; quit it from its menu and rerun"
 fi
 
 # Keep the build we leave, so rolling forward is the same operation.

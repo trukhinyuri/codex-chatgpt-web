@@ -2,17 +2,17 @@
 set -eu
 
 if [ "$#" -lt 1 ]; then
-  echo "Codex Web GPT AppImage runner requires an AppImage path" >&2
+  echo "Codex Superpower AppImage runner requires an AppImage path" >&2
   exit 64
 fi
 APPIMAGE_PATH="$1"
 shift
 case "$APPIMAGE_PATH" in
   /*) ;;
-  *) echo "Codex Web GPT AppImage path must be absolute" >&2; exit 64 ;;
+  *) echo "Codex Superpower AppImage path must be absolute" >&2; exit 64 ;;
 esac
 if [ ! -f "$APPIMAGE_PATH" ] || [ ! -x "$APPIMAGE_PATH" ]; then
-  echo "Codex Web GPT AppImage is unavailable: $APPIMAGE_PATH" >&2
+  echo "Codex Superpower AppImage is unavailable: $APPIMAGE_PATH" >&2
   exit 66
 fi
 
@@ -97,7 +97,7 @@ mkdir "$RUN_DIR/unpack"
 )
 APP_DIR="$RUN_DIR/unpack/squashfs-root"
 if [ ! -x "$APP_DIR/AppRun" ]; then
-  echo "Codex Web GPT AppImage fallback extraction produced no executable AppRun" >&2
+  echo "Codex Superpower AppImage fallback extraction produced no executable AppRun" >&2
   exit 70
 fi
 

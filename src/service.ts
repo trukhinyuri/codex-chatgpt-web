@@ -95,7 +95,7 @@ function assertMacOs(): void {
   if (process.platform !== "darwin") {
     throw new Error(
       "Terminal-managed background services require macOS. "
-      + "Use the Codex Web GPT launcher on Windows or Linux.",
+      + "Use the Codex Superpower launcher on Windows or Linux.",
     );
   }
 }

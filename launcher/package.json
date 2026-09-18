@@ -2,8 +2,12 @@
   "name": "codex-web-gpt-launcher",
   "version": "5.0.8",
   "private": true,
-  "description": "Desktop control center for Codex ChatGPT Web",
-  "author": "miuuyy",
+  "description": "Desktop control center for Codex Superpower",
+  "author": {
+    "name": "Yuri Trukhin",
+    "email": "yuri@trukhin.com",
+    "url": "https://github.com/trukhinyuri"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -42,7 +46,9 @@
   },
   "build": {
     "appId": "dev.codexwebgpt.launcher",
-    "productName": "Codex Web GPT",
+    "productName": "Codex Superpower",
+    "executableName": "Codex Web GPT",
+    "copyright": "Copyright © 2026 Yuri Trukhin. Based on Codex Web GPT by miuuyy and contributors. MIT License.",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
@@ -81,6 +87,7 @@
       "target": ["nsis"]
     },
     "linux": {
+      "executableName": "codex-web-gpt-launcher",
       "category": "Development",
       "icon": "assets/icon.png",
       "target": ["AppImage"]

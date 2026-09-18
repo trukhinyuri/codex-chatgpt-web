@@ -144,11 +144,50 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${manifest.build.nsis.guid}`));
   assert.ok(devProfile.includes(`WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"`));
   assert.match(windowsInstaller, /Get-ItemPropertyValue[\s\S]*InstallLocation/);
-  assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.productName}.exe"`));
+  assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.executableName}.exe"`));
   assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
   assert.match(packageSmoke, /reg\.exe[\s\S]*InstallLocation/);
+});
+
+// Renaming the product to Codex Superpower changes only what people read. Launchers already installed
+// (their updater is vendored in tests/fixtures/updater-86f2d311 and exercised by
+// legacy-updater-contract.test.cjs) find, check and replace the app by these identities.
+test("the renamed product keeps every packaging identity installed launchers depend on", () => {
+  const { PRODUCT_COPYRIGHT } = require("../electron/about.cjs");
+  assert.equal(manifest.build.productName, "Codex Superpower");
+  assert.equal(manifest.build.executableName, "Codex Web GPT", "bundle file name, CFBundleExecutable and the Windows exe");
+  assert.equal(manifest.build.mac.executableName, undefined, "the top-level executableName must apply to macOS");
+  assert.equal(manifest.build.linux.executableName, "codex-web-gpt-launcher", "Linux keeps its previous default executable");
+  assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
+  assert.equal(manifest.name, "codex-web-gpt-launcher");
+  for (const arch of ["arm64", "x64"]) {
+    const archive = manifest.build.artifactName
+      .replace("${version}", manifest.version)
+      .replace("${os}", "mac")
+      .replace("${arch}", arch)
+      .replace("${ext}", "zip");
+    assert.match(archive, new RegExp(`^codex-web-gpt-.+-mac-${arch}\\.zip$`), "the 86f2d311 findPackage pattern");
+  }
+  assert.equal(manifest.build.copyright, PRODUCT_COPYRIGHT, "the About panel and Info.plist show the same copyright");
+  assert.match(manifest.build.copyright, /Yuri Trukhin[\s\S]*Codex Web GPT by miuuyy and contributors[\s\S]*MIT License/);
+  const author = { name: "Yuri Trukhin", email: "yuri@trukhin.com", url: "https://github.com/trukhinyuri" };
+  assert.deepEqual(manifest.author, author);
+  assert.deepEqual(repositoryManifest.author, author);
+
+  const packager = fs.readFileSync(path.join(launcherRoot, "scripts", "package.cjs"), "utf8");
+  assert.doesNotMatch(packager, /productName\}\.app/, "the bundle is found, never derived from productName");
+  assert.match(packager, /findSingleApplication\(verificationRoot\)/);
+  assert.match(packager, /--config\.mac\.extendInfo\.CodexWebGptSourceCommit=/);
+  assert.match(packager, /--config\.mac\.extendInfo\.CodexWebGptSourceState=/);
+  assert.match(packager, /--config\.extraMetadata\.sourceCommit=/);
+  assert.match(packager, /checkMacUpdaterCompatibility\(\{ artifactsDirectory, arch: process\.arch, expectedCommit: sourceCommit \}\)/);
+  const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
+  assert.doesNotMatch(smoke, /"Codex Web GPT\.app"|productName\}\.exe/);
+  assert.match(smoke, /findSingleApplication\(stage\)/);
+  const license = fs.readFileSync(path.join(repositoryRoot, "LICENSE"), "utf8");
+  assert.match(license, /^Copyright \(c\) 2026 codex-chatgpt-web contributors\nCopyright \(c\) 2026 Yuri Trukhin$/m);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

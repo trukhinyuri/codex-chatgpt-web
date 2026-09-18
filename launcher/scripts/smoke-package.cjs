@@ -3,6 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { findSingleApplication } = require("./updater-compatibility.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const artifactsDirectory = path.join(launcherRoot, "artifacts");
@@ -10,6 +11,8 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
+// Bundle, executable and Windows install names follow build.executableName, not the product name.
+const executableName = launcherManifest.build.executableName || launcherManifest.build.productName;
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
@@ -82,8 +85,8 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    macAppBundle = path.join(stage, "Codex Web GPT.app");
-    executable = path.join(macAppBundle, "Contents", "MacOS", "Codex Web GPT");
+    macAppBundle = findSingleApplication(stage);
+    executable = path.join(macAppBundle, "Contents", "MacOS", executableName);
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
@@ -98,7 +101,7 @@ try {
   } else if (process.platform === "win32") {
     const installer = artifact(/-win-x64\.exe$/, "Windows installer");
     run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
-    executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    executable = path.join(windowsInstallLocation(), `${executableName}.exe`);
     command = executable;
     args = ["--launcher-smoke-test"];
   } else {

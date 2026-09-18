@@ -1,6 +1,8 @@
 # AGENTS.md
 
-Instructions for AI coding agents (Codex, Claude Code and others) that install, verify, update or change Codex Superpower (the **Codex Web GPT** app, its bridge, and the CLIProxyAPI connection) from this repository. Human-oriented overview: [README.md](README.md).
+Instructions for AI coding agents (Codex, Claude Code and others) that install, verify, update or change Codex Superpower (the desktop app, its bridge, and the CLIProxyAPI connection) from this repository. Human-oriented overview: [README.md](README.md).
+
+The app shows the name **Codex Superpower**, but its bundle is still `/Applications/Codex Web GPT.app`, its data folder `~/Library/Application Support/Codex Web GPT`, its runtime home `~/.codex-chatgpt-web` and its CLI `codex-chatgpt-web`. The paths and commands below use those names on purpose.
 
 ## Rules
 
@@ -32,7 +34,7 @@ Instructions for AI coding agents (Codex, Claude Code and others) that install, 
 
 ## Set up (launcher, with Computer Use)
 
-Open **Codex Web GPT**. The human performs sign-in and pastes secrets; you drive everything else and screenshot each result.
+Open **Codex Superpower** (`/Applications/Codex Web GPT.app`). The human performs sign-in and pastes secrets; you drive everything else and screenshot each result.
 
 1. **Onboarding.** Choose the language and **With Automation** (the default) unless the human asks for Zero Risk.
 2. **Sign in.** Ask the human to sign in to ChatGPT in the launcher's embedded browser. Then press **Run browser smoke test** and wait for success.
@@ -105,12 +107,13 @@ Evidence lives here:
 | `ChatGPT stopped responding after the task started` or `did not confirm that the prompt was sent` | The ChatGPT tab was slow or hidden, often under heavy CPU load | Keep the launcher running with **Show browser during turns** on, and retry |
 | `exceeds the measured … ChatGPT browser message boundary` | The context does not fit one message | Turn on Bigger Context, or run `/compact` |
 | `missing cwd in trusted Codex environment context` | Not expected in this fork, including skills outside Git and multi-folder projects | Collect the turn's rollout and the matching `trusted environment unavailable (…)` line from `launcher.jsonl`, then open an issue in this repository |
-| `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Web GPT |
+| `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Superpower |
 
 ## Develop
 
 - Use Bun 1.4.0 exactly. Install with `bun install --frozen-lockfile` in the repository root and in `launcher/`.
 - `bun run verify` must pass before anything reaches `main`: installed launchers build `main` within an hour, refuse a build that fails it, and roll back a build that does not start cleanly. A new launcher start path must still call `reportLauncherStartup` with `healthy` or `unhealthy`, or every update of it is rolled back. Run tests from a normal folder, not `/tmp`; runtime tests reject non-durable paths.
+- Keep the packaging identities that installed launchers depend on: `build.executableName` "Codex Web GPT" (the bundle name and executable), `appId`, `artifactName`, the `CodexWebGptSource*` Info.plist stamps, the userData folder and the browser partition. Launchers released before the rename install only packages that keep them; `launcher/scripts/updater-compatibility.cjs` fails `bun run app:package` otherwise, and `launcher/tests/legacy-updater-contract.test.cjs` runs that older updater against the new layout.
 - Branches: a fix meant for upstream starts from `upstream/main` in `fix/<topic>` with a regression test; a fork-only change starts from `main` in `fork/<topic>`. Merge both into `main`, and keep `fork-build` equal to `main` for older installers.
 - Keep the Full-harness contract in `src/adapters/chatgpt-web/prompt.ts` free of the vocabulary that `tests/prompt-contract.test.ts` excludes.
 - Launcher interface text needs all five languages in `launcher/src/i18n.ts`.

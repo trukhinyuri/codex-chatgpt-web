@@ -1,7 +1,7 @@
 import type { Language } from "./types";
 
 const en = {
-  product: "Codex Web GPT",
+  product: "Codex Superpower",
   devBadge: "DEV",
   devSetupTitle: "Set up the isolated DEV profile",
   devSetupSubtitle: "This browser, account, configuration, and runtime data stay separate from the normal launcher and Codex.",
@@ -29,7 +29,7 @@ const en = {
   chooseLanguageHint: "You can change this later in Settings.",
   continue: "Continue",
   supportTitle: "Before we start",
-  supportBody: "Star the repository and open my X profile to help more developers find Codex Web GPT. I share product updates and useful Codex tips on X.",
+  supportBody: "Star the repository and open my X profile to help more developers find Codex Superpower. I share product updates and useful Codex tips on X.",
   star: "Star on GitHub",
   starred: "GitHub opened",
   follow: "Open my X",
@@ -69,7 +69,7 @@ const en = {
   browserReady: "Browser ready",
   showBrowser: "Show ChatGPT",
   hideBrowser: "Hide ChatGPT",
-  setupTitle: "Set up Codex Web GPT",
+  setupTitle: "Set up Codex Superpower",
   setupSubtitle: "Three checks make ChatGPT Web available in the native Codex model picker.",
   coreSetup: "Core setup",
   interactionMode: "ChatGPT interaction",
@@ -237,7 +237,7 @@ const en = {
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Codex Superpower",
   devBadge: "DEV",
   devSetupTitle: "设置隔离的 DEV 配置",
   devSetupSubtitle: "此浏览器、账户、配置和运行数据与普通启动器及 Codex 完全分离。",
@@ -265,7 +265,7 @@ const zh: Record<keyof typeof en, string> = {
   chooseLanguageHint: "稍后可以在设置中更改。",
   continue: "继续",
   supportTitle: "开始之前",
-  supportBody: "请为仓库 Star，并打开我的 X 主页，帮助更多开发者发现 Codex Web GPT。我会在 X 分享产品更新和实用的 Codex 技巧。",
+  supportBody: "请为仓库 Star，并打开我的 X 主页，帮助更多开发者发现 Codex Superpower。我会在 X 分享产品更新和实用的 Codex 技巧。",
   star: "在 GitHub 上 Star",
   starred: "已打开 GitHub",
   follow: "打开我的 X",
@@ -305,7 +305,7 @@ const zh: Record<keyof typeof en, string> = {
   browserReady: "浏览器已就绪",
   showBrowser: "显示 ChatGPT",
   hideBrowser: "隐藏 ChatGPT",
-  setupTitle: "设置 Codex Web GPT",
+  setupTitle: "设置 Codex Superpower",
   setupSubtitle: "完成三个检查，即可在原生 Codex 模型列表中使用 ChatGPT Web。",
   coreSetup: "核心设置",
   interactionMode: "ChatGPT 交互方式",
@@ -473,7 +473,7 @@ const zh: Record<keyof typeof en, string> = {
 };
 
 const ja: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Codex Superpower",
   devBadge: "DEV",
   devSetupTitle: "隔離された DEV プロファイルをセットアップ",
   devSetupSubtitle: "このブラウザー、アカウント、設定、ランタイムデータは、通常のランチャーおよび Codex から完全に分離されます。",
@@ -501,7 +501,7 @@ const ja: Record<keyof typeof en, string> = {
   chooseLanguageHint: "後から設定で変更できます。",
   continue: "続ける",
   supportTitle: "開始する前に",
-  supportBody: "より多くの開発者に Codex Web GPT を知ってもらうため、リポジトリに Star を付け、私の X プロフィールを開いてください。X では製品のアップデートや便利な Codex の使い方を紹介しています。",
+  supportBody: "より多くの開発者に Codex Superpower を知ってもらうため、リポジトリに Star を付け、私の X プロフィールを開いてください。X では製品のアップデートや便利な Codex の使い方を紹介しています。",
   star: "GitHub で Star",
   starred: "GitHub を開きました",
   follow: "X を開く",
@@ -541,7 +541,7 @@ const ja: Record<keyof typeof en, string> = {
   browserReady: "ブラウザーの準備完了",
   showBrowser: "ChatGPT を表示",
   hideBrowser: "ChatGPT を隠す",
-  setupTitle: "Codex Web GPT をセットアップ",
+  setupTitle: "Codex Superpower をセットアップ",
   setupSubtitle: "3 つの確認を完了すると、ネイティブ Codex のモデル選択画面で ChatGPT Web を使用できます。",
   coreSetup: "基本セットアップ",
   interactionMode: "ChatGPT の操作方法",
@@ -709,7 +709,7 @@ const ja: Record<keyof typeof en, string> = {
 };
 
 const ko: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Codex Superpower",
   devBadge: "DEV",
   devSetupTitle: "격리된 DEV 프로필 설정",
   devSetupSubtitle: "이 브라우저, 계정, 구성 및 런타임 데이터는 일반 런처와 Codex로부터 완전히 분리됩니다.",
@@ -737,7 +737,7 @@ const ko: Record<keyof typeof en, string> = {
   chooseLanguageHint: "나중에 설정에서 변경할 수 있습니다.",
   continue: "계속",
   supportTitle: "시작하기 전에",
-  supportBody: "더 많은 개발자가 Codex Web GPT를 찾을 수 있도록 저장소에 Star를 누르고 제 X 프로필을 열어주세요. X에서 제품 업데이트와 유용한 Codex 활용 팁을 공유합니다.",
+  supportBody: "더 많은 개발자가 Codex Superpower를 찾을 수 있도록 저장소에 Star를 누르고 제 X 프로필을 열어주세요. X에서 제품 업데이트와 유용한 Codex 활용 팁을 공유합니다.",
   star: "GitHub에서 Star",
   starred: "GitHub 열림",
   follow: "X 열기",
@@ -777,7 +777,7 @@ const ko: Record<keyof typeof en, string> = {
   browserReady: "브라우저 준비 완료",
   showBrowser: "ChatGPT 표시",
   hideBrowser: "ChatGPT 숨기기",
-  setupTitle: "Codex Web GPT 설정",
+  setupTitle: "Codex Superpower 설정",
   setupSubtitle: "세 가지 확인을 완료하면 네이티브 Codex 모델 선택기에서 ChatGPT Web을 사용할 수 있습니다.",
   coreSetup: "기본 설정",
   interactionMode: "ChatGPT 상호작용",
@@ -945,7 +945,7 @@ const ko: Record<keyof typeof en, string> = {
 };
 
 const zhTW: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Codex Superpower",
   devBadge: "DEV",
   devSetupTitle: "設定隔離的 DEV 設定檔",
   devSetupSubtitle: "此瀏覽器、帳戶、設定與執行階段資料，會與一般啟動器及 Codex 完全分離。",
@@ -973,7 +973,7 @@ const zhTW: Record<keyof typeof en, string> = {
   chooseLanguageHint: "稍後可以在設定中變更。",
   continue: "繼續",
   supportTitle: "開始之前",
-  supportBody: "請為儲存庫按 Star，並開啟我的 X 主頁，幫助更多開發者發現 Codex Web GPT。我會在 X 分享產品更新和實用的 Codex 技巧。",
+  supportBody: "請為儲存庫按 Star，並開啟我的 X 主頁，幫助更多開發者發現 Codex Superpower。我會在 X 分享產品更新和實用的 Codex 技巧。",
   star: "在 GitHub 上按 Star",
   starred: "已開啟 GitHub",
   follow: "開啟我的 X",
@@ -1013,7 +1013,7 @@ const zhTW: Record<keyof typeof en, string> = {
   browserReady: "瀏覽器已就緒",
   showBrowser: "顯示 ChatGPT",
   hideBrowser: "隱藏 ChatGPT",
-  setupTitle: "設定 Codex Web GPT",
+  setupTitle: "設定 Codex Superpower",
   setupSubtitle: "完成三項檢查，即可在原生 Codex 模型清單中使用 ChatGPT Web。",
   coreSetup: "核心設定",
   interactionMode: "ChatGPT 互動方式",

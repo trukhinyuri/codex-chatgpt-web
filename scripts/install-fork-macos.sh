@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build Codex Web GPT from the trukhinyuri fork and install it on macOS.
+# Build Codex Superpower from the trukhinyuri fork and install it on macOS. The app keeps its file
+# name, /Applications/Codex Web GPT.app, and its data folder; only the name it shows has changed.
 #
 #   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | bash
 #
@@ -146,17 +147,17 @@ active_turns() {
   echo $(( http + browser ))
 }
 if launcher_running; then
-  [ "$WAIT_FOR_IDLE" = 1 ] || die "quit Codex Web GPT from its menu, or rerun with WAIT_FOR_IDLE=1 (the package will be reused)"
+  [ "$WAIT_FOR_IDLE" = 1 ] || die "quit Codex Superpower from its menu, or rerun with WAIT_FOR_IDLE=1 (the package will be reused)"
   say "Waiting until Codex has no active ChatGPT Web turn for 60 seconds"
   quiet=0
   while [ "$quiet" -lt 60 ]; do
     if [ "$(active_turns)" = 0 ]; then quiet=$((quiet + 5)); else quiet=0; fi
     sleep 5
   done
-  say "Quitting Codex Web GPT"
+  say "Quitting Codex Superpower"
   osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
   for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
-  launcher_running && die "Codex Web GPT did not quit; quit it from its menu and rerun"
+  launcher_running && die "Codex Superpower did not quit; quit it from its menu and rerun"
 fi
 STAGE="$(mktemp -d)"
 ditto -x -k "$ZIP" "$STAGE"

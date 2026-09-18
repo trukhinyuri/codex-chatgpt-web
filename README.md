@@ -1,6 +1,6 @@
 # Codex Superpower
 
-One model list in [Codex](https://developers.openai.com/codex) (app and CLI) for everything you pay for: the ChatGPT models on your ChatGPT plan, from Instant to Pro, and, through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), Claude, Gemini, GLM and other subscription models. Codex keeps its own sign-in, features, files, tools, approvals and tasks; a local bridge in the **Codex Web GPT** desktop app sends each turn to ChatGPT web, to OpenAI, or to CLIProxyAPI.
+One model list in [Codex](https://developers.openai.com/codex) (app and CLI) for everything you pay for: the ChatGPT models on your ChatGPT plan, from Instant to Pro, and, through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), Claude, Gemini, GLM and other subscription models. Codex keeps its own sign-in, features, files, tools, approvals and tasks; a local bridge in the **Codex Superpower** desktop app sends each turn to ChatGPT web, to OpenAI, or to CLIProxyAPI.
 
 Codex Superpower started as a fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) (formerly `trukhinyuri/codex-chatgpt-web`). It fixes failures seen in daily use, installs from source on macOS, and keeps itself up to date from this repository's `main` branch: every update must pass the full test suite and start cleanly, or the previous build stays in place.
 
@@ -14,7 +14,9 @@ On macOS (Apple silicon or Intel) with Git, Node.js and Bun 1.4.0:
 curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | bash
 ```
 
-The script clones this repository into `~/.codex-chatgpt-web-source`, runs `bun run verify` (all tests), packages the app, installs **Codex Web GPT** into `/Applications`, and ends with `RESULT installed commit=…`. It tells you exactly what to install if a prerequisite is missing.
+The script clones this repository into `~/.codex-chatgpt-web-source`, runs `bun run verify` (all tests), packages the app, installs **Codex Superpower** into `/Applications`, and ends with `RESULT installed commit=…`. It tells you exactly what to install if a prerequisite is missing.
+
+The app shows the name Codex Superpower. Its bundle is still `/Applications/Codex Web GPT.app`, its data folder `~/Library/Application Support/Codex Web GPT` and its runtime home `~/.codex-chatgpt-web`, so the paths below keep the old name; your ChatGPT sign-in and settings carry over unchanged.
 
 Then, in the launcher:
 
@@ -31,7 +33,7 @@ Paste one of these prompts into Codex or Claude Code on the Mac you are setting 
 **Install and configure**
 
 ```text
-Install and configure Codex Web GPT from https://github.com/trukhinyuri/codex-superpower on this Mac.
+Install and configure Codex Superpower from https://github.com/trukhinyuri/codex-superpower on this Mac.
 Follow the repository's AGENTS.md. Run the installer with WAIT_FOR_IDLE=1, install any prerequisite it
 names, and report its RESULT line. Then use Computer Use to walk me through the launcher: I sign in to
 ChatGPT and paste the Tunnel ID and API key myself; you run the smoke test, Install models, Connect
@@ -42,7 +44,7 @@ harness and Verify runtime, and tell me when to restart Codex. Finish with the c
 **Verify an existing install with Computer Use**
 
 ```text
-Verify Codex Web GPT on this Mac using the "Verify" section of AGENTS.md in
+Verify Codex Superpower on this Mac using the "Verify" section of AGENTS.md in
 https://github.com/trukhinyuri/codex-superpower. Run doctor, send one test turn with a ChatGPT Web model,
 and use Computer Use to screenshot the launcher's Browser view while the turn runs and confirm that the
 ChatGPT composer shows the same mode as the model you chose. Do not quit the launcher while a turn is
@@ -52,7 +54,7 @@ running. Report every check as passed or failed, with the exact error text.
 **Update without interrupting work**
 
 ```text
-Update Codex Web GPT to the latest main of https://github.com/trukhinyuri/codex-superpower without
+Update Codex Superpower to the latest main of https://github.com/trukhinyuri/codex-superpower without
 interrupting running Codex work: follow the "Update" section of AGENTS.md, then run doctor and report the
 installer's RESULT line.
 ```
@@ -171,7 +173,7 @@ When an update fails to build or pass its tests, is rolled back, or the local ru
 | `ChatGPT rate limit … Please try again in Ns` | ChatGPT is throttling the account | Nothing: Codex waits and retries. Fewer parallel tasks and subagents help |
 | ChatGPT stopped a tool call before it ran | ChatGPT's own check stopped the call; it never reached Codex | Rephrase the request as one clear operation, or run that step with a native Codex model |
 | `exceeds the measured … ChatGPT browser message boundary` | The context no longer fits one message | Turn on Bigger Context, or run `/compact` |
-| `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Web GPT |
+| `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Superpower |
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), **Activity** and **Settings → Run doctor** in the launcher.
 
@@ -181,7 +183,7 @@ Building from source requires Bun 1.4.0 exactly.
 
 ```bash
 git clone https://github.com/trukhinyuri/codex-superpower.git
-cd codex-chatgpt-web
+cd codex-superpower
 bun install --frozen-lockfile && (cd launcher && bun install --frozen-lockfile)
 bun run verify
 bun run app

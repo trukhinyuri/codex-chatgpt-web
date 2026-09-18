@@ -2707,7 +2707,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Codex Web GPT</h1>
+      <h1>Codex Superpower</h1>
       <p>{message}</p>
     </main>
   );

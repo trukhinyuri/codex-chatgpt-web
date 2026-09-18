@@ -41,6 +41,7 @@ const {
   writeStartupHealth,
 } = require("./source-update.cjs");
 const { createProblemReporter } = require("./problem-report.cjs");
+const { aboutPanelOptions } = require("./about.cjs");
 const { createCliProxyPanel } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
@@ -251,16 +252,16 @@ function trayImage() {
 
 const NATIVE_COPY = Object.freeze({
   "en": Object.freeze({
-    openLauncher: "Open Codex Web GPT",
+    openLauncher: "Open Codex Superpower",
     quit: "Quit",
     exportDiagnostics: "Export privacy-safe diagnostics",
     cancel: "Cancel",
     remove: "Remove",
-    removeTitle: "Remove Codex Web GPT",
+    removeTitle: "Remove Codex Superpower",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
     retry: "Retry",
-    startupTitle: "Codex Web GPT could not start",
+    startupTitle: "Codex Superpower could not start",
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
     startupCleanupFailed: "Startup cleanup failed",
     catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
@@ -270,7 +271,7 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "Report this one",
     reportNotNow: "Not now",
     reportNever: "Never",
-    quitRunningTitle: "Codex is running {count} task(s) through Codex Web GPT",
+    quitRunningTitle: "Codex is running {count} task(s) through Codex Superpower",
     quitRunningDetail: "Quitting stops them now. Keep the launcher running to let them finish.",
     quitKeepRunning: "Keep running",
     quitAnyway: "Quit and stop them",
@@ -280,16 +281,16 @@ const NATIVE_COPY = Object.freeze({
     updateNow: "Install now and stop them",
   }),
   "zh-CN": Object.freeze({
-    openLauncher: "打开 Codex Web GPT",
+    openLauncher: "打开 Codex Superpower",
     quit: "退出",
     exportDiagnostics: "导出隐私安全诊断",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Codex Superpower",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
     retry: "重试",
-    startupTitle: "Codex Web GPT 无法启动",
+    startupTitle: "Codex Superpower 无法启动",
     startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
     startupCleanupFailed: "启动清理失败",
     catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
@@ -299,7 +300,7 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "报告这一次",
     reportNotNow: "以后再说",
     reportNever: "从不",
-    quitRunningTitle: "Codex 正通过 Codex Web GPT 运行 {count} 个任务",
+    quitRunningTitle: "Codex 正通过 Codex Superpower 运行 {count} 个任务",
     quitRunningDetail: "现在退出会停止这些任务。保持启动器运行可以让它们完成。",
     quitKeepRunning: "保持运行",
     quitAnyway: "退出并停止",
@@ -309,16 +310,16 @@ const NATIVE_COPY = Object.freeze({
     updateNow: "立即安装并停止任务",
   }),
   "zh-TW": Object.freeze({
-    openLauncher: "開啟 Codex Web GPT",
+    openLauncher: "開啟 Codex Superpower",
     quit: "結束",
     exportDiagnostics: "匯出隱私安全診斷",
     cancel: "取消",
     remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
+    removeTitle: "移除 Codex Superpower",
     removeMessage: "從 Codex 中移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入設定檔會保留。Codex 需要重新啟動一次。",
     retry: "重試",
-    startupTitle: "Codex Web GPT 無法啟動",
+    startupTitle: "Codex Superpower 無法啟動",
     startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
     startupCleanupFailed: "啟動清理失敗",
     catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
@@ -328,7 +329,7 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "回報這一次",
     reportNotNow: "稍後再說",
     reportNever: "永不",
-    quitRunningTitle: "Codex 正透過 Codex Web GPT 執行 {count} 個工作",
+    quitRunningTitle: "Codex 正透過 Codex Superpower 執行 {count} 個工作",
     quitRunningDetail: "現在結束會停止這些工作。讓啟動器保持執行即可讓它們完成。",
     quitKeepRunning: "保持執行",
     quitAnyway: "結束並停止",
@@ -338,16 +339,16 @@ const NATIVE_COPY = Object.freeze({
     updateNow: "立即安裝並停止工作",
   }),
   "ja": Object.freeze({
-    openLauncher: "Codex Web GPT を開く",
+    openLauncher: "Codex Superpower を開く",
     quit: "終了",
     exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
     cancel: "キャンセル",
     remove: "削除",
-    removeTitle: "Codex Web GPT を削除",
+    removeTitle: "Codex Superpower を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
     retry: "再試行",
-    startupTitle: "Codex Web GPT を起動できませんでした",
+    startupTitle: "Codex Superpower を起動できませんでした",
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
     startupCleanupFailed: "起動後のクリーンアップに失敗しました",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
@@ -357,7 +358,7 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "今回だけ報告",
     reportNotNow: "後で",
     reportNever: "報告しない",
-    quitRunningTitle: "Codex は Codex Web GPT 経由で {count} 件のタスクを実行中です",
+    quitRunningTitle: "Codex は Codex Superpower 経由で {count} 件のタスクを実行中です",
     quitRunningDetail: "今終了するとタスクは停止します。完了させるにはランチャーを起動したままにしてください。",
     quitKeepRunning: "起動したままにする",
     quitAnyway: "終了して停止",
@@ -367,16 +368,16 @@ const NATIVE_COPY = Object.freeze({
     updateNow: "今すぐインストールして停止",
   }),
   "ko": Object.freeze({
-    openLauncher: "Codex Web GPT 열기",
+    openLauncher: "Codex Superpower 열기",
     quit: "종료",
     exportDiagnostics: "개인정보가 보호된 진단 정보 내보내기",
     cancel: "취소",
     remove: "제거",
-    removeTitle: "Codex Web GPT 제거",
+    removeTitle: "Codex Superpower 제거",
     removeMessage: "Codex에서 ChatGPT Web 모델을 제거하고 이전 모델 경로를 복원할까요?",
     removeDetail: "런처의 ChatGPT 로그인 프로필은 유지됩니다. Codex를 한 번 다시 시작해야 합니다.",
     retry: "다시 시도",
-    startupTitle: "Codex Web GPT를 시작할 수 없습니다",
+    startupTitle: "Codex Superpower를 시작할 수 없습니다",
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
@@ -386,7 +387,7 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "이번만 보고",
     reportNotNow: "나중에",
     reportNever: "보고하지 않음",
-    quitRunningTitle: "Codex가 Codex Web GPT로 작업 {count}개를 실행 중입니다",
+    quitRunningTitle: "Codex가 Codex Superpower로 작업 {count}개를 실행 중입니다",
     quitRunningDetail: "지금 종료하면 작업이 중지됩니다. 작업을 끝내려면 런처를 계속 실행하세요.",
     quitKeepRunning: "계속 실행",
     quitAnyway: "종료하고 중지",
@@ -1038,7 +1039,7 @@ function registerIpc({ logger, stateStore }) {
     const copy = nativeCopyFor(stateStore.read().language);
     const result = await dialog.showSaveDialog(mainWindow, {
       title: copy.exportDiagnostics,
-      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
+      defaultPath: path.join(app.getPath("documents"), `codex-superpower-diagnostics-${date}.jsonl`),
       filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
     });
     if (result.canceled || !result.filePath) return null;
@@ -1219,7 +1220,7 @@ async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) 
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Superpower`);
     }
     // An update drains the runtime and fails instead of cancelling turns that started meanwhile.
     if (preserveActiveTurns) await runtimeSupervisor?.shutdown();
@@ -1370,6 +1371,17 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  // The About panel names this fork, its author and the original project; without these options
+  // macOS builds it from Info.plist alone.
+  try {
+    app.setAboutPanelOptions(aboutPanelOptions({
+      displayName: LAUNCHER_PROFILE.displayName,
+      version: app.getVersion(),
+      commit: LAUNCHER_MANIFEST.sourceCommit,
+    }));
+  } catch (error) {
+    logger.warn("launcher.about_panel_unavailable", { message: error instanceof Error ? error.message : String(error) });
+  }
   // Packaged builds of this fork report problems as GitHub issues, with the user's consent.
   if (app.isPackaged && !IS_DEV_PROFILE && SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) {
     problemReporter = createProblemReporter({
@@ -1672,7 +1684,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
+          ? "Another process owns the configured Codex Superpower runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
