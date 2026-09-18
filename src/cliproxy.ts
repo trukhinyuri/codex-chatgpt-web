@@ -22,6 +22,7 @@ import {
 } from "./responses/compaction";
 import { BRIDGE_REASONING_PREFIX } from "./responses/reasoning-envelope";
 import { CHATGPT_WEB_MODEL_PREFIX } from "./chatgpt-web-models";
+import { catalogRowRejection, withinCatalogPage, withoutInvalidOptionalFields } from "./model-catalog-schema";
 
 type JsonObject = Record<string, unknown>;
 export type CliProxyFetch = (request: Request) => Promise<Response>;
@@ -227,29 +228,49 @@ async function fetchProxyCatalog(
 
 /**
  * Add the proxy's models after the native and ChatGPT Web rows. A slug the native catalog already
- * has stays native: the user's own Codex sign-in serves it.
+ * has stays native: the user's own Codex sign-in serves it. Codex rejects the whole catalog when one
+ * row breaks its schema, so a proxy row it would reject is left out and invalid optional fields are
+ * removed; the result stays within the 100 rows Codex Desktop reads, dropping proxy rows only.
  */
-export function mergeCliProxyModels(catalog: JsonObject, proxyModels: JsonObject[]): { catalog: JsonObject; added: string[] } {
+export function mergeCliProxyModels(catalog: JsonObject, proxyModels: JsonObject[]): {
+  catalog: JsonObject;
+  added: string[];
+  rejected: Array<{ slug: string; field: string }>;
+  dropped: string[];
+} {
   const models = Array.isArray(catalog.models) ? catalog.models.filter(isObject) : [];
   const present = new Set(models.map(model => model.slug).filter((slug): slug is string => typeof slug === "string"));
   const basePriority = models.reduce((max, model) => (
     typeof model.priority === "number" && Number.isSafeInteger(model.priority) ? Math.max(max, model.priority) : max
   ), 0);
-  const added: string[] = [];
+  const rejected: Array<{ slug: string; field: string }> = [];
   const extra: JsonObject[] = [];
   for (const [index, source] of proxyModels.entries()) {
     const slug = source.slug as string;
     if (present.has(slug) || slug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) continue;
-    present.add(slug);
-    added.push(slug);
-    extra.push({
-      ...structuredClone(source),
+    const candidate = {
+      ...withoutInvalidOptionalFields(source).row,
       // Served by this Responses-compatible bridge; false would drop it from spawn_agent.
       supported_in_api: true,
       priority: basePriority + 1 + index,
-    });
+    };
+    const field = catalogRowRejection(candidate);
+    if (field) {
+      rejected.push({ slug, field });
+      continue;
+    }
+    present.add(slug);
+    extra.push(candidate);
   }
-  return { catalog: { ...catalog, models: [...models, ...extra] }, added };
+  const proxyRows = new Set(extra);
+  const page = withinCatalogPage([...models, ...extra], row => proxyRows.has(row));
+  const dropped = new Set(page.dropped);
+  return {
+    catalog: { ...catalog, models: page.models },
+    added: extra.map(row => row.slug as string).filter(slug => !dropped.has(slug)),
+    rejected,
+    dropped: page.dropped,
+  };
 }
 
 /** Merge the proxy's models into a catalog Codex is about to receive. Never fails the catalog. */
@@ -276,6 +297,12 @@ export async function augmentCatalogWithCliProxy(
   }
   try {
     const merged = mergeCliProxyModels(catalog, await fetchProxyCatalog(connection, incoming, options.fetchImpl ?? fetch));
+    if (merged.rejected.length > 0) {
+      console.warn(`[codex-chatgpt-web] cliproxy_models_rejected ${JSON.stringify({ models: merged.rejected })}`);
+    }
+    if (merged.dropped.length > 0) {
+      console.warn(`[codex-chatgpt-web] cliproxy_models_over_page ${JSON.stringify({ models: merged.dropped })}`);
+    }
     saveRoutes(home, { native: nativeSlugs, proxy: merged.added });
     return merged.catalog;
   } catch (error) {
