@@ -157,8 +157,30 @@ export function withoutRetiredTurnHandles(contextJson: string): string {
   // Match decoded string values: in serialized JSON a newline's `n` is a word character
   // immediately before the handle. Leave structural keys and native tool-call IDs intact.
   return JSON.stringify(JSON.parse(contextJson, (_key, value: unknown) => typeof value === "string"
-    ? value.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`)
+    ? scrubRetiredTurnHandleText(value)
     : value));
+}
+
+/**
+ * A replayed tool result can itself be a JSON-encoded blob (for example a previous tool call's own
+ * output) carried as one plain-text value. Left alone, that inner layer is still raw serialized
+ * JSON: a handle right after one of its own escaped newlines reintroduces the same word-character
+ * boundary gap the outer decode above already closed. Decode one layer deeper first so the scrub
+ * always runs against real characters, not the fragile literal `\n` text of an un-decoded escape.
+ */
+function scrubRetiredTurnHandleText(value: string): string {
+  const trimmed = value.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const nested: unknown = JSON.parse(value);
+      if (nested !== null && typeof nested === "object") {
+        return withoutRetiredTurnHandles(JSON.stringify(nested));
+      }
+    } catch {
+      // Not actually JSON-encoded; fall through and scrub it as plain text below.
+    }
+  }
+  return value.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`);
 }
 
 /** ChatGPT accepts at most this many attachments on one message. */

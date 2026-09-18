@@ -44,6 +44,21 @@ test("history handle cleanup works on decoded text and preserves native call ide
   expect(cleaned.literal).toBe(context.literal);
 });
 
+test("history handle cleanup decodes a nested JSON-encoded tool result before scrubbing", () => {
+  // A replayed tool result can itself be a JSON-serialized blob carried as one string value (for
+  // example a previous tool call's own output). Its escaped newlines must not hide a handle from
+  // the scrub the way an un-decoded top-level escape already used to.
+  const nested = {
+    note: ["turn", "request", "binding"].map(kind => `first line\n${kind}_${"B".repeat(32)}\tlast line`),
+  };
+  const context = { role: "tool", content: JSON.stringify(nested) };
+  const cleaned = JSON.parse(withoutRetiredTurnHandles(JSON.stringify(context)));
+  const cleanedNested = JSON.parse(cleaned.content);
+  expect(cleanedNested.note).toEqual(
+    ["turn", "request", "binding"].map(kind => `first line\n[retired ${kind} handle]\tlast line`),
+  );
+});
+
 test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("max");
