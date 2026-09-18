@@ -126,6 +126,33 @@ test("launcher UI localizes MCP verification progress and doctor check messages"
 
 
 
+test("the connector checklist speaks every launcher language and keeps its placeholders", () => {
+  const { copyFor, localizeRuntimeMessage } = loadI18nModule();
+  const english = copyFor("en");
+  const keys = Object.keys(english).filter(key => key.startsWith("connector") && key !== "connectorName"
+    || key === "doctorChatGptReachedTunnel");
+  assert.ok(keys.length >= 18, `expected the checklist keys, found ${keys.length}`);
+  for (const language of Object.keys(languages)) {
+    const copy = copyFor(language);
+    for (const key of keys) {
+      assert.equal(typeof copy[key], "string", `${language}.${key}`);
+      assert.ok(copy[key].trim(), `${language}.${key} is empty`);
+      if (language !== "en") assert.notEqual(copy[key], english[key], `${language}.${key} is untranslated`);
+      for (const placeholder of english[key].match(/\{[a-z]+\}/g) ?? []) {
+        assert.ok(copy[key].includes(placeholder), `${language}.${key} lost ${placeholder}`);
+      }
+    }
+    const reached = "ChatGPT reached this tunnel at 2026-09-18T08:27:03.000Z";
+    const localized = localizeRuntimeMessage(copy, reached, "connector", language);
+    assert.equal(localized, language === "en"
+      ? reached
+      : copy.doctorChatGptReachedTunnel.replace("{time}", () => "2026-09-18T08:27:03.000Z"));
+    assert.equal(localizeRuntimeMessage(copy, reached, "tunnel-runtime", language), reached);
+  }
+  assert.match(appSource, /<ConnectorChecklist/);
+  assert.match(appSource, /api\.onConnectorReadiness\(/);
+});
+
 test("native dialogs and IPC accept exactly the renderer's supported languages", () => {
   const main = read("launcher", "electron", "main.cjs");
   const copySource = main.slice(main.indexOf("const NATIVE_COPY ="), main.indexOf("function updateTrayMenu("));

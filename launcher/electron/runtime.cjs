@@ -1016,6 +1016,7 @@ class RuntimeHost {
       message: "Installing ChatGPT Web models into Codex",
       successMessage: "Codex integration installed",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      preserveTunnel: true,
     });
     return { ...result, mode };
   }
@@ -1092,6 +1093,8 @@ class RuntimeHost {
       message: enabled ? "Enabling Bigger Context" : "Disabling Bigger Context",
       successMessage: enabled ? "Bigger Context enabled; restart Codex" : "Standard context restored; restart Codex",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      // Bigger Context changes only the bridge; the tunnel and ChatGPT's connector keep running.
+      preserveTunnel: true,
     });
     return { ...result, mode, enabled: enabled === true };
   }
@@ -1117,6 +1120,7 @@ class RuntimeHost {
       message: enabled ? "Enabling Skills as files" : "Disabling Skills as files",
       successMessage: enabled ? "Skills as files enabled" : "Inline skills restored",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      preserveTunnel: true,
     };
     const result = development
       ? await this.runDevSetup("skill-attachments", args, options)
@@ -1151,6 +1155,7 @@ class RuntimeHost {
         ? `Zero Risk Pro installed${this.launcherProfile === "production" ? "; restart Codex" : ""}`
         : `Default Zero Risk model restored${this.launcherProfile === "production" ? "; restart Codex" : ""}`,
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      preserveTunnel: true,
     };
     const result = this.launcherProfile === "development"
       ? await this.runDevSetup("zero-risk-pro", args, options)
@@ -1245,6 +1250,8 @@ class RuntimeHost {
         successMessage: "Local MCP tools are ready",
         timeoutMs: MCP_SETUP_TIMEOUT_MS,
         afterRuntimeReady,
+        // Reconnecting with the same credentials must not drop a tunnel ChatGPT is pairing with.
+        preserveTunnel: targetMode === this.runtimeConfigSnapshot().config?.browserInteractionMode,
       });
     }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
@@ -1381,7 +1388,9 @@ class RuntimeHost {
       }
       runtimeTransitionStarted = true;
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
-      else await this.supervisor.stopForSetup();
+      // Tunnel-neutral changes restart only the daemon; the supervisor restarts the tunnel after
+      // setup only if the new configuration would start a different one.
+      else await this.supervisor.stopForSetup({ preserveTunnel: options.preserveTunnel === true });
       setupCommandStarted = true;
       const result = await this.run(name, args, options);
       const runtime = await this.supervisor.startIfConfigured();

@@ -479,6 +479,9 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
       setTimeout,
       updateIdleWait: null,
       updateInstallRequested: false,
+      // No connector is being paired in these scenarios.
+      connectorMonitor: null,
+      updateDeferredForPairingLogged: false,
       activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
       runtimeActivity: async () => activity(),
       launcherLanguage: () => "en",
@@ -537,6 +540,52 @@ test("a click on a waiting update installs it 30 s after Codex's tasks, or now i
     assert.equal(await context.installPendingUpdateSooner(), true);
     assert.equal(context.updateInstallRequested, true);
   }
+});
+
+test("an unattended update waits while a new ChatGPT connector is being paired; a requested one does not", async () => {
+  const idle = { active_http_turns: 0, active_browser_turns: 0 };
+  const events = [];
+  let pairing = true;
+  let deferralChecks = 0;
+  const context = {
+    UPDATE_IDLE_QUIET_MS: 0,
+    UPDATE_IDLE_POLL_MS: 1,
+    Date,
+    setTimeout,
+    updateIdleWait: null,
+    updateInstallRequested: false,
+    updateDeferredForPairingLogged: false,
+    connectorMonitor: {
+      restartDeferralActive: () => {
+        deferralChecks += 1;
+        if (deferralChecks >= 5) pairing = false;
+        return pairing;
+      },
+    },
+    activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
+    runtimeActivity: async () => idle,
+    updateController: {
+      launchInstall: () => { events.push("launch"); return {}; },
+      abortLaunch: () => events.push("abort"),
+      noteInstallProgress: () => {},
+    },
+    requestQuit: async options => { events.push(`quit:${JSON.stringify(options)}`); return { ok: true }; },
+  };
+  const quitWhenIdleForUpdate = loadQuitWhenIdle(context);
+  const logged = [];
+  await quitWhenIdleForUpdate({ version: "v" }, { info: event => logged.push(event) }, 10);
+  assert.ok(deferralChecks >= 5, "the idle Codex did not install the update while pairing lasted");
+  assert.deepEqual(events, ["launch", 'quit:{"preserveActiveTurns":true,"quiet":true}']);
+  assert.deepEqual(logged, ["launcher.update_deferred_for_connector_pairing"]);
+
+  // A requested install uses the short window, which pairing never delays.
+  events.length = 0;
+  deferralChecks = 0;
+  pairing = true;
+  context.updateInstallRequested = true;
+  await quitWhenIdleForUpdate({ version: "v" }, { info() {} }, 10);
+  assert.equal(deferralChecks, 0);
+  assert.deepEqual(events, ["launch", 'quit:{"preserveActiveTurns":true,"quiet":true}']);
 });
 
 test("the update quit drains without cancelling while an ordinary quit keeps cancelling", () => {

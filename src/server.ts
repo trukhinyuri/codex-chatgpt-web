@@ -997,6 +997,9 @@ export function startServer(
           model_catalog_requests: modelCatalogRequests,
           last_model_catalog_result: lastModelCatalogResult,
           ...activity(),
+          // In-flight MCP tool calls through the tunnel (Full mode only); the launcher restarts the
+          // tunnel on a turn's behalf only when this is zero.
+          ...(turnBroker ? { active_tool_calls: turnBroker.activeToolCallCount() } : {}),
         });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {

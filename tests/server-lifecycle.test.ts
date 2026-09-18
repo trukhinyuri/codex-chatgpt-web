@@ -1175,6 +1175,37 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
   }
 });
 
+test("health reports MCP tool calls in flight so the launcher never restarts the tunnel under them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-tools-health-"));
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
+  const broker = TurnBroker.forSocket(config.brokerSocketPath);
+  await broker.listen();
+  const server = startServer(config);
+  const browserOnly = startServer({ ...defaultConfig("browser-only"), port: 0 });
+  try {
+    const health = async () => (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json() as Promise<Record<string, unknown>>;
+    expect((await health()).active_tool_calls).toBe(0);
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    }, 60_000, "tools-in-flight");
+    const claimed = await callTurnBroker<{ activityId: string }>(config.brokerSocketPath, { method: "claim", token });
+    expect((await health()).active_tool_calls).toBe(1);
+    await callTurnBroker(config.brokerSocketPath, { method: "activity_complete", token, activityId: claimed.activityId });
+    expect((await health()).active_tool_calls).toBe(0);
+    const plain = await (await fetch(`http://127.0.0.1:${browserOnly.port}/healthz`)).json() as Record<string, unknown>;
+    expect(Object.hasOwn(plain, "active_tool_calls")).toBe(false);
+  } finally {
+    await server.stop(true);
+    await browserOnly.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("lifecycle drain and cancellation include browser turns owned by the external DEV driver", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-dev-lifecycle-"));
   const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };

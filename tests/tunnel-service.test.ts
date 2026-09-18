@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
 import { createTunnelConfig, mcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
-import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
+import { existingFullSetupCredentials, stopRunningLauncherTunnel, tunnelWorkerRuntimeChanged } from "../src/setup";
 
 const roots: string[] = [];
 
@@ -149,6 +149,38 @@ describe("tunnel launchd ownership", () => {
 
     config.browserInteractionMode = "manual";
     expect(parsePinnedTunnelCommand(mcpCommand(config, "win32"))).toContain("safe");
+  });
+
+  test("a setup that rebuilds the tunnel first stops the launcher's still-running previous alias", () => {
+    const root = join(tmpdir(), `codex-chatgpt-web-running-tunnel-${process.pid}-${Date.now()}`);
+    roots.push(root);
+    process.env.CODEX_CHATGPT_WEB_HOME = root;
+    const binary = join(root, "bin", "tunnel-client");
+    mkdirSync(join(root, "bin"), { recursive: true });
+    writeFileSync(binary, "binary");
+    const existing = defaultConfig("full");
+    existing.tunnel = createTunnelConfig({
+      binaryPath: binary,
+      runtimeKeyFile: join(root, "secrets", "runtime.key"),
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    const stopped: string[] = [];
+    const stop = (config: typeof existing) => { stopped.push(config.tunnel!.alias); };
+
+    expect(stopRunningLauncherTunnel(existing, stop)).toBe(true);
+    expect(stopped).toEqual(["codex-chatgpt-web"]);
+    expect(stopRunningLauncherTunnel(defaultConfig("browser-only"), stop)).toBe(false);
+    expect(stopRunningLauncherTunnel(undefined, stop)).toBe(false);
+    rmSync(binary);
+    expect(stopRunningLauncherTunnel(existing, stop)).toBe(false);
+    expect(stopped).toEqual(["codex-chatgpt-web"]);
+
+    // The launcher-owned setup path stops the previous alias immediately before it bootstraps.
+    const source = readFileSync(join(import.meta.dir, "..", "src", "setup.ts"), "utf8");
+    const launcherBranch = source.slice(source.indexOf("if (launcherOwned) {\n      if (tunnelService.installed"));
+    expect(launcherBranch).toMatch(
+      /if \(needsProfile \|\| refreshTunnelWorker \|\| explicitTunnelChange\) \{[\s\S]*?stopRunningLauncherTunnel\(existing\);\s*await bootstrapTunnelProfile\(config\);/,
+    );
   });
 
 });

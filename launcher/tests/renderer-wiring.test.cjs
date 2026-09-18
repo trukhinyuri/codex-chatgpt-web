@@ -350,6 +350,96 @@ test("completed model setup remains a repeatable capability probe", () => {
   );
 });
 
+test("the launcher re-checks the connector by itself after a connector failure and only then", async () => {
+  const vm = require("node:vm");
+  const start = electronMain.indexOf("function connectorMonitorEnabled(");
+  const end = electronMain.indexOf("function trayImage()", start);
+  const source = electronMain.slice(start, end);
+  const { isConnectorFailureCode, connectorFailureKind } = require("../electron/connector-readiness.cjs");
+  const state = { browserInteractionMode: "automatic", coreSetupComplete: true, mcpSetupComplete: true };
+  const monitorCalls = [];
+  const sent = [];
+  let config = { mode: "full", browserInteractionMode: "automatic" };
+  let health = { active_browser_turns: 0 };
+  const context = {
+    IS_DEV_PROFILE: false,
+    shutdownInProgress: false,
+    quitting: false,
+    exitCommitted: false,
+    runtimeHost: { currentOperation: () => null },
+    runtimeSupervisor: { readConfig: () => config },
+    browserHost: { backgroundCheckAllowed: () => true },
+    runtimeActivity: async () => health,
+    connectorMonitor: {
+      noteTurnEnded: () => monitorCalls.push(["ended"]),
+      noteTurnFailure: code => monitorCalls.push(["failure", code]),
+      clearResendHint: () => monitorCalls.push(["clear"]),
+      stop: reason => monitorCalls.push(["stop", reason]),
+      settled: async () => monitorCalls.push(["settled"]),
+    },
+    send: (channel, value) => sent.push([channel, value]),
+    isConnectorFailureCode,
+    connectorFailureKind,
+    createConnectorReadinessMonitor: () => ({}),
+    setTimeout,
+    Promise,
+  };
+  vm.runInNewContext(`${source}
+    globalThis.api = { connectorMonitorEnabled, connectorCheckIdle, handleBrowserTurnEnded, pauseConnectorMonitorForQuit };`, context);
+  const { api } = context;
+  const stateStore = { read: () => ({ ...state }), update: patch => Object.assign(state, patch) };
+
+  api.handleBrowserTurnEnded({ status: "failed", failureCode: "connector_not_found:not_listed" }, stateStore);
+  assert.equal(state.mcpSetupComplete, false);
+  assert.equal(state.connectorLastFailureKind, "not_listed");
+  assert.deepEqual(monitorCalls, [["ended"], ["failure", "connector_not_found:not_listed"]]);
+  assert.equal(sent.at(-1)[0], "launcher:state-changed");
+
+  monitorCalls.length = 0;
+  state.mcpSetupComplete = true;
+  api.handleBrowserTurnEnded({ status: "failed", failureCode: null }, stateStore);
+  api.handleBrowserTurnEnded({ status: "completed", failureCode: null }, stateStore);
+  assert.equal(state.mcpSetupComplete, true, "other failures leave the connector state alone");
+  assert.deepEqual(monitorCalls, [["ended"], ["ended"], ["clear"]]);
+
+  assert.equal(api.connectorMonitorEnabled(stateStore), true);
+  state.browserInteractionMode = "manual";
+  assert.equal(api.connectorMonitorEnabled(stateStore), false, "never in Zero Risk");
+  state.browserInteractionMode = "automatic";
+  config = { mode: "browser-only", browserInteractionMode: "automatic" };
+  assert.equal(api.connectorMonitorEnabled(stateStore), false);
+  config = { mode: "full", browserInteractionMode: "automatic" };
+  context.IS_DEV_PROFILE = true;
+  assert.equal(api.connectorMonitorEnabled(stateStore), false);
+  context.IS_DEV_PROFILE = false;
+
+  assert.equal(await api.connectorCheckIdle(), true);
+  health = { active_browser_turns: 1 };
+  assert.equal(await api.connectorCheckIdle(), false);
+  health = null;
+  assert.equal(await api.connectorCheckIdle(), true, "an unreachable bridge does not block a browser-only check");
+  context.runtimeHost.currentOperation = () => "mcp-setup";
+  assert.equal(await api.connectorCheckIdle(), false);
+  context.runtimeHost.currentOperation = () => null;
+  context.browserHost.backgroundCheckAllowed = () => false;
+  assert.equal(await api.connectorCheckIdle(), false);
+
+  monitorCalls.length = 0;
+  await api.pauseConnectorMonitorForQuit();
+  assert.deepEqual(monitorCalls, [["stop", "quit"], ["settled"]]);
+
+  // The rest of the wiring: every place that should start, feed or consult the monitor does.
+  assert.match(electronMain, /connectorTunnel: \(request\) => \{[\s\S]*?connectorTunnelService\(request\)/);
+  assert.match(electronMain, /onTurnEnded: \(outcome\) => handleBrowserTurnEnded\(outcome, stateStore\)/);
+  assert.match(electronMain, /onTunnelStarted: \(\) => connectorMonitor\?\.noteTunnelRestarted\(\)/);
+  const setupMcp = electronMain.slice(electronMain.indexOf('handle("launcher:setup-mcp"'), electronMain.indexOf('handle("launcher:set-mcp-step"'));
+  assert.match(setupMcp, /connectorVerifiedAt: null[\s\S]*?connectorMonitor\?\.start\("setup-mcp"\)/);
+  const updateWait = electronMain.slice(electronMain.indexOf("async function quitWhenIdleForUpdate("), electronMain.indexOf("async function installPendingUpdateSooner("));
+  assert.match(updateWait, /wait\.quietMs > UPDATE_IDLE_QUIET_MS && !wait\.now && connectorMonitor\?\.restartDeferralActive\(\) === true/);
+  assert.match(updateWait, /idleSince = running === 0 && !pairing/);
+  assert.match(electronMain, /await pauseConnectorMonitorForQuit\(\);[\s\S]*?const activeOperation = runtimeHost\?\.currentOperation\(\)/);
+});
+
 test("catalog verification reports a failed request instead of requesting another restart, then recovers", async () => {
   const vm = require("node:vm");
   const start = electronMain.indexOf("function startCatalogVerificationMonitor(");
