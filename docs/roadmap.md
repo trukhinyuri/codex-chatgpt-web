@@ -25,6 +25,7 @@ Updated with every release. It lists where the product still falls short of [req
 
 ## Next
 
+- **Several ChatGPT accounts** (requirement R9): a browser profile and connector per account, an account pool in the bridge that schedules turns by load and per-account limits, account-sticky continuations, and setup of additional accounts from the launcher. Design in progress (`plans/multi-account.md`).
 - ChatGPT Web reliability, wave 2:
   - status of limits and queues in the launcher (plan 2.3);
   - restarts and updates deferred while turns are queued (2.4);

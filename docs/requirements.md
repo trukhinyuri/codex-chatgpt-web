@@ -20,6 +20,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. Context is never truncated to make something fit. Large tasks work by splitting, staging and compaction that keeps the task; a request that cannot fit is reported, not silently shortened.
 3. Tasks of any size and any number of parallel sessions work; load is paced and queued, never answered with an error that a wait would have avoided.
 4. Provider limits (ChatGPT rate limits, usage caps, proxy quotas) are respected, never bypassed or disguised; the product waits for them to end and says so.
+5. Concurrency is always correct: any number of parallel sessions, subagents and Codex hosts share the bridge without lost, duplicated or cross-wired turns, with one ChatGPT account as with many.
 
 ## R4. Updates either work or do not happen
 
@@ -55,3 +56,10 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. `bun run verify` passes in a clean clone, and the updater's own build path (private home, full suite, packaging) is exercised before a release.
 3. Problems known from upstream projects (codex-chatgpt-web, CLIProxyAPI) and their forks are fixed here too, not carried over.
 4. Everything that is decided or learned is written into this repository (requirements, process, roadmap, plans), so any agent can continue without the conversation in which it happened.
+
+## R9. Many ChatGPT accounts scale horizontally
+
+1. The user can connect several ChatGPT accounts. Each keeps its own sign-in, limits and connector; adding an account adds capacity for parallel work.
+2. Turns are distributed across healthy accounts by load and limits; an account in cooldown or signed out takes no new turns while the others continue. No global lock or single component serializes work across accounts, and the loss of one account never stops the others.
+3. Work that depends on an account (a retained conversation, a continuation, a compaction) stays on that account or is moved safely, never mixed.
+4. With one account, everything works exactly as before; more accounts never change correctness, only capacity.
