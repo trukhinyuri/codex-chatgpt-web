@@ -784,6 +784,52 @@ describe("trusted Codex task environment continuity", () => {
     expect(() => store.resolve(invalidUpdate)).toThrow("missing cwd");
   });
 
+  // Upstream PR #567 / issue #557: a follow-up turn whose only <environment_context> text belongs
+  // to an earlier turn (not the current one) used to fail closed even when the same thread already
+  // has verified cached authority — e.g. a bridge running on a different host than Codex, unable to
+  // read the native rollout to re-derive authority. History must not become authority on its own,
+  // and it must not unlock cross-thread inheritance either.
+  test("reuses same-thread authority when envelopes belong only to earlier turns", () => {
+    const followUp = (threadId: string, tagged: boolean): CodexParsedRequest => {
+      const request = currentWire({ threadId });
+      request._rawBody = {
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: "turn_next" }),
+        },
+        input: [
+          {
+            type: "message",
+            role: "user",
+            ...(tagged ? { internal_chat_message_metadata_passthrough: { turn_id: "turn_current" } } : {}),
+            content: [{ type: "input_text", text: environmentXml }],
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Now add type hints" }] },
+        ],
+      };
+      return request;
+    };
+    const cached = {
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    };
+
+    for (const tagged of [true, false]) {
+      const store = new ChatGptThreadEnvironmentStore();
+      // No cached authority yet for this thread: a historical-only envelope must still fail closed.
+      expect(() => store.resolve(followUp("thread_current", tagged))).toThrow("missing cwd");
+      store.resolve(currentWire());
+      expect(store.resolve(followUp("thread_current", tagged))).toEqual(cached);
+      // History never unlocks cross-thread inheritance: an unrelated thread with no cached
+      // authority of its own must still fail closed even though its envelope is also historical.
+      expect(() => store.resolve(followUp("thread_unrelated", tagged))).toThrow("missing cwd");
+    }
+  });
+
   test("inherits authority only through canonical Codex thread-spawn lineage", () => {
     const store = new ChatGptThreadEnvironmentStore();
     const parent = currentWire();

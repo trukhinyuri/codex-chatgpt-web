@@ -184,9 +184,13 @@ export class ChatGptThreadEnvironmentStore {
           return rolloutEnvironment;
         }
       }
-      // Only a current native rollout can supersede an unrecognized historical envelope. Without
-      // that proof, do not turn arbitrary history or an invalid update into cached authority.
-      if (hasRawChatGptEnvironmentContext(parsed)) throw error;
+      // A current envelope that failed to parse is an invalid update: never hide it behind cached
+      // authority. Envelopes that belong only to earlier turns are not updates, though; when the
+      // native rollout is not readable here (for example, a bridge on another host than Codex),
+      // the same thread's already-trusted authority still applies to its later turns. History is
+      // never itself turned into authority, and it never unlocks cross-thread inheritance.
+      const hasRawContext = hasRawChatGptEnvironmentContext(parsed);
+      if (hasRawContext && hasCurrentContext) throw error;
       const sameThread = this.get(identity.threadId);
       if (sameThread) return {
         cwd: sameThread.cwd,
@@ -195,6 +199,7 @@ export class ChatGptThreadEnvironmentStore {
         sandboxPolicy: sameThread.sandboxPolicy,
         tools: parsed.context.tools ?? [],
       };
+      if (hasRawContext) throw error;
 
       if (!lineage) throw error;
       const parent = this.get(lineage.parentThreadId);

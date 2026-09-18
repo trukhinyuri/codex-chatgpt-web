@@ -2937,7 +2937,14 @@ export class ChatGptBrowserWorker {
       Date.now() + graceMs,
     );
     for (;;) {
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (signal?.aborted) {
+        // Send was already accepted here, so the server-side generation is still running; without
+        // this press it keeps going after the local capability is retired and later claims a dead
+        // MCP binding. Same pattern as the post-binding monitoring loop below.
+        const stop = observationPage.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+        if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+        throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      }
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
       let progress = externalProgress?.snapshot();
       if (progress?.lastProgressAt !== undefined) {

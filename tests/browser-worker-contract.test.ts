@@ -10,7 +10,7 @@ import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adap
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_STOP_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
@@ -929,6 +929,50 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   } finally {
     clearTimeout(timer);
   }
+});
+
+// Upstream PR #341: aborting after ChatGPT accepted the submission but before the assistant turn
+// is bound left the server-side generation running past local retirement, so it later claimed a
+// dead MCP binding. The post-binding monitoring loop already presses Stop before throwing on
+// abort; this pre-binding wait loop did not.
+test("aborting before an assistant turn is bound presses Stop so the server-side generation does not outlive the retired binding", async () => {
+  type Baseline = { initialTurnIdentities: string[]; domCache: Record<string, unknown> };
+  const worker = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://pre-binding-abort-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+  }) as unknown as {
+    waitForNewAssistantTurn(
+      page: Page,
+      baseline: Baseline,
+      deadline: number | undefined,
+      signal?: AbortSignal,
+    ): Promise<unknown>;
+  };
+
+  let stopPresses = 0;
+  const stopLocator = {
+    last() { return this; },
+    isVisible: async () => true,
+    press: async () => { stopPresses += 1; },
+  };
+  const hiddenLocator = { last() { return this; }, isVisible: async () => false };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => (selector === CHATGPT_STOP_BUTTON_SELECTOR ? stopLocator : hiddenLocator),
+  } as unknown as Page;
+
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    undefined,
+    controller.signal,
+  )).rejects.toThrow("ChatGPT web turn aborted");
+
+  expect(stopPresses).toBe(1);
 });
 
 test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
