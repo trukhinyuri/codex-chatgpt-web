@@ -68,3 +68,8 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 4. With one account, everything works exactly as before; more accounts never change correctness, only capacity.
 5. The product scales horizontally to thousands of users and thousands of accounts, where every account is used by the person it belongs to (for example each employee's own Enterprise seat): no shared bottleneck, no single machine or service whose failure stops others, and optional coordination that degrades to local operation when unreachable.
 6. Accounts are used within their provider's terms. OpenAI's Terms of Use (updated 16 January 2026) forbid making an account available to anyone else and circumventing rate limits or restrictions. The product therefore never shares one person's ChatGPT account with other people and never multiplies accounts to get around a limit; capacity beyond an account's limits comes from the routes built for it (native OpenAI models on the user's plan or API, and CLIProxyAPI providers under their own terms).
+
+## R10. Ahead of every alternative
+
+1. On every parameter users care about (reliability, correctness, latency and throughput, models and routes, Codex features kept, setup effort, self-healing, updates, privacy, platforms), the product is at least as good as the original projects (codex-chatgpt-web, CLIProxyAPI), their active forks, and comparable tools, and better where it matters to users.
+2. The comparison is kept current in [competitive-analysis.md](competitive-analysis.md): each release cycle reviews new upstream releases, pull requests, forks and competing tools, and either ports, surpasses or records why not.

@@ -88,6 +88,10 @@ The product's visible name is **Codex Superpower**; everything above keeps the o
 - **codex-chatgpt-web** (`upstream` = miuuyy/codex-chatgpt-web): a fix useful upstream starts from `upstream/main` in `fix/<topic>` with a regression test, is merged here, and may be offered upstream as a pull request. Review upstream pull requests and active forks regularly for fixes to port; do not port a change that sends tokens to third parties or updates from someone else's repository.
 - **CLIProxyAPI**: sync through the `superpower` branch of trukhinyuri/vibeflow as described in [../AGENTS.md](../AGENTS.md#develop); never `git subtree pull` from upstream directly (its history carries OAuth client secrets that GitHub push protection rejects, and this repository must never contain them).
 
+## Staying ahead
+
+Each release cycle: list new releases, merged and open pull requests, and actively developed forks of codex-chatgpt-web and CLIProxyAPI (for example `gh api repos/miuuyy/codex-chatgpt-web/forks --paginate`, sorted by recent pushes), and tools that solve the same problem. For each change that helps users, port it with a regression test, do better, or record why not in [competitive-analysis.md](competitive-analysis.md). Never port a change that sends credentials or content to third parties, or that updates from someone else's repository.
+
 ## When something breaks for users
 
 1. Find the failure class from logs and diagnostics (structure only), count it, and find the code path.
