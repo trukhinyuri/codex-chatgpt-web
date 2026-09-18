@@ -11,6 +11,7 @@ const {
   acquireLock,
   createSourceUpdateController,
   defaultSourceRoot,
+  lowPriorityCommand,
   prepareCheckout,
   releaseLock,
   sourceBuildPath,
@@ -82,6 +83,14 @@ test("every source build runs the complete verification before packaging", () =>
     "bun run verify @.",
     "bun run app:package @.",
   ]);
+});
+
+test("builds and tests run at low CPU priority beside live ChatGPT turns", () => {
+  assert.deepEqual(lowPriorityCommand("bun", ["run", "verify"]), {
+    command: "/usr/bin/nice",
+    args: ["-n", "15", "bun", "run", "verify"],
+  });
+  assert.ok(fs.existsSync("/usr/bin/nice") || process.platform !== "darwin");
 });
 
 test("the build uses the launcher's pinned Bun before any other tool on PATH", () => {
