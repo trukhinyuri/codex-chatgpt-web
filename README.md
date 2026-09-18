@@ -59,25 +59,22 @@ installer's RESULT line.
 ## How it works
 
 ```mermaid
-flowchart LR
-    codex["Codex app or CLI"]
-    subgraph mac["Your Mac: Codex Web GPT launcher"]
-        bridge["Local bridge<br/>Responses API on 127.0.0.1:17841"]
-        browser["Embedded browser<br/>one ChatGPT Temporary Chat per task"]
-        mcp["MCP server and turn broker"]
-        tunnel["openai/tunnel-client<br/>outbound only"]
-    end
-    chatgpt["ChatGPT web<br/>models on your plan"]
-    connector["ChatGPT connector<br/>Codex Native2"]
-
-    codex -- "1 task context" --> bridge
-    bridge -- "2 prompt, split into parts if large" --> browser
-    browser -- "3 sent in the selected mode" --> chatgpt
-    chatgpt -- "4 tool call" --> connector
-    connector -- "5 through the OpenAI tunnel" --> tunnel
-    tunnel --> mcp
-    mcp -- "6 tool call for this turn" --> bridge
-    bridge -- "7 native tool call" --> codex
+sequenceDiagram
+    participant C as Codex (app or CLI)
+    participant B as Local bridge<br/>127.0.0.1:17841
+    participant W as Launcher browser<br/>ChatGPT tab
+    participant G as ChatGPT web
+    participant T as Connector Codex Native2<br/>and tunnel
+    C->>B: 1. task context (Responses API)
+    B->>W: 2. prompt, in parts if large
+    W->>G: 3. send in the selected mode
+    G-->>C: answer and reasoning stream back through the tab and the bridge
+    G->>T: 4. tool call (Full harness)
+    T->>B: 5. through the outbound tunnel
+    B->>C: 6. native tool call
+    C->>B: tool result, after Codex sandbox and approvals
+    B->>T: result
+    T->>G: result, same ChatGPT response
 ```
 
 1. Codex sends the task to the local bridge exactly as it would send it to OpenAI.
