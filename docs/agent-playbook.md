@@ -22,7 +22,7 @@ Goal: the product works on this computer and the person did nothing but sign in.
 
 ## Continue
 
-Goal: the next most valuable change reaches users, verified, without asking the person what to do. Ask only for what only a person can do: signing in, secrets, and the decisions listed in roadmap.md under "Decisions for the owner".
+Goal: the next most valuable change reaches users, verified, without asking the person what to do and without waiting for decisions (see [research](#research), step 6). Ask only for what only a person can do: signing in, secrets, paying, accepting terms.
 
 1. **Sync.** `git fetch --all`; read requirements.md, engineering-process.md, roadmap.md. Check that no other agent is releasing (open draft pull requests, recent pushes to `main`); coordinate instead of racing.
 2. **Collect the work queue**, most urgent first:
@@ -34,7 +34,7 @@ Goal: the next most valuable change reaches users, verified, without asking the 
 3. **Do the first item** by engineering-process.md: branch, regression test first, implementation, isolated tests, the updater's build path, draft pull request for CI when the change is risky.
 4. **Release** it (engineering-process.md "Releasing"), watch CI on `main`, confirm an installed app picks it up if you can observe one.
 5. **Record.** Update roadmap.md (move the item, add what you learned), close or comment on the issues it resolves, update competitive-analysis.md when you ported or surpassed something.
-6. **Repeat** from step 1 until the person stops you or only owner decisions remain. Then summarise, in the person's language, what reached users and what waits for them.
+6. **Repeat** from step 1 until the person stops you. Then summarise, in the person's language, what reached users and what waits for them.
 
 ## Research
 
@@ -50,7 +50,8 @@ Research turns an open question into a decision that ships. Do it before any cha
 3. **Measure instead of guessing**: count events per class and hour, time the paths, reproduce the failure in a test or a sandbox (a separate app-server or bridge instance with its own home). Record the query or command that produced every number.
 4. **Challenge the conclusion**: give the question to independent reviewers with different lenses (correctness, compatibility with the other side of each boundary, risk and privacy, "try to break it") without showing them your answer; if your harness can run several agents, use them in parallel. Resolve contradictions with evidence, not votes.
 5. **Write it down** in `docs/plans/<date>-<topic>.md`: question, evidence with sources, options, decision, increments with tests and live checks, and what could not be verified. Add the increments to roadmap.md.
-6. **Decide yourself** everything a requirement already settles. Only the items in roadmap.md "Decisions for the owner" (legal positioning, paid certificates, platform order, anything that conflicts with a requirement) wait for a person; record the question there and continue with other work.
+6. **Decide yourself and keep going.** Never stop to wait for a decision. When the requirements settle the question, follow them. When they do not, choose the option that keeps every requirement, is reversible and is the most conservative towards users' work and accounts, record the choice and why in the plan and in roadmap.md "Decisions for the owner" as a default the owner may change, and continue. The only things you never decide on a person's behalf are the ones only a person can do (signing in, secrets, paying, accepting terms) and anything that would break a requirement; for those, apply the requirement-compliant default and move on to other work.
+7. **Revisit approaches as the world changes.** Each cycle, read the technology-watch issue (new releases of Codex, Electron, Playwright, Bun, Go, other agent harnesses) and ask whether a newer approach now serves a requirement better than the current one: a new Codex capability that removes a workaround, a faster transport, a better way to measure. Research it the same way and replace the old approach when the evidence says so.
 
 ## Rules that never bend
 

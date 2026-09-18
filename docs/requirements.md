@@ -74,3 +74,5 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 
 1. On every parameter users care about (reliability, correctness, latency and throughput, models and routes, Codex features kept, setup effort, self-healing, updates, privacy, platforms), the product is at least as good as the original projects (codex-chatgpt-web, CLIProxyAPI), their active forks, and comparable tools, and better where it matters to users.
 2. The comparison is kept current in [competitive-analysis.md](competitive-analysis.md): each release cycle reviews new upstream releases, pull requests, forks and competing tools, and either ports, surpasses or records why not.
+3. Approaches and technologies are re-evaluated as they change: releases of Codex, the runtime stack and other agent harnesses are watched automatically, and an approach is replaced when a better one serves the requirements.
+4. Development never blocks on a decision: agents decide by the requirements, apply a conservative, reversible default where a person has not decided, record it, and continue.
