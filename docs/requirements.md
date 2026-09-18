@@ -2,6 +2,8 @@
 
 These requirements come from the owner (Yuri Trukhin) and bind every change to this repository. Codex Superpower is a paid product that companies and individuals use for critical work, often in many parallel Codex sessions; development of this product itself also runs through it. When a change would break a requirement, the change is wrong, not the requirement. [engineering-process.md](engineering-process.md) describes how the requirements are met and checked; [roadmap.md](roadmap.md) lists where the product still falls short.
 
+**The measure of success:** every user's work runs without interruption, and users never have to think about the product. Each requirement below serves this; when they seem to conflict, choose what keeps users' work running, correctly.
+
 ## R1. It works for everyone, on any computer
 
 1. Every behaviour is designed and tested for every supported user, not for one machine. A fix that works only on the developer's computer, or a manual repair on one computer, is not a fix: the change ships through `main` and the updater, or it does not exist.
