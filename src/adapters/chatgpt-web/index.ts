@@ -1049,6 +1049,11 @@ export function createChatGptWebAdapter(
                         operationSignal,
                       );
                       preserveFinalResponse = !settlement.compactionInstructionDelivered;
+                      // The outer deadline was armed before this settlement was awaited, so a
+                      // long-running source turn could have consumed most or all of its budget
+                      // before the summary generation even starts. Re-arm now that the source has
+                      // settled so the summary gets its own full window instead of the leftovers.
+                      armHandoffDeadline();
                       rawSummary = await requestRetainedCompactionHandoff(
                         worker,
                         parsed,
@@ -1066,6 +1071,10 @@ export function createChatGptWebAdapter(
                         await withAbort(source.physicalSettlement, operationSignal);
                         preserveFinalResponse = true;
                       }
+                      // Same re-arm as above: the source (if any) has now settled, so the summary
+                      // must start its handoff deadline fresh rather than inherit whatever the
+                      // outer deadline had left over from before settlement.
+                      armHandoffDeadline();
                       rawSummary = await requestRetainedCompactionHandoff(
                         worker,
                         parsed,
