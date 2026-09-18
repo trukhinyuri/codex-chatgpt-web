@@ -2959,7 +2959,7 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   expect(fixture.pressed).toEqual([]);
 });
 
-test("the unusual-activity ChatGPT error returns a structured retryable 429", async () => {
+test("the unusual-activity ChatGPT error stops the turn without an automatic retry", async () => {
   const fixture = dialogPage(
     "Unusual activity has been detected from your device. Try again later. (b2d7fe20-47dd-41a9-b862-15d14e17368d)",
   );
@@ -2969,7 +2969,7 @@ test("the unusual-activity ChatGPT error returns a structured retryable 429", as
     status: 429,
     errorType: "rate_limit_error",
     code: "unusual_activity_detected",
-    retryable: true,
+    retryable: false,
   });
   expect(fixture.pressed).toEqual([]);
 });

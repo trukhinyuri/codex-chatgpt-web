@@ -923,8 +923,9 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
 
 // ChatGPT can end a turn with "Unusual activity has been detected from your device. Try again
 // later." instead of the generic terminal-error alert or a normal completion. Left unclassified,
-// the turn stalls on whatever generic timeout owns the wait loop instead of surfacing a fast,
-// retryable rate limit the way the other terminal alerts above do.
+// the turn stalls on whatever generic timeout owns the wait loop. This is ChatGPT's own account
+// check, not a rate limit with a stated delay: the turn stops without an automatic retry, so no
+// further requests reach ChatGPT until the person decides to continue.
 const chatGptUnusualActivityAlert = (scope: ChatGptTextScope): Locator => scope
   .getByText(/Unusual activity has been detected from your device\.[\s\S]*Try again later\.(?:\s*\([^)]+\))?/i)
   .last();
@@ -932,8 +933,9 @@ const chatGptUnusualActivityAlert = (scope: ChatGptTextScope): Locator => scope
 export async function throwIfChatGptUnusualActivityAlert(scope: ChatGptTextScope): Promise<void> {
   if (!await chatGptUnusualActivityAlert(scope).isVisible().catch(() => false)) return;
   throw new ChatGptWebAdapterError(
-    "ChatGPT temporarily blocked the turn after detecting unusual activity from this device. Retry later.",
-    { status: 429, errorType: "rate_limit_error", code: "unusual_activity_detected", retryable: true },
+    "ChatGPT reported unusual activity from this device and paused it. Wait before sending more turns, "
+      + "and check the ChatGPT tab in the launcher; this turn is not retried automatically.",
+    { status: 429, errorType: "rate_limit_error", code: "unusual_activity_detected", retryable: false },
   );
 }
 
