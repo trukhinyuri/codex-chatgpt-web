@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptBrowserWorker, ChatGptRateLimitCooldown } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
@@ -21,7 +21,6 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
   const page = { evaluate: async () => ({}), isClosed: () => false };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics, ...(owned ? { browserHostDescriptorPath: "owned-descriptor" } : {}) },
-    rateLimitCooldown: new ChatGptRateLimitCooldown(),
     runStage: async (_trace: string, name: string, timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => {
       stage = name;
       if (name === "send" || name.endsWith("_send")) sendBudgets.push(timeout);

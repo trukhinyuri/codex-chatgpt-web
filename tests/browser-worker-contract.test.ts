@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, ChatGptSendPressUnconfirmedError, pressVisibleChatGptStop, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, pollSleep, CHATGPT_RESPONSE_POLL_ACTIVE_MS, CHATGPT_RESPONSE_POLL_IDLE_MS, chatGptLatestNewTurnIdentity } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, ChatGptSendPressUnconfirmedError, pressVisibleChatGptStop, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, pollSleep, CHATGPT_RESPONSE_POLL_ACTIVE_MS, CHATGPT_RESPONSE_POLL_IDLE_MS, chatGptLatestNewTurnIdentity } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptAdmissionGate } from "../src/adapters/chatgpt-web/rate-limit-gate";
+import { FakeGateClock, flushMicrotasks, silentGateLog } from "./fixtures/fake-gate-clock";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -341,12 +343,14 @@ test("a retained MCP conversation reuses its proven connector binding", () => {
   expect(chatGptConnectorAttachmentMode(false, false)).toBe("none");
 });
 
-test("browser turns run concurrently up to the five-tab limit", async () => {
+test("browser turns run concurrently up to the five-tab limit, and a sixth waits for a free tab instead of failing", async () => {
   expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
+  const clock = new FakeGateClock(Date.now());
   const releases = new Map<string, () => void>();
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
-    config: { browserHost: "managed-chrome" },
+    config: { browserHost: "managed-chrome", storageStatePath: "/nonexistent/five-tab-limit/storage-state.json" },
     activeRuns: new Map(),
+    admission: new ChatGptAdmissionGate({ accountKey: "five-tab-limit", clock, log: silentGateLog }),
     runExclusive: (turn: { traceId: string }) => new Promise<string>(resolve => {
       releases.set(turn.traceId, () => resolve(turn.traceId));
     }),
@@ -360,14 +364,18 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   });
 
   const active = Array.from({ length: 5 }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
-  await Promise.resolve();
+  // New Temporary Chats open at least three seconds apart.
+  for (let index = 0; index < 5; index += 1) await clock.advance(3_000);
   expect(releases.size).toBe(5);
-  await expect(worker.run(browserTurn("trace_6"))).rejects.toThrow("at most 5 simultaneous browser turns");
+  let sixthSettled = false;
+  const sixth = worker.run(browserTurn("trace_6")).finally(() => { sixthSettled = true; });
+  await clock.advance(60_000);
+  expect(releases.has("trace_6")).toBeFalse();
+  expect(sixthSettled).toBeFalse();
 
   releases.get("trace_1")?.();
   await active[0];
-  const sixth = worker.run(browserTurn("trace_6"));
-  await Promise.resolve();
+  await flushMicrotasks();
   expect(releases.has("trace_6")).toBeTrue();
   for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_5", "trace_6"]) {
     releases.get(traceId)?.();
@@ -1214,7 +1222,6 @@ async function runMultipartSendTurn(pressOutcome: (press: number) => "ok" | "thr
   let stage = "";
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics },
-    rateLimitCooldown: new ChatGptRateLimitCooldown(),
     // The real stage runner, with budgets scaled down so an unconfirmed send times out quickly.
     runStage(this: unknown, traceId: string, name: string, timeout: number, ...rest: unknown[]) {
       stage = name;
@@ -3125,15 +3132,6 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
 // delay in this exact shape; with it, Codex waits that long before each retry (#547).
 const CODEX_RETRY_DELAY = /Please try again in (\d+)s\.$/;
 
-function rateLimitError(seconds: number): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(`ChatGPT rate limit: too many requests. Please try again in ${seconds}s.`, {
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: true,
-  });
-}
-
 test("the rate-limit dialog error names a retry delay that Codex honours", async () => {
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
   const error = await throwIfChatGptRateLimitDialog(fixture.page).catch((caught: unknown) => caught);
@@ -3142,116 +3140,8 @@ test("the rate-limit dialog error names a retry delay that Codex honours", async
   expect((error as Error).message).toMatch(CODEX_RETRY_DELAY);
 });
 
-test("the rate-limit cooldown escalates, caps, and restarts after a quiet period", () => {
-  let now = 1_000_000;
-  const cooldown = new ChatGptRateLimitCooldown(() => now);
-
-  expect(cooldown.record()).toBe(60);
-  now += 60_000;
-  expect(cooldown.record()).toBe(120);
-  now += 120_000;
-  expect(cooldown.record()).toBe(240);
-  expect(cooldown.record()).toBe(300);
-  now += 300_000 + 10 * 60_000 + 1;
-  expect(cooldown.record()).toBe(60);
-});
-
-test("an active rate-limit cooldown refuses new browser turns locally with the remaining delay", () => {
-  let now = 1_000_000;
-  const cooldown = new ChatGptRateLimitCooldown(() => now);
-  expect(() => cooldown.assertReady()).not.toThrow();
-
-  cooldown.record();
-  now += 15_000;
-  let refused: unknown;
-  try { cooldown.assertReady(); } catch (error) { refused = error; }
-  expect(refused).toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: true,
-  });
-  expect((refused as Error).message).toMatch(CODEX_RETRY_DELAY);
-  expect((refused as Error).message).toContain("Please try again in 45s.");
-
-  now += 45_000;
-  expect(() => cooldown.assertReady()).not.toThrow();
-});
-
-test("only a completed response ends the escalation, and an announced pause still runs out", () => {
-  let now = 1_000_000;
-  const cooldown = new ChatGptRateLimitCooldown(() => now);
-  cooldown.record();
-  expect(cooldown.record()).toBe(120);
-
-  cooldown.recordResponse();
-
-  expect(() => cooldown.assertReady()).toThrow("Please try again in 120s.");
-  now += 120_000;
-  expect(() => cooldown.assertReady()).not.toThrow();
-  expect(cooldown.record()).toBe(60);
-});
-
-test("an accepted submission does not end the rate-limit escalation", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "src", "adapters", "chatgpt-web", "browser-worker.ts"), "utf8");
-  const accepted = source.indexOf("submission accepted evidence=${finalSubmissionEvidence}");
-  const completed = source.indexOf("browser turn ${turn.traceId} completed`");
-  const response = source.indexOf("this.rateLimitCooldown.recordResponse();");
-  expect(accepted).toBeGreaterThan(0);
-  expect(source.slice(accepted, accepted + 400)).not.toContain("rateLimitCooldown");
-  expect(response).toBeGreaterThan(accepted);
-  expect(response).toBeLessThan(completed);
-});
-
-function somethingWentWrong(): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(
-    "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
-    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
-  );
-}
-
-test("'Something went wrong' shortly after a rate limit is the same limit and asks Codex to wait", () => {
-  let now = 1_000_000;
-  const cooldown = new ChatGptRateLimitCooldown(() => now);
-  const standalone = somethingWentWrong();
-  expect(cooldown.escalate(standalone)).toBe(standalone);
-
-  cooldown.escalate(rateLimitError(60));
-  now += 79_000;
-  const throttled = cooldown.escalate(somethingWentWrong());
-  expect(throttled).toMatchObject({ status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true });
-  expect((throttled as Error).message).toBe(
-    "ChatGPT rate limit: ChatGPT reported an error while this account was still throttled after \"Too many requests\". Please try again in 120s.",
-  );
-  expect((throttled as Error).cause).toBeInstanceOf(ChatGptWebAdapterError);
-
-  now += 10 * 60_000 + 1;
-  const later = somethingWentWrong();
-  expect(cooldown.escalate(later)).toBe(later);
-
-  cooldown.escalate(rateLimitError(60));
-  cooldown.recordResponse();
-  const served = somethingWentWrong();
-  expect(cooldown.escalate(served)).toBe(served);
-});
-
-test("escalation rewrites only ChatGPT rate-limit errors, keeping their retry contract", () => {
-  const now = 1_000_000;
-  const cooldown = new ChatGptRateLimitCooldown(() => now);
-
-  const first = cooldown.escalate(rateLimitError(60));
-  const second = cooldown.escalate(rateLimitError(60));
-
-  expect(first.message).toBe("ChatGPT rate limit: too many requests. Please try again in 60s.");
-  expect(second.message).toBe("ChatGPT rate limit: too many requests. Please try again in 120s.");
-  expect(second).toMatchObject({ status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true });
-  expect((second as Error).cause).toBeInstanceOf(ChatGptWebAdapterError);
-
-  const unrelated = new Error("ChatGPT stopped responding");
-  expect(cooldown.escalate(unrelated)).toBe(unrelated);
-  expect(() => cooldown.assertReady()).toThrow("Please try again in 120s.");
-});
+// The cooldown, its escalation per incident and the probe after it live in the daemon's admission
+// gate; tests/rate-limit-gate.test.ts covers them with a fake clock.
 
 test("submission acceptance reports a rate-limit dialog that appears after Enter", async () => {
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
