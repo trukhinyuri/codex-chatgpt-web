@@ -37,6 +37,12 @@ Updated with every release. It lists where the product still falls short of [req
 - Model picker: proxy models appear after the native ones in Codex Desktop's scrollable list. Document it in the launcher; consider fewer, curated proxy rows.
 - Offer upstream fixes to miuuyy/codex-chatgpt-web as pull requests.
 
+## Later, in this order
+
+1. Windows (x64, arm64) and Linux (x64, arm64) as supported platforms, then macOS on Intel: installer, updater with rollback, autostart and crash restart per platform, each proven end to end in CI on real runners.
+2. Other popular agent harnesses on the same core (the bridge already speaks the Responses API; each harness needs its own catalog, error contract and configuration management).
+3. Company features: central deployment and configuration, policy, audit, support tooling.
+
 ## Decisions for the owner
 
 - **Signing:** builds are ad-hoc signed, so macOS privacy permissions granted to the app are tied to one build and reset with every update. A Developer ID certificate would fix this and allow notarization.

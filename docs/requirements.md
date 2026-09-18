@@ -6,7 +6,8 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 
 1. Every behaviour is designed and tested for every supported user, not for one machine. A fix that works only on the developer's computer, or a manual repair on one computer, is not a fix: the change ships through `main` and the updater, or it does not exist.
 2. A person without technical knowledge installs, sets up and uses the product. After the first install nothing needs maintenance: no configuration files to edit, no accounts to configure by hand, no commands to run to keep it working.
-3. Supported platform: macOS on Apple silicon and Intel. Code paths for Windows and Linux inherited from upstream must keep passing CI, but they are not advertised as supported until they meet these requirements.
+3. Platforms, in this order: macOS on Apple silicon now; then Windows (x64, arm64), Linux (x64, arm64) and macOS on Intel. Until a platform meets every requirement here it is not advertised as supported, but its code paths keep passing CI so that it does not fall behind.
+4. Harnesses: Codex Desktop and Codex CLI now; other popular agent harnesses later, through the same core without rewriting it. Features companies need (central deployment, policy, audit, support) come after the individual product is complete.
 
 ## R2. Problems are found and healed automatically
 
