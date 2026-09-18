@@ -734,25 +734,97 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
   .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます/i })
   .last();
 
+// ChatGPT answers a burst with a "Too many requests" dialog and asks to wait a few minutes. Codex
+// retries a rate-limited stream five times with sub-second backoff unless the error names a delay
+// as "Please try again in <n>s.", so every retry opened a fresh Temporary Chat and hit the same
+// account limit again. Name a concrete delay, grow it while limits repeat, and keep new turns off
+// ChatGPT until it expires. A prompt that ChatGPT accepts proves the limit has cleared.
+export const CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS = 60_000;
+export const CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS = 300_000;
+const CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS = 10 * 60_000;
+const CHATGPT_RATE_LIMIT_RETRY_DELAY = /\s*Please try again in \d+s\.$/;
+
+function chatGptRateLimitError(message: string, cause?: unknown): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_exceeded",
+    retryable: true,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+function withChatGptRetryDelay(message: string, seconds: number): string {
+  return `${message.replace(CHATGPT_RATE_LIMIT_RETRY_DELAY, "")} Please try again in ${seconds}s.`;
+}
+
+function isChatGptRateLimitError(error: unknown): error is ChatGptWebAdapterError {
+  return error instanceof ChatGptWebAdapterError && error.code === "rate_limit_exceeded";
+}
+
+/** Account-wide cooldown shared by every browser turn of one ChatGPT profile. */
+export class ChatGptRateLimitCooldown {
+  private until = 0;
+  private consecutive = 0;
+  private lastLimitAt = 0;
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** Records one ChatGPT rate-limit response and returns the whole seconds left to wait. */
+  record(): number {
+    const now = this.now();
+    if (this.consecutive > 0 && now - this.lastLimitAt > CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS + CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS) {
+      this.consecutive = 0;
+    }
+    this.consecutive += 1;
+    this.lastLimitAt = now;
+    const delay = Math.min(
+      CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS * 2 ** (this.consecutive - 1),
+      CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS,
+    );
+    this.until = Math.max(this.until, now + delay);
+    return Math.ceil((this.until - now) / 1_000);
+  }
+
+  /** Refuses a new browser turn locally while the account is cooling down. */
+  assertReady(): void {
+    const remainingMs = this.until - this.now();
+    if (remainingMs <= 0) return;
+    throw chatGptRateLimitError(withChatGptRetryDelay(
+      "ChatGPT rate limit: cooling down after a \"Too many requests\" response; this turn was not sent to ChatGPT.",
+      Math.ceil(remainingMs / 1_000),
+    ));
+  }
+
+  /** Records a rate-limit failure and restates it with the escalated delay; other errors pass through. */
+  escalate<E>(error: E): E | ChatGptWebAdapterError {
+    if (!isChatGptRateLimitError(error)) return error;
+    return chatGptRateLimitError(withChatGptRetryDelay(error.message, this.record()), error);
+  }
+
+  reset(): void {
+    this.until = 0;
+    this.consecutive = 0;
+  }
+}
+
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   const dialog = chatGptRateLimitDialog(page);
   if (!await dialog.isVisible().catch(() => false)) return;
 
+  const baseDelaySeconds = CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS / 1_000;
   const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解)$/ }).last();
   if (await acknowledge.isVisible().catch(() => false)) {
     try {
       await acknowledge.press("Enter");
     } catch (error) {
-      throw new ChatGptWebAdapterError(
-        `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}). Try again in a few minutes.`,
-        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
-      );
+      throw chatGptRateLimitError(withChatGptRetryDelay(
+        `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}).`,
+        baseDelaySeconds,
+      ));
     }
   }
-  throw new ChatGptWebAdapterError(
-    "ChatGPT rate limit: too many requests. Try again in a few minutes.",
-    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
-  );
+  throw chatGptRateLimitError(withChatGptRetryDelay("ChatGPT rate limit: too many requests.", baseDelaySeconds));
 }
 
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
@@ -2123,6 +2195,7 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
+  private readonly rateLimitCooldown = new ChatGptRateLimitCooldown();
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
@@ -4360,6 +4433,12 @@ export class ChatGptBrowserWorker {
     reuseConversation = false,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    try {
+      this.rateLimitCooldown.assertReady();
+    } catch (error) {
+      console.error(`[chatgpt-web] browser turn ${turn.traceId} not started: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
@@ -4807,6 +4886,7 @@ export class ChatGptBrowserWorker {
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+      this.rateLimitCooldown.reset();
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
         submissionBaseline,
@@ -5122,14 +5202,15 @@ export class ChatGptBrowserWorker {
         }
         throw turn.abortSignal.reason;
       }
+      const surfaced = this.rateLimitCooldown.escalate(error);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
-        + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
+        + ` ${redactChatGptUiDiagnostic(surfaced instanceof Error ? surfaced.message : String(surfaced))}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+        await diagnostics.capture(diagnosticPage, "turn-failed", surfaced);
       }
-      throw error;
+      throw surfaced;
     } finally {
       prepared.release();
       if (turnConnection) {
