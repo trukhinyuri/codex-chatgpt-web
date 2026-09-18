@@ -213,8 +213,11 @@ test("the fork's scripts do not mistake the update worker for a running launcher
     const source = fs.readFileSync(file, "utf8");
     assert.match(source, /launcher_pids\(\) \{\n  pgrep -af "\$APP_PROC" 2>\/dev\/null \| grep -v source-update-worker\.cjs/, script);
     assert.doesNotMatch(source, /pkill[^\n]*APP_PROC/, `${script} never signals every process under the app's executable`);
-    const parsed = spawnSync("/bin/bash", ["-n", file], { encoding: "utf8" });
-    assert.equal(parsed.status, 0, `${script} parses: ${parsed.stderr}`);
+    // Windows runners have no /bin/bash; the text checks above already run everywhere.
+    if (process.platform !== "win32") {
+      const parsed = spawnSync("/bin/bash", ["-n", file], { encoding: "utf8" });
+      assert.equal(parsed.status, 0, `${script} parses: ${parsed.stderr}`);
+    }
   }
 });
 

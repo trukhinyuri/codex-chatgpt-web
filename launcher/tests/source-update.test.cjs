@@ -981,17 +981,21 @@ test("the bundle probe reports whether the launcher may replace its own applicat
   const bundle = path.join(root, "Codex Web GPT.app");
   fs.mkdirSync(path.join(bundle, "Contents"), { recursive: true });
   assert.deepEqual(probeBundleWritable(bundle), { writable: true, code: null });
-  assert.deepEqual(fs.readdirSync(path.join(bundle, "Contents")), [], "the probe leaves nothing behind");
+  assert.deepEqual(fs.readdirSync(path.join(bundle, "Contents")), [], "the probe leaves nothing in the bundle");
+  assert.deepEqual(fs.readdirSync(root), ["Codex Web GPT.app"], "the probe leaves nothing beside the bundle");
 
   // macOS answers a refused bundle change with EPERM; a read-only folder answers EACCES. Both mean
-  // the same thing to the updater: this process may not replace the bundle.
-  fs.chmodSync(path.join(bundle, "Contents"), 0o500);
-  try {
-    const refused = probeBundleWritable(bundle);
-    assert.equal(refused.writable, false);
-    assert.ok(["EACCES", "EPERM"].includes(refused.code), `unexpected code ${refused.code}`);
-  } finally {
-    fs.chmodSync(path.join(bundle, "Contents"), 0o700);
+  // the same thing to the updater: this process may not replace the bundle. Both halves of the swap
+  // are asked about — the bundle itself, and the folder the two renames happen in.
+  for (const folder of [path.join(bundle, "Contents"), root]) {
+    fs.chmodSync(folder, 0o500);
+    try {
+      const refused = probeBundleWritable(bundle);
+      assert.equal(refused.writable, false, `a read-only ${path.basename(folder)} is a refusal`);
+      assert.ok(["EACCES", "EPERM"].includes(refused.code), `unexpected code ${refused.code}`);
+    } finally {
+      fs.chmodSync(folder, 0o700);
+    }
   }
 });
 

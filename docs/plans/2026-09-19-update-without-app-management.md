@@ -118,12 +118,14 @@ this plan does not propose it.
    - the moment a Developer ID certificate exists, Apple's documented same-team exemption applies
      with **no further code change**.
    `ELECTRON_RUN_AS_NODE` makes the app's executable behave as Node: no window, no single-instance
-   lock, nothing of the user's session touched. A running executable survives the rename of its own
+   lock, nothing of the user's session touched. Checked against the installed build:
+   `ELECTRON_RUN_AS_NODE=1 "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT" -e …`
+   printed `node 24.18.0` with `argv[0]` equal to the bundle's executable. A running executable survives the rename of its own
    file on macOS, and the build it runs from is kept in the rollback store, so the worker finishes
    the swap and the rollback from the copy it started in.
 2. **An installation that may not replace its bundle never quits.** Before the launcher hands over
    and exits, `probeBundleWritable()` writes and removes one file inside its own bundle — the exact
-   operation macOS protects. On a refusal (`EPERM`, `EACCES`) the update does not start: the
+   operation macOS protects — and one beside it, in the folder the two renames of the swap happen in. On a refusal (`EPERM`, `EACCES`) the update does not start: the
    launcher keeps running, the verified build stays staged for the next window, the commit is *not*
    remembered as failed (nothing is wrong with it), and the maintainer gets a problem report with
    the code `bundle-not-writable`. Before this change the launcher quit first and the worker failed

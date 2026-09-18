@@ -175,20 +175,28 @@ const BUNDLE_PROBE_NAME = ".codex-superpower-update-probe";
  * macOS (Ventura and later) refuses a write into an application bundle by a program that is not
  * part of it and reports EPERM, then offers the user the "App Management" permission. An update
  * that would hit that refusal must not quit a working launcher: the answer is needed before the
- * app exits, and the smallest honest question is the write itself, made and undone in the bundle
- * the update replaces.
+ * app exits, and the smallest honest question is the write itself, made and undone.
+ *
+ * Both halves of the swap are asked about: changing the bundle (what the permission covers) and
+ * writing beside it in the folder that holds it (what the two renames need). Neither leaves
+ * anything behind.
  */
 function probeBundleWritable(bundle, { fileSystem = fs } = {}) {
-  const probe = path.join(bundle, "Contents", BUNDLE_PROBE_NAME);
-  try {
-    fileSystem.rmSync(probe, { force: true });
-    fileSystem.writeFileSync(probe, "", { mode: 0o600 });
-    return { writable: true, code: null };
-  } catch (error) {
-    return { writable: false, code: String(error?.code || "UNKNOWN") };
-  } finally {
-    try { fileSystem.rmSync(probe, { force: true }); } catch {}
+  const probes = [
+    path.join(bundle, "Contents", BUNDLE_PROBE_NAME),
+    path.join(path.dirname(bundle), `${BUNDLE_PROBE_NAME}-${process.pid}`),
+  ];
+  for (const probe of probes) {
+    try {
+      fileSystem.rmSync(probe, { force: true });
+      fileSystem.writeFileSync(probe, "", { mode: 0o600 });
+    } catch (error) {
+      return { writable: false, code: String(error?.code || "UNKNOWN") };
+    } finally {
+      try { fileSystem.rmSync(probe, { force: true }); } catch {}
+    }
   }
+  return { writable: true, code: null };
 }
 
 function normalizedRemote(url) {
