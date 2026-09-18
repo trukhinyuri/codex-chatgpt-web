@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for AI coding agents (Codex, Claude Code and others) that install, verify, update or change Codex Web GPT from this repository. Human-oriented overview: [README.md](README.md).
+Instructions for AI coding agents (Codex, Claude Code and others) that install, verify, update or change Codex Superpower (the **Codex Web GPT** app, its bridge, and the CLIProxyAPI connection) from this repository. Human-oriented overview: [README.md](README.md).
 
 ## Rules
 
