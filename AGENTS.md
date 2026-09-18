@@ -109,6 +109,7 @@ Evidence lives here:
 
 ## Develop
 
+- If Codex on this computer runs through the installed build, follow [docs/self-hosted-development.md](docs/self-hosted-development.md): an agent that breaks the bridge loses every model it could repair it with.
 - Use Bun 1.4.0 exactly. Install with `bun install --frozen-lockfile` in the repository root and in `launcher/`.
 - `bun run verify` must pass before anything reaches `main`: installed launchers build `main` within an hour, refuse a build that fails it, and roll back a build that does not start cleanly. A new launcher start path must still call `reportLauncherStartup` with `healthy` or `unhealthy`, or every update of it is rolled back. Run tests from a normal folder, not `/tmp`; runtime tests reject non-durable paths.
 - Branches: a fix meant for upstream starts from `upstream/main` in `fix/<topic>` with a regression test; a fork-only change starts from `main` in `fork/<topic>`. Merge both into `main`, and keep `fork-build` equal to `main` for older installers.
