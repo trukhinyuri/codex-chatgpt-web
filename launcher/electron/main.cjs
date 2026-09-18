@@ -117,6 +117,11 @@ let catalogVerificationInFlight = false;
 let updateController = null;
 let automaticUpdateRunning = false;
 let problemReporter = null;
+let launcherStateStore = null;
+
+function launcherLanguage() {
+  return launcherStateStore?.read().language || "en";
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -257,6 +262,10 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "Report this one",
     reportNotNow: "Not now",
     reportNever: "Never",
+    quitRunningTitle: "Codex is running {count} task(s) through Codex Web GPT",
+    quitRunningDetail: "Quitting stops them now. Keep the launcher running to let them finish.",
+    quitKeepRunning: "Keep running",
+    quitAnyway: "Quit and stop them",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -278,6 +287,10 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "报告这一次",
     reportNotNow: "以后再说",
     reportNever: "从不",
+    quitRunningTitle: "Codex 正通过 Codex Web GPT 运行 {count} 个任务",
+    quitRunningDetail: "现在退出会停止这些任务。保持启动器运行可以让它们完成。",
+    quitKeepRunning: "保持运行",
+    quitAnyway: "退出并停止",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -299,6 +312,10 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "回報這一次",
     reportNotNow: "稍後再說",
     reportNever: "永不",
+    quitRunningTitle: "Codex 正透過 Codex Web GPT 執行 {count} 個工作",
+    quitRunningDetail: "現在結束會停止這些工作。讓啟動器保持執行即可讓它們完成。",
+    quitKeepRunning: "保持執行",
+    quitAnyway: "結束並停止",
   }),
   "ja": Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -320,6 +337,10 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "今回だけ報告",
     reportNotNow: "後で",
     reportNever: "報告しない",
+    quitRunningTitle: "Codex は Codex Web GPT 経由で {count} 件のタスクを実行中です",
+    quitRunningDetail: "今終了するとタスクは停止します。完了させるにはランチャーを起動したままにしてください。",
+    quitKeepRunning: "起動したままにする",
+    quitAnyway: "終了して停止",
   }),
   "ko": Object.freeze({
     openLauncher: "Codex Web GPT 열기",
@@ -341,6 +362,10 @@ const NATIVE_COPY = Object.freeze({
     reportOnce: "이번만 보고",
     reportNotNow: "나중에",
     reportNever: "보고하지 않음",
+    quitRunningTitle: "Codex가 Codex Web GPT로 작업 {count}개를 실행 중입니다",
+    quitRunningDetail: "지금 종료하면 작업이 중지됩니다. 작업을 끝내려면 런처를 계속 실행하세요.",
+    quitKeepRunning: "계속 실행",
+    quitAnyway: "종료하고 중지",
   }),
 });
 
@@ -354,7 +379,7 @@ function updateTrayMenu(language) {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: copy.openLauncher, click: () => showMainWindow() },
     { type: "separator" },
-    { label: copy.quit, click: () => { void requestQuit(); } },
+    { label: copy.quit, click: () => { void quitAfterConfirmation(); } },
   ]));
 }
 
@@ -1081,6 +1106,34 @@ async function installAutomaticUpdate({ logger, stateStore }) {
   }
 }
 
+/**
+ * A quit from the menu, the tray, macOS (Quit & Reopen after a privacy change) or an agent clicking
+ * around asks first while Codex has turns in flight: quitting cancels them. SIGINT/SIGTERM and the
+ * installer, which waits for an idle Codex, quit without asking.
+ */
+async function quitAfterConfirmation() {
+  if (exitCommitted || shutdownInProgress) return;
+  const health = await runtimeActivity();
+  const running = (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0);
+  if (running > 0) {
+    const copy = nativeCopyFor(launcherLanguage());
+    const options = {
+      type: "warning",
+      message: copy.quitRunningTitle.replace("{count}", String(running)),
+      detail: copy.quitRunningDetail,
+      buttons: [copy.quitKeepRunning, copy.quitAnyway],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const answer = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    if (answer.response !== 1) return;
+  }
+  await requestQuit();
+}
+
 async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
@@ -1210,6 +1263,7 @@ async function start() {
   await app.whenReady();
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  launcherStateStore = stateStore;
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -1561,7 +1615,7 @@ async function start() {
   app.on("before-quit", (event) => {
     if (exitCommitted) return;
     event.preventDefault();
-    void requestQuit();
+    void quitAfterConfirmation();
   });
   process.once("SIGINT", () => { void requestQuit(); });
   process.once("SIGTERM", () => { void requestQuit(); });

@@ -603,3 +603,33 @@ test("every updater test keeps staged builds out of the real temporary folder", 
     assert.ok(isolated >= Math.min(constructions, 1), `${file} passes stagingParent to its controllers`);
   }
 });
+
+test("a quit asks first while Codex has turns in flight; signals and idle quits do not", async () => {
+  const vm = require("node:vm");
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  const start = main.indexOf("async function quitAfterConfirmation(");
+  const end = main.indexOf("\nasync function requestQuit(", start);
+  assert.ok(start >= 0 && end > start);
+  const run = async ({ active, answer }) => {
+    const events = [];
+    const context = {
+      exitCommitted: false,
+      shutdownInProgress: false,
+      mainWindow: null,
+      String,
+      runtimeActivity: async () => ({ active_http_turns: active, active_browser_turns: 0 }),
+      nativeCopyFor: () => ({ quitRunningTitle: "Codex is running {count} task(s)", quitRunningDetail: "d", quitKeepRunning: "Keep", quitAnyway: "Quit" }),
+      launcherLanguage: () => "en",
+      dialog: { showMessageBox: async (options) => { events.push(["dialog", options.message, options.defaultId, options.cancelId]); return { response: answer }; } },
+      requestQuit: async () => { events.push(["quit"]); },
+    };
+    vm.runInNewContext(`${main.slice(start, end)}\nglobalThis.quitAfterConfirmation = quitAfterConfirmation;`, context);
+    await context.quitAfterConfirmation();
+    return events;
+  };
+  assert.deepEqual(await run({ active: 0, answer: 0 }), [["quit"]], "nothing running: quit at once");
+  assert.deepEqual(await run({ active: 2, answer: 0 }), [["dialog", "Codex is running 2 task(s)", 0, 0]], "the default keeps the launcher running");
+  assert.deepEqual(await run({ active: 2, answer: 1 }), [["dialog", "Codex is running 2 task(s)", 0, 0], ["quit"]]);
+  assert.match(main, /app\.on\("before-quit", \(event\) => \{\n\s*if \(exitCommitted\) return;\n\s*event\.preventDefault\(\);\n\s*void quitAfterConfirmation\(\);/);
+  assert.match(main, /process\.once\("SIGTERM", \(\) => \{ void requestQuit\(\); \}\);/);
+});

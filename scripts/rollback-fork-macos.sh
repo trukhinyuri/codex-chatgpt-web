@@ -65,7 +65,12 @@ if launcher_running; then
     done
   fi
   say "Quitting Codex Web GPT"
-  osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  if [ "${NOW:-0}" = 1 ]; then
+    # A normal quit asks first while turns run; NOW=1 means stop them, which SIGTERM does.
+    pkill -TERM -f "$APP_PROC" >/dev/null 2>&1 || true
+  else
+    osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
+  fi
   for _ in $(seq 1 60); do launcher_running || break; sleep 1; done
   launcher_running && die "Codex Web GPT did not quit; quit it from its menu and rerun"
 fi
