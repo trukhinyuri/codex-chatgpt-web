@@ -163,8 +163,35 @@ ditto -x -k "$ZIP" "$STAGE"
 NEW="$STAGE/Codex Web GPT.app"
 [ -x "$NEW/Contents/MacOS/Codex Web GPT" ] || die "the package is incomplete: $ZIP"
 plist_commit() { plutil -extract CodexWebGptSourceCommit raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
+# The launcher runs under a per-user LaunchAgent (label in Info.plist) that starts it at login and
+# restarts it after a crash. Unload it before the app is swapped so launchd never starts a
+# half-replaced build; the launcher that `open` starts next loads it again.
+agent_label() {
+  local label
+  label="$(plutil -extract CodexWebGptLaunchAgentLabel raw -o - "$1/Contents/Info.plist" 2>/dev/null || true)"
+  case "$label" in ''|*[!A-Za-z0-9.-]*) label="" ;; esac
+  printf '%s' "$label"
+}
+unload_launch_agent() {
+  local app label
+  for app in "$@"; do
+    label="$(agent_label "$app")"
+    [ -n "$label" ] || continue
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  done
+}
+# A build from before the agent starts at login through its own login item. When such a build ends
+# up installed, remove the agent's plist so launchd does not start it at login a second time.
+forget_launch_agent_for_older_build() {
+  [ -z "$(agent_label "$1")" ] || return 0
+  [ -n "$2" ] || return 0
+  rm -f "$HOME/Library/LaunchAgents/$2.plist"
+}
 NEW_STAMP="$(plist_commit "$NEW")"
+NEW_LABEL="$(agent_label "$NEW")"
+OLD_LABEL="$(agent_label "$APP")"
 SAVED=""
+unload_launch_agent "$APP" "$NEW"
 if [ -d "$APP" ]; then
   OLD_COMMIT="$(plist_commit "$APP")"
   SAVED="$ROLLBACK_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${OLD_COMMIT:-unknown}"
@@ -177,6 +204,7 @@ if [ -d "$APP" ]; then
   say "Previous app kept for rollback: $SAVED"
 fi
 ditto "$NEW" "$APP"
+forget_launch_agent_for_older_build "$APP" "$OLD_LABEL"
 say "Installed $APP from ${COMMIT:0:7}"
 rm -f "$STARTUP_HEALTH"
 open -a "$APP"
@@ -188,10 +216,13 @@ restore_previous() {
   osascript -e 'tell application "Codex Web GPT" to quit' >/dev/null 2>&1 || true
   for _ in $(seq 1 30); do launcher_running || break; sleep 1; done
   pkill -f "$APP_PROC" >/dev/null 2>&1 || true
+  # A new build that crashes would otherwise be restarted by launchd while it is replaced.
+  unload_launch_agent "$APP"
   if [ -n "$SAVED" ] && [ -d "$SAVED/Codex Web GPT.app" ]; then
     rm -rf "$APP"
     mv "$SAVED/Codex Web GPT.app" "$APP"
     rm -rf "$SAVED"
+    forget_launch_agent_for_older_build "$APP" "$NEW_LABEL"
     open -a "$APP"
     die "the new build did not start cleanly ($1); the previous app was restored"
   fi

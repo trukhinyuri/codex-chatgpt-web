@@ -175,6 +175,22 @@ test("a failed check reports the error but keeps an update that was already foun
   assert.equal((await invalid.instance.checkOnce()).status, "error");
 });
 
+test("the update job names the launch agent the worker unloads before the swap, and only then", async () => {
+  const supervised = controller({ launchAgentLabel: "com.codex-superpower.launcher" });
+  await supervised.instance.checkOnce();
+  const withAgent = JSON.parse(fs.readFileSync((await supervised.instance.beginInstall()).jobPath, "utf8"));
+  assert.deepEqual(withAgent.launchAgent, {
+    label: "com.codex-superpower.launcher",
+    launchctl: "/bin/launchctl",
+    plistPath: path.join(os.homedir(), "Library", "LaunchAgents", "com.codex-superpower.launcher.plist"),
+  });
+
+  const unmanaged = controller();
+  await unmanaged.instance.checkOnce();
+  const withoutAgent = JSON.parse(fs.readFileSync((await unmanaged.instance.beginInstall()).jobPath, "utf8"));
+  assert.equal(withoutAgent.launchAgent, null);
+});
+
 test("an update builds the announced commit, passes all checks, and stages without replacing anything", async () => {
   const { instance, calls } = controller();
   await instance.checkOnce();

@@ -75,6 +75,19 @@ if launcher_running; then
   launcher_running && die "Codex Web GPT did not quit; quit it from its menu and rerun"
 fi
 
+# The launcher runs under a per-user LaunchAgent (label in Info.plist) that restarts it after a crash.
+# Unload it before the swap so launchd never starts a half-replaced build; the launcher that `open`
+# starts below loads it again. A restored build from before the agent starts at login through its own
+# login item, so the agent's plist goes too.
+agent_label() { plutil -extract CodexWebGptLaunchAgentLabel raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
+TARGET_LABEL="$(agent_label "$SOURCE")"
+for app in "$APP" "$SOURCE"; do
+  label="$(agent_label "$app")"
+  case "$label" in ''|*[!A-Za-z0-9.-]*) continue ;; esac
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  [ -n "$TARGET_LABEL" ] || rm -f "$HOME/Library/LaunchAgents/$label.plist"
+done
+
 # Keep the build we leave, so rolling forward is the same operation.
 if [ -d "$APP" ]; then
   KEPT="$ROLLBACK_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${CURRENT_COMMIT:-unknown}"

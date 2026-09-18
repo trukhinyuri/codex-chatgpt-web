@@ -23,6 +23,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       xOpened: false,
       autoStart: true,
       keepRunningOnClose: true,
+      showInMenuBar: false,
       showBrowserDuringTurns: true,
       automaticUpdates: true,
       browserInteractionMode: "automatic",
@@ -51,6 +52,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       xOpened: false,
       autoStart: true,
       keepRunningOnClose: false,
+      showInMenuBar: false,
       showBrowserDuringTurns: true,
       automaticUpdates: true,
       browserInteractionMode: "automatic",
@@ -66,6 +68,23 @@ test("launcher state persists onboarding, language, and autostart atomically", (
     });
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o077, 0);
     assert.equal(fs.readdirSync(root).some(name => name.includes(".tmp-")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the menu-bar icon is opt-in for new and existing users and persists once chosen", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-menu-bar-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    assert.equal(createStateStore(file).read().showInMenuBar, false, "a new user gets no menu-bar icon");
+    // A state file written by an earlier build has no such key: the Dock-only default applies.
+    fs.writeFileSync(file, JSON.stringify({ version: 1, onboardingComplete: true, autoStart: true, keepRunningOnClose: true }));
+    assert.equal(createStateStore(file).read().showInMenuBar, false, "an existing user gets no menu-bar icon either");
+    createStateStore(file).update({ showInMenuBar: true });
+    assert.equal(createStateStore(file).read().showInMenuBar, true);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, showInMenuBar: "yes" }));
+    assert.equal(createStateStore(file).read().showInMenuBar, false, "a corrupt value falls back to the default");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -129,6 +148,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       xOpened: false,
       autoStart: true,
       keepRunningOnClose: true,
+      showInMenuBar: false,
       showBrowserDuringTurns: true,
       automaticUpdates: true,
       browserInteractionMode: "automatic",

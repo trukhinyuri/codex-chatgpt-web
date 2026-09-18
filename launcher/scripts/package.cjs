@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { LAUNCH_AGENT_LABEL } = require("../electron/launch-agent.cjs");
 
 const root = path.resolve(__dirname, "..");
 const launcherManifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
@@ -37,6 +38,11 @@ const builderArgs = [
 ];
 if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
   builderArgs.push("--config.mac.identity=-");
+}
+// The install and rollback scripts unload the launcher's LaunchAgent before they swap the app; they
+// read its label from Info.plist, so the label is named only in launch-agent.cjs.
+if (target === "--mac") {
+  builderArgs.push(`--config.mac.extendInfo.CodexWebGptLaunchAgentLabel=${LAUNCH_AGENT_LABEL}`);
 }
 
 // Stamp the package with the commit it was built from. The launcher's source updater compares this

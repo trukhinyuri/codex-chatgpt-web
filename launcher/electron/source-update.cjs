@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { classifyUpdateFailure } = require("./problem-report.cjs");
+const { LAUNCHCTL, launchAgentPlistPath } = require("./launch-agent.cjs");
 
 // This fork ships from source: the launcher updates itself from the main branch of the fork's
 // GitHub repository and installs a new build only after the complete verification suite passes.
@@ -455,6 +456,9 @@ function createSourceUpdateController({
   userDataDirectory,
   sourceRoot = defaultSourceRoot(),
   healthTimeoutMs = SOURCE_HEALTH_TIMEOUT_MS,
+  // The launcher's LaunchAgent (launch-agent.cjs): the worker unloads it before the swap. Null when
+  // this launcher does not manage one.
+  launchAgentLabel = null,
   publish,
   onProblem,
   logger,
@@ -645,6 +649,9 @@ function createSourceUpdateController({
           statePath,
           logPath,
           tempRoot,
+          launchAgent: launchAgentLabel
+            ? { label: launchAgentLabel, launchctl: LAUNCHCTL, plistPath: launchAgentPlistPath(os.homedir(), launchAgentLabel) }
+            : null,
         };
         const jobPath = path.join(tempRoot, "job.json");
         fs.writeFileSync(jobPath, `${JSON.stringify(job)}\n`, { mode: 0o600 });

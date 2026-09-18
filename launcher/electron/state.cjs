@@ -13,6 +13,8 @@ const DEFAULT_STATE = Object.freeze({
   xOpened: false,
   autoStart: true,
   keepRunningOnClose: true,
+  // macOS: the app lives in the Dock; the menu-bar icon is opt-in (other platforms always show a tray).
+  showInMenuBar: false,
   showBrowserDuringTurns: true,
   automaticUpdates: true,
   browserInteractionMode: "automatic",
@@ -47,6 +49,7 @@ function readState(filePath) {
       "xOpened",
       "autoStart",
       "keepRunningOnClose",
+      "showInMenuBar",
       "showBrowserDuringTurns",
       "automaticUpdates",
       "experimentalBiggerContext",

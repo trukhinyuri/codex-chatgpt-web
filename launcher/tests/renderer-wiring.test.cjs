@@ -37,7 +37,7 @@ test("renderer zoom scales the shell without moving or zooming the native ChatGP
 test("closing the launcher follows the persisted background-runtime preference", () => {
   assert.match(
     electronMain,
-    /if \(stateStore\.read\(\)\.keepRunningOnClose && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
+    /if \(closeHidesWindow\(stateStore\.read\(\)\)\) window\.hide\(\);\s*else void quitAfterConfirmation\(\);/,
   );
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
 });
@@ -61,7 +61,7 @@ test("a foreground launch request survives hidden startup until the launcher win
     /mainWindowReadyToShow = true;[\s\S]*?if \(mainWindowShowRequested\) showMainWindow\(\);/,
   );
 
-  const secondInstance = electronMain.indexOf('app.on("second-instance", () => showMainWindow())');
+  const secondInstance = electronMain.indexOf('app.on("second-instance", (_event, _argv, _workingDirectory, additionalData) => {');
   const runtimeMaterialization = electronMain.indexOf("await waitForPackagedRuntimeSource", secondInstance);
   assert.ok(secondInstance >= 0, "the second-instance foreground request must be registered");
   assert.ok(
@@ -140,6 +140,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
       return { startupTitle: "시작 오류", startupDetail: "다시 시작", startupCleanupFailed: "정리 실패", retry: "다시 시도", quit: "종료" };
     },
     launchEnvironment: { CODEX_CHATGPT_WEB_HOME: undefined, CODEX_HOME: "original-codex-home" },
+    LAUNCHED_BY_AGENT: false, LAUNCH_AGENT_FLAG: "--launched-by-launch-agent", EXIT_RESTART_BY_LAUNCHD: 75,
     process: { argv: ["launcher", "--hidden"], env: { CODEX_CHATGPT_WEB_HOME: "dev-home", CODEX_HOME: "dev-codex-home" } },
     dialog: {
       showErrorBox: () => { answer.opened(); },

@@ -59,6 +59,17 @@ function openedAtLoginOnMac(app) {
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
 }
 
+/**
+ * The macOS login item that earlier builds registered. The LaunchAgent (launch-agent.cjs) replaces
+ * it; it stays only as the fallback when the agent's plist cannot be written.
+ */
+function macLoginItem(app) {
+  return {
+    enabled: () => app.getLoginItemSettings().openAtLogin === true,
+    set: enabled => app.setLoginItemSettings({ openAtLogin: Boolean(enabled), openAsHidden: Boolean(enabled) }),
+  };
+}
+
 function requireAutostartState(result, desired) {
   if (result.supported && result.enabled !== Boolean(desired)) {
     throw new Error(`The operating system did not ${desired ? "enable" : "disable"} launcher autostart`);
@@ -114,6 +125,7 @@ module.exports = {
   linuxAutostartMatches,
   linuxDesktopEntry,
   linuxDesktopPath,
+  macLoginItem,
   openedAtLoginOnMac,
   requireAutostartState,
   setAutostart,

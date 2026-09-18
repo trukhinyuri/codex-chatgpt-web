@@ -1,6 +1,7 @@
 const languages = require("./languages.json");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -19,7 +20,28 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
-const { getAutostart, openedAtLoginOnMac, setAutostart } = require("./autostart.cjs");
+const {
+  getAutostart,
+  macLoginItem,
+  openedAtLoginOnMac,
+  requireAutostartState,
+  setAutostart,
+} = require("./autostart.cjs");
+const {
+  EXIT_RESTART_BY_LAUNCHD,
+  LAUNCH_AGENT_FLAG,
+  agentBlocked,
+  LAUNCH_AGENT_LABEL,
+  createLaunchAgent,
+  launchAgentEligibility,
+  launchAgentPlistPath,
+  launchedByLaunchAgent,
+  prepareLaunch,
+  reconcileLoginItem,
+  sameLauncherProfile,
+  setLaunchAgentAutostart,
+  systemLaunchAgentDependencies,
+} = require("./launch-agent.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -123,6 +145,13 @@ let updateIdleWait = null;
 let updateInstallRequested = false;
 let problemReporter = null;
 let launcherStateStore = null;
+// launchd started this process from the LaunchAgent (launch-agent.cjs). It restarts it after a crash
+// or any non-zero exit, so only an intentional quit may exit 0.
+const LAUNCHED_BY_AGENT = launchedByLaunchAgent(process.argv);
+// macOS only: the LaunchAgent this launcher manages, and who runs this process
+// ("supervised" by launchd or "in-process"). Set by prepareLauncherSupervision.
+let launchAgent = null;
+let launchMode = "in-process";
 
 function launcherLanguage() {
   return launcherStateStore?.read().language || "en";
@@ -425,6 +454,35 @@ function createTray(logger, language) {
   }
 }
 
+/**
+ * On macOS the app lives in the Dock, so the menu-bar icon is opt-in ("Show in menu bar"). Windows
+ * and Linux keep their tray icon: without it a hidden window has no way back.
+ */
+function trayWanted(state) {
+  return process.platform !== "darwin" || state.showInMenuBar === true;
+}
+
+/** Create or remove the tray icon to match the settings; true while one is shown. */
+function syncTray(logger, state) {
+  if (!trayWanted(state)) {
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+    return false;
+  }
+  return tray ? true : createTray(logger, state.language);
+}
+
+/**
+ * Closing the window keeps the launcher and its bridge running when that is the setting and the
+ * window can come back: from the Dock on macOS, from the tray elsewhere. Otherwise it is a quit,
+ * which asks first while Codex has turns in flight.
+ */
+function closeHidesWindow(state) {
+  return state.keepRunningOnClose === true && (process.platform === "darwin" || Boolean(tray));
+}
+
 function showMainWindow() {
   // A Windows login launch may still be materializing the packaged runtime when the user opens
   // the desktop shortcut. Electron delivers `second-instance` immediately, before `createWindow`
@@ -472,7 +530,7 @@ function windowStateSnapshot(window) {
   };
 }
 
-function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
+function createWindow({ logger, stateStore, windowStatePath, startHidden, activateOnShow = false }) {
   const isMac = process.platform === "darwin";
   const state = stateStore.read();
   const windowState = readWindowState(windowStatePath, screen.getAllDisplays());
@@ -531,8 +589,8 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    if (stateStore.read().keepRunningOnClose && tray) window.hide();
-    else void requestQuit();
+    if (closeHidesWindow(stateStore.read())) window.hide();
+    else void quitAfterConfirmation();
   });
   window.on("closed", () => {
     if (mainWindow === window) {
@@ -549,7 +607,12 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     if (windowState.fullscreen) window.setFullScreen(true);
     if (mainWindow === window) mainWindowReadyToShow = true;
     if (mainWindowShowRequested) showMainWindow();
-    else if (!startHidden) window.show();
+    else if (!startHidden) {
+      window.show();
+      // A start handed off to launchd shows the window the user asked for; the supervised process
+      // was not opened by the Dock or Finder, so macOS does not bring it forward by itself.
+      if (activateOnShow && process.platform === "darwin") app.focus({ steal: true });
+    }
   });
   trackWindowState(window, windowStatePath, (error) => {
     logger.warn("launcher.window_state_write_failed", {
@@ -594,6 +657,87 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
+/**
+ * "Start at login". On macOS it is the LaunchAgent, which also restarts the launcher after a crash.
+ * Windows, Linux and a macOS launcher that manages no agent (another profile) keep the login item
+ * or autostart entry of earlier builds.
+ */
+function applyAutostart(enabled, logger) {
+  if (!launchAgent) return setAutostart(app, enabled);
+  return requireAutostartState(setLaunchAgentAutostart({
+    agent: launchAgent,
+    enabled,
+    supervised: launchMode === "supervised",
+    loginItem: macLoginItem(app),
+    log: (level, event, detail) => logger[level](event, detail),
+  }), enabled);
+}
+
+/** A start at login or with --hidden stays in the background; any other start shows the window. */
+function requestedHiddenStart() {
+  if (process.argv.includes("--hidden")) return true;
+  try {
+    return openedAtLoginOnMac(app);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * macOS: decide who runs this launcher before anything starts (launch-agent.cjs). launchd runs it
+ * when "Start at login" is on: a start that launchd did not make hands off to the LaunchAgent and
+ * exits 0. If the agent cannot be installed or started, this process keeps running. Synchronous, so
+ * the app is not ready yet and the command-line switches set later still apply.
+ */
+function prepareLauncherSupervision({ logger, stateStore }) {
+  const inProcess = { mode: "in-process", exit: false, showRequested: false, code: null };
+  const log = (level, event, detail) => logger[level](event, detail);
+  const eligibility = launchAgentEligibility({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    developmentProfile: IS_DEV_PROFILE,
+    smokeTest: process.argv.includes("--launcher-smoke-test"),
+    defaultProfile: sameLauncherProfile(
+      LAUNCHER_PROFILE,
+      resolveLauncherProfile({ argv: [], env: {}, appData: app.getPath("appData") }),
+    ),
+    executable: process.execPath,
+  });
+  if (!eligibility.eligible) {
+    if (process.platform === "darwin" && app.isPackaged && eligibility.reason !== "smoke-test") {
+      logger.info("launch_agent.unavailable", { reason: eligibility.reason, launchedByAgent: LAUNCHED_BY_AGENT });
+    }
+    return inProcess;
+  }
+  try {
+    launchAgent = createLaunchAgent({
+      label: LAUNCH_AGENT_LABEL,
+      executable: process.execPath,
+      plistPath: launchAgentPlistPath(os.homedir()),
+      uid: process.getuid(),
+      userDataDirectory: launcherUserData,
+      deps: systemLaunchAgentDependencies({ userDataDirectory: launcherUserData }),
+    });
+  } catch {
+    logger.warn("launch_agent.unavailable", { reason: "setup-failed", launchedByAgent: LAUNCHED_BY_AGENT });
+    return inProcess;
+  }
+  const launch = prepareLaunch({
+    agent: launchAgent,
+    eligible: true,
+    launchedByAgent: LAUNCHED_BY_AGENT,
+    agentWanted: stateStore.read().autoStart === true,
+    show: !requestedHiddenStart(),
+    lock: {
+      request: data => app.requestSingleInstanceLock(data),
+      release: () => app.releaseSingleInstanceLock(),
+    },
+    log,
+  });
+  launchMode = launch.mode;
+  return launch;
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("launcher:snapshot", async () => ({
@@ -620,6 +764,8 @@ function registerIpc({ logger, stateStore }) {
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
     problemReports: problemReporter?.consent() ?? "unavailable",
+    // Launch at login is on, but macOS will not run the agent (System Settings, MDM).
+    autostartBlocked: Boolean(launchAgent) && stateStore.read().autoStart === true && agentBlocked(launchAgent),
   }));
   const cliproxy = createCliProxyPanel({
     invocationFor: args => runtimeSupervisor.runtimeCommand(args),
@@ -656,7 +802,14 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
     if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
-    if (current.autoStart) setAutostart(app, true);
+    if (current.autoStart) {
+      // Autostart never blocks onboarding; Settings shows and retries it.
+      try {
+        applyAutostart(true, logger);
+      } catch (error) {
+        logger.warn("launcher.autostart_failed", { message: error instanceof Error ? error.message : String(error) });
+      }
+    }
     const next = stateStore.update({
       language: validateLanguage(language),
       browserInteractionMode: validateBrowserInteractionMode(rawInteractionMode),
@@ -945,7 +1098,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:autostart", (_event, enabled) => {
     if (IS_DEV_PROFILE) throw new Error("The isolated DEV launcher is started explicitly from the repository CLI");
     const desired = enabled === true;
-    const autostart = setAutostart(app, desired);
+    const autostart = applyAutostart(desired, logger);
     return {
       state: stateStore.update({ autoStart: desired }),
       ...autostart,
@@ -1025,9 +1178,11 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "automaticUpdates";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "automaticUpdates"
+      || key === "showInMenuBar";
     if (!ordinary) throw new Error("Unknown preference");
     const state = stateStore.update({ [key]: value === true });
+    if (key === "showInMenuBar") syncTray(logger, state);
     if (key === "automaticUpdates" && value === true) void installAutomaticUpdate({ logger, stateStore });
     return state;
   });
@@ -1230,6 +1385,9 @@ async function requestQuit({ preserveActiveTurns = false, quiet = false } = {}) 
     browserHost?.destroy();
     await browserControl?.close();
     exitCommitted = true;
+    // Every intentional quit (menu, Cmd+Q, Dock, tray, SIGTERM, an update) ends here. app.quit()
+    // exits 0, which launchd's KeepAlive (SuccessfulExit=false) never restarts; a crash exits
+    // otherwise and is restarted.
     app.quit();
     return { ok: true };
   } catch (error) {
@@ -1303,13 +1461,31 @@ function reportProblem(problem) {
 }
 
 async function start() {
-  const gotLock = app.requestSingleInstanceLock();
+  // A launchd start is not a user's click: it never asks a running launcher to show its window.
+  const gotLock = LAUNCHED_BY_AGENT ? app.requestSingleInstanceLock({ show: false }) : app.requestSingleInstanceLock();
   if (!gotLock) {
     app.quit();
     return;
   }
+  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  launcherStateStore = stateStore;
+  const logger = createLogger({
+    filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
+    publish: (record) => send("launcher:log", record),
+  });
+  const launch = prepareLauncherSupervision({ logger, stateStore });
+  if (launch.exit) {
+    // launchd runs the supervised launcher now; this start leaves before any window, port or health
+    // record, and exits 0.
+    app.quit();
+    return;
+  }
   reportLauncherStartup("starting");
-  app.on("second-instance", () => showMainWindow());
+  app.on("second-instance", (_event, _argv, _workingDirectory, additionalData) => {
+    if (additionalData?.show === false) return;
+    showMainWindow();
+  });
+  // macOS: a click on the Dock icon brings the hidden window back.
   app.on("activate", () => showMainWindow());
 
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
@@ -1339,8 +1515,6 @@ async function start() {
 
   await app.whenReady();
 
-  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
-  launcherStateStore = stateStore;
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -1359,17 +1533,23 @@ async function start() {
       codexRestartRequired: false,
     });
   }
-  const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
-  if (!IS_DEV_PROFILE
-    && stateStore.read().onboardingComplete
-    && autostart.supported
-    && stateStore.read().autoStart !== autostart.enabled) {
-    setAutostart(app, stateStore.read().autoStart);
+  if (launchAgent) {
+    // The LaunchAgent replaces the login item of earlier builds (see launch-agent.cjs).
+    reconcileLoginItem({
+      agent: launchAgent,
+      agentWanted: stateStore.read().autoStart === true,
+      loginItem: macLoginItem(app),
+      log: (level, event, detail) => logger[level](event, detail),
+    });
+  } else {
+    const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
+    if (!IS_DEV_PROFILE
+      && stateStore.read().onboardingComplete
+      && autostart.supported
+      && stateStore.read().autoStart !== autostart.enabled) {
+      setAutostart(app, stateStore.read().autoStart);
+    }
   }
-  const logger = createLogger({
-    filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
-    publish: (record) => send("launcher:log", record),
-  });
   // Packaged builds of this fork report problems as GitHub issues, with the user's consent.
   if (app.isPackaged && !IS_DEV_PROFILE && SOURCE_COMMIT.test(String(LAUNCHER_MANIFEST.sourceCommit || ""))) {
     problemReporter = createProblemReporter({
@@ -1381,7 +1561,11 @@ async function start() {
   }
   // On macOS, a real login-item launch never carries "--hidden" in argv (setLoginItemSettings's
   // `args` is Windows-only); openedAtLoginOnMac reads the OS's own record of that launch instead.
-  const startHidden = (process.argv.includes("--hidden") || openedAtLoginOnMac(app))
+  // launchd starts the supervised launcher at login, after a crash and for a handed-off start; only
+  // the last one, when the user opened the app, shows the window.
+  const startHidden = (launchMode === "supervised"
+    ? !launch.showRequested
+    : process.argv.includes("--hidden") || openedAtLoginOnMac(app))
     && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -1389,6 +1573,7 @@ async function start() {
     stateStore,
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
+    activateOnShow: launch.showRequested === true,
   });
   browserControl = await new BrowserControlServer({
     logger,
@@ -1459,13 +1644,15 @@ async function start() {
       : null,
     logsDirectory: app.getPath("logs"),
     userDataDirectory: app.getPath("userData"),
+    launchAgentLabel: launchAgent ? LAUNCH_AGENT_LABEL : null,
     publish: (state) => send("launcher:update-state", state),
     onProblem: reportProblem,
     logger,
   });
   registerIpc({ logger, stateStore });
-  const trayAvailable = createTray(logger, stateStore.read().language);
-  if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
+  const trayAvailable = syncTray(logger, stateStore.read());
+  // Without a tray a hidden window could not come back, except through the Dock on macOS.
+  if (startHidden && !trayAvailable && process.platform !== "darwin") mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
   let startupAuthenticationRefresh = Promise.resolve();
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
@@ -1714,6 +1901,9 @@ void start().catch(async (error) => {
   startupFailed = true;
   reportLauncherStartup("unhealthy", "launcher-start-error");
   const message = error instanceof Error ? error.message : String(error);
+  // launchd restarts a supervised launcher after any non-zero exit and never after exit 0: Quit is
+  // intentional and exits 0; a supervised Retry leaves the restart to launchd instead of relaunching.
+  let exitCode = 1;
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
@@ -1742,17 +1932,25 @@ void start().catch(async (error) => {
     const result = mainWindow && !mainWindow.isDestroyed()
       ? await dialog.showMessageBox(mainWindow, options)
       : await dialog.showMessageBox(options);
-    if (result.response === 0) {
+    if (result.response === 0 && LAUNCHED_BY_AGENT) {
+      // launchd starts the launcher again; that start shows its window, as the user asked.
+      try { launchAgent?.requestShow(); } catch {}
+      exitCode = EXIT_RESTART_BY_LAUNCHD;
+    } else if (result.response === 0) {
       // Internal child commands use the resolved profile. A fresh launcher must instead
       // resolve the original launch environment, especially for the isolated DEV profile.
       for (const [key, value] of Object.entries(launchEnvironment)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      app.relaunch({ args: process.argv.slice(1).filter(argument => argument !== "--hidden") });
+      app.relaunch({
+        args: process.argv.slice(1).filter(argument => argument !== "--hidden" && argument !== LAUNCH_AGENT_FLAG),
+      });
+    } else {
+      exitCode = 0;
     }
   } finally {
     // A failed dialog or relaunch must not leave a headless single-instance owner behind.
-    app.exit(1);
+    app.exit(exitCode);
   }
 });

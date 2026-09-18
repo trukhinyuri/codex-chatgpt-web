@@ -10,6 +10,7 @@ Instructions for AI coding agents (Codex, Claude Code and others) that install, 
 - **Leave Codex's configuration to the launcher.** **Install models** and **Remove** manage the keys it owns in `~/.codex/config.toml`. Before any manual edit, copy the file with a date in its name.
 - **Report evidence.** For every step, give the command and its result. Say plainly what failed or was not checked.
 - **Quitting with running turns is the human's choice.** The launcher asks before it quits while Codex has turns in flight. Never answer that dialog, and never quit or restart the launcher to fix something while a turn runs.
+- **Quit the launcher only the normal way.** On macOS the LaunchAgent `com.codex-superpower.launcher` keeps it running: launchd restarts it after any exit other than a normal quit. Quit it from its menu or with `osascript -e 'tell application "Codex Web GPT" to quit'`; never `kill -9` it, `launchctl bootout` or `launchctl kickstart -k` it, or edit the agent's plist. Closing the window does not quit it.
 - **Problem reports are the human's choice.** The launcher asks before it opens a GitHub issue. Never answer that dialog for the human, and never paste logs, prompts or paths into an issue yourself; the automatic report already carries what the maintainer needs.
 
 ## Install (macOS)
@@ -39,6 +40,7 @@ Open **Codex Web GPT**. The human performs sign-in and pastes secrets; you drive
 3. **Models.** Press **Install models**. When it finishes, ask the human to quit and reopen Codex, then wait until the launcher reports that Codex loaded the model catalog.
 4. **Tools (Full harness).** Open **MCP**. The human creates a Tunnel at <https://platform.openai.com/settings/organization/tunnels> and an API key at <https://platform.openai.com/settings/organization/api-keys> and pastes both. Press **Connect harness**. The human enables ChatGPT Developer Mode ([help article](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)) and creates a Tunnel connector named exactly `Codex Native2` with **Authentication: None** and **Allow all actions**. Press **Verify runtime** and wait for success.
 5. **Long tasks (optional).** In **Settings**, turn on **Bigger Context**, then ask the human to restart Codex.
+6. **Background.** Leave **Settings → Launch at login** on (the default): on macOS it installs the LaunchAgent that starts the launcher at login and restarts it after a crash. **Show in menu bar** is optional; the launcher lives in the Dock either way.
 
 ## Connect CLIProxyAPI (optional)
 
@@ -72,6 +74,7 @@ Run every check and report each as passed or failed.
 4. **Mode (Computer Use).** While a test turn runs, screenshot the launcher's **Browser** view. The mode control next to the ChatGPT composer must show the mode of the chosen model, for example **High** or **Pro**. With Bigger Context, every message of a large turn uses that mode.
 5. **Tools.** In a Codex task that uses a ChatGPT Web model, ask it to run `pwd`. Expect the task folder, printed from a real Codex tool call.
 6. **CLIProxyAPI (if connected).** `codex-chatgpt-web cliproxy status` reports `"reachable": true`; `codex exec --skip-git-repo-check -m <proxy model> "Reply with exactly: READY"` answers `READY`.
+7. **Supervision (macOS, Launch at login on).** Read-only: `launchctl print "gui/$(id -u)/com.codex-superpower.launcher" | grep -E '^\s*(state|pid) ='` shows `state = running` and a PID, and `pgrep -f "Codex Web GPT.app/Contents/MacOS/Codex Web GPT --launched-by-launch-agent"` prints the same PID.
 
 ## Update
 
@@ -93,6 +96,7 @@ Evidence lives here:
 | --- | --- |
 | Launcher and bridge | `~/Library/Application Support/Codex Web GPT/logs/launcher.jsonl` |
 | Updates | `~/Library/Application Support/Codex Web GPT/logs/source-update.log`; failed commits and the last result in `source-update-state.json`, the last start in `source-update-health.json` (same folder) |
+| Start at login and crash restarts (macOS) | `~/Library/LaunchAgents/com.codex-superpower.launcher.plist`; `launchctl print "gui/$(id -u)/com.codex-superpower.launcher"`; `launch_agent.*` events in `launcher.jsonl` |
 | MCP and tunnel | `~/Library/Application Support/tunnel-client/logs/codex-chatgpt-web.log` |
 | Codex | `~/.codex/logs_2.sqlite` (table `logs`), `~/.codex/sessions/**/rollout-*.jsonl` |
 | Browser turns (structure only, no page text) | `~/.codex-chatgpt-web/diagnostics/browser-turns/` |
@@ -106,6 +110,7 @@ Evidence lives here:
 | `exceeds the measured … ChatGPT browser message boundary` | The context does not fit one message | Turn on Bigger Context, or run `/compact` |
 | `missing cwd in trusted Codex environment context` | Not expected in this fork, including skills outside Git and multi-folder projects | Collect the turn's rollout and the matching `trusted environment unavailable (…)` line from `launcher.jsonl`, then open an issue in this repository |
 | `Connection refused` on `127.0.0.1:17841` | The launcher is not running | Open Codex Web GPT |
+| `launch_agent.handoff_failed` or `launch_agent.install_failed` in `launcher.jsonl` | The launcher could not install or start its LaunchAgent and runs without crash restarts | Report the `code` field; the launcher keeps working. `agent-disabled` means System Settings or a management profile switched the agent off: ask the human to allow Codex Web GPT under Login Items |
 
 ## Develop
 

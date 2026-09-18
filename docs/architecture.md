@@ -171,13 +171,17 @@ accepted under the application home. Daemon and MCP commands use that durable co
 required because Linux AppImage mount paths are temporary and must never be persisted in Codex or
 tunnel configuration.
 
-The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
-tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its
-versioned health payload. Native login items or an owner-local XDG autostart file launch the app
-hidden after sign-in. A marker containing only launcher-owned PIDs lets doctor distinguish the
-launcher runtime from a stale or external process. Legacy macOS launchd services are drained and
-removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
-mode.
+The launcher is the sole supervisor of the tunnel and the Responses daemon on macOS, Windows, and
+Linux. It starts the optional tunnel first, waits for healthy/ready evidence, starts the Responses
+daemon, and then waits for its versioned health payload. With Launch at login on, macOS supervises
+the launcher itself through a per-user LaunchAgent (`launcher/electron/launch-agent.cjs`): it starts
+the app hidden after sign-in and restarts it after a crash, and a start that launchd did not make
+hands off to it. With Launch at login off, when macOS or MDM switched the agent off, or when the
+hand-off fails, the launcher runs unsupervised. Windows login items and an owner-local XDG autostart
+file start it on the other platforms. A marker containing only launcher-owned PIDs lets doctor
+distinguish the launcher runtime from a stale or external process. The legacy launchd services of
+the daemon and the tunnel are drained and removed during an explicit launcher migration; launchd
+runs the daemon only in the advanced terminal-only mode.
 
 Setup keeps Codex's built-in `openai` provider. It routes Responses through the local daemon with
 `openai_base_url`, while pinning `experimental_realtime_webrtc_call_base_url` to Codex's official

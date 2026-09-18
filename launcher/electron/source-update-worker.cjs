@@ -152,6 +152,44 @@ function pruneRollbackStore(job, keep) {
   }
 }
 
+/**
+ * The launcher runs under a per-user LaunchAgent that restarts it after a crash. Unload it before the
+ * app is swapped or rolled back, so launchd never starts a half-replaced or failing build meanwhile
+ * (the quit for an update exits 0 and is not restarted, but a crash while quitting would be). The
+ * launcher this worker opens next hands off to launchd, which loads the agent again. A job without
+ * `launchAgent` (tests, other platforms) never touches launchd.
+ */
+function unloadLaunchAgent(job, reason) {
+  const agent = job.launchAgent;
+  if (!agent || typeof agent.label !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(agent.label)) return;
+  if (typeof agent.launchctl !== "string" || !path.isAbsolute(agent.launchctl) || typeof process.getuid !== "function") return;
+  const target = `gui/${process.getuid()}/${agent.label}`;
+  const result = spawnSync(agent.launchctl, ["bootout", target], { encoding: "utf8", timeout: 60_000 });
+  appendLog(job, result.status === 0
+    ? `unloaded the launch agent before ${reason}`
+    : `the launch agent was not loaded before ${reason} (launchctl status ${result.status ?? "none"})`);
+}
+
+/**
+ * A restored build from before the LaunchAgent starts at login through its own login item. Remove
+ * the agent's plist, so launchd does not start that build at login a second time; a later build
+ * that knows the agent writes it again on its first start.
+ */
+function forgetLaunchAgentForOlderBuild(job) {
+  const plistPath = job.launchAgent?.plistPath;
+  if (typeof plistPath !== "string" || !path.isAbsolute(plistPath) || !plistPath.endsWith(".plist")) return;
+  const stamp = spawnSync("/usr/bin/plutil", [
+    "-extract", "CodexWebGptLaunchAgentLabel", "raw", "-o", "-", path.join(job.target, "Contents", "Info.plist"),
+  ], { encoding: "utf8", timeout: 30_000 });
+  if (stamp.status === 0 && stamp.stdout.trim()) return;
+  try {
+    fs.rmSync(plistPath, { force: true });
+    appendLog(job, "the restored build predates the launch agent; removed the agent's plist");
+  } catch (error) {
+    appendLog(job, `could not remove the launch agent's plist: ${errorText(error)}`);
+  }
+}
+
 function launchApplication(job) {
   const [command, ...args] = Array.isArray(job.launchCommand) && job.launchCommand.length > 0
     ? job.launchCommand
@@ -208,6 +246,8 @@ async function stopNewLauncher(job, pidHint) {
 
 async function rollBack(job, saved, reason) {
   appendLog(job, `rolling back ${job.commit}: ${reason}`);
+  // Before the failing launcher is stopped: launchd must not start it again mid-rollback.
+  unloadLaunchAgent(job, "the rollback");
   await stopNewLauncher(job, saved.pid);
   const failed = `${job.target}.failed-${process.pid}`;
   fs.rmSync(failed, { recursive: true, force: true });
@@ -216,6 +256,7 @@ async function rollBack(job, saved, reason) {
   fs.rmSync(saved.entry, { recursive: true, force: true });
   fs.rmSync(failed, { recursive: true, force: true });
   recordResult(job, "rolled-back", { stage: "startup", reason });
+  forgetLaunchAgentForOlderBuild(job);
   launchApplication(job);
   appendLog(job, `restored ${job.previousCommit || "the previous build"} and relaunched it`);
 }
@@ -235,6 +276,7 @@ async function main() {
     appendLog(job, "the launcher did not exit; nothing was changed");
     return 1;
   }
+  unloadLaunchAgent(job, "the install");
 
   let saved = null;
   try {

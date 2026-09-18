@@ -215,7 +215,10 @@ To remove the integration safely:
 
 1. Open **Settings → Remove Codex integration** and wait for it to restore the previous Codex route.
 2. Fully restart Codex.
-3. Quit the launcher and uninstall the application normally for the platform.
+3. On macOS, turn off **Settings → Launch at login**, which removes the launcher's LaunchAgent. Then
+   quit the launcher and uninstall the application normally for the platform. If the app is already
+   gone, remove the agent with `launchctl bootout "gui/$(id -u)/com.codex-superpower.launcher"` and
+   `rm ~/Library/LaunchAgents/com.codex-superpower.launcher.plist`.
 4. If Full harness was configured and is no longer wanted, separately delete **Codex Native2**, its
    Tunnel, and the API key created for that Tunnel from the corresponding account settings.
 

@@ -4,7 +4,7 @@ One model list in [Codex](https://developers.openai.com/codex) (app and CLI) for
 
 Codex Superpower started as a fork of [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) (formerly `trukhinyuri/codex-chatgpt-web`). It fixes failures seen in daily use, installs from source on macOS, and keeps itself up to date from this repository's `main` branch: every update must pass the full test suite and start cleanly, or the previous build stays in place.
 
-[Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [CLIProxyAPI models](#models-from-cliproxyapi) · [What this fork changes](#what-this-fork-changes) · [Updates](#updates-and-rollback) · [Problem reports](#problem-reports) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Set up with an AI agent](#set-up-with-an-ai-agent) · [How it works](#how-it-works) · [CLIProxyAPI models](#models-from-cliproxyapi) · [What this fork changes](#what-this-fork-changes) · [Running in the background](#running-in-the-background) · [Updates](#updates-and-rollback) · [Problem reports](#problem-reports) · [Troubleshooting](#troubleshooting)
 
 ## Quick start
 
@@ -127,11 +127,22 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 | Installation | Release installers | `scripts/install-fork-macos.sh` builds from source; `WAIT_FOR_IDLE=1` never interrupts work |
 | Fixes from the wider project | Open pull requests and forks, unmerged | About thirty fixes ported from upstream pull requests and other forks, each with a regression test: DNS-rebinding protection for the bridge, exact origin checks, no resend of a prompt ChatGPT already accepted, retry and continuation fixes, composer and effort-slider races, retained-tab and session recovery, compaction persistence, image validation, doctor evidence, a visible tray icon |
 | Quitting with running turns | Cancels them | Asks first; the default keeps the launcher running |
+| Running in the background (macOS) | Always a menu-bar icon; a login item starts the app; nothing restarts it after a crash | A normal Dock app that [launchd starts at login and restarts after a crash](#running-in-the-background); the menu-bar icon is optional |
 | Other models | — | [Models from a local CLIProxyAPI](#models-from-cliproxyapi) join the same Codex model list, with Codex's own sign-in and features intact |
 | Problem reports | — | [Consented GitHub issues](#problem-reports) built only from fixed codes and versions |
 | AI agents | — | [AGENTS.md](AGENTS.md) runbook for setup, verification and updates |
 
 Each fix meant for upstream lives in its own `fix/…` branch with a regression test.
+
+## Running in the background
+
+On macOS, **Codex Web GPT** is a normal Dock app, and Codex needs it running: its bridge on `127.0.0.1:17841` serves every model.
+
+- **Closing the window** keeps the app and the bridge running. Click the Dock icon to bring the window back. **Settings → Show in menu bar** adds a menu-bar icon; it is off by default.
+- **Launch at login** (Settings, on by default) installs a per-user LaunchAgent, `~/Library/LaunchAgents/com.codex-superpower.launcher.plist`. launchd starts the app in the background at login and restarts it within about ten seconds after a crash. When you open the app from Finder or the Dock, that start hands over to launchd, so the running app is always the supervised one. macOS lists the agent under Login Items in System Settings, where it can also be switched off.
+- **Quitting** from the app menu, the Dock or ⌘Q asks first while Codex has turns running, and the app then stays quit until you open it or log in again. Force Quit counts as a crash, so launchd starts the app again.
+- **Coming from an earlier build**, the first start replaces the old login item with the agent. If you had turned Launch at login off, it stays off. Turning it off removes the agent; the app running at that moment keeps crash restarts until it quits.
+- If the agent cannot be installed or started, the app keeps running without it and records a `launch_agent.*` event in `~/Library/Application Support/Codex Web GPT/logs/launcher.jsonl`. If you or a management profile switch the agent off in System Settings, **Launch at login** says so, and the app does not bring back the old login item.
 
 ## Updates and rollback
 

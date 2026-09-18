@@ -13,6 +13,7 @@ export interface LauncherState {
   xOpened: boolean;
   autoStart: boolean;
   keepRunningOnClose: boolean;
+  showInMenuBar: boolean;
   automaticUpdates: boolean;
   showBrowserDuringTurns: boolean;
   browserInteractionMode: BrowserInteractionMode;
@@ -141,6 +142,8 @@ export interface LauncherSnapshot {
   update: UpdateState;
   /** Consent for GitHub problem reports; "unavailable" outside installed builds of this fork. */
   problemReports: ProblemReportConsent;
+  /** macOS: Launch at login is on, but System Settings or MDM keep the LaunchAgent from running. */
+  autostartBlocked?: boolean;
 }
 
 export type ProblemReportConsent = "unknown" | "auto" | "never" | "unavailable";
@@ -205,7 +208,7 @@ export interface LauncherApi {
     interactionMode?: BrowserInteractionMode;
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
-  setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
+  setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean; blocked?: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
@@ -215,7 +218,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "automaticUpdates",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "automaticUpdates" | "showInMenuBar",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

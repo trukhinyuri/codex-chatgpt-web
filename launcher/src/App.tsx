@@ -1771,6 +1771,7 @@ function SettingsSurface({
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
   const [problemReports, setProblemReports] = useState(snapshot.problemReports);
+  const [autostartBlocked, setAutostartBlocked] = useState(snapshot.autostartBlocked === true);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1856,11 +1857,20 @@ function SettingsSurface({
     <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
       <SectionHeading label={copy.general} />
       <div className="settings-list">
-        {!devProfile ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
+        {!devProfile ? <SettingRow
+          body={autostartBlocked && snapshot.state.autoStart
+            ? copy.launchAtLoginBlocked
+            : snapshot.platform === "darwin" ? copy.launchAtLoginBodyMac : copy.launchAtLoginBody}
+          flushAfter
+          label={copy.launchAtLogin}
+        >
           <Switch
             checked={snapshot.state.autoStart}
             onChange={(checked) => void api!.setAutostart(checked)
-              .then((result) => updateState(result.state))
+              .then((result) => {
+                updateState(result.state);
+                setAutostartBlocked(result.blocked === true);
+              })
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow> : null}
@@ -1870,7 +1880,12 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
-        <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
+        <SettingRow
+          body={devProfile
+            ? copy.devKeepRunningBody
+            : snapshot.platform === "darwin" ? copy.keepRunningOnCloseBodyMac : copy.keepRunningOnCloseBody}
+          label={copy.keepRunningOnClose}
+        >
           <Switch
             checked={snapshot.state.keepRunningOnClose}
             onChange={(checked) => void api!.setPreference("keepRunningOnClose", checked)
@@ -1878,6 +1893,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {snapshot.platform === "darwin" ? <SettingRow body={copy.showInMenuBarBody} label={copy.showInMenuBar}>
+          <Switch
+            checked={snapshot.state.showInMenuBar}
+            onChange={(checked) => void api!.setPreference("showInMenuBar", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         {problemReports !== "unavailable" ? <SettingRow body={copy.problemReportsBody} label={copy.problemReports}>
           <Switch
             checked={problemReports === "auto"}
