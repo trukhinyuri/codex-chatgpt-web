@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const {
+  LEGACY_SOURCE_CLONE_URLS,
   SOURCE_BRANCH,
   SOURCE_CLONE_URL,
   SOURCE_COMMIT_API_URL,
@@ -80,8 +81,8 @@ function controller(overrides = {}, dependencies = {}) {
 
 test("the fork updates only from its own main branch", () => {
   assert.equal(SOURCE_BRANCH, "main");
-  assert.equal(SOURCE_CLONE_URL, "https://github.com/trukhinyuri/codex-chatgpt-web.git");
-  assert.equal(SOURCE_COMMIT_API_URL, "https://api.github.com/repos/trukhinyuri/codex-chatgpt-web/commits/main");
+  assert.equal(SOURCE_CLONE_URL, "https://github.com/trukhinyuri/codex-superpower.git");
+  assert.equal(SOURCE_COMMIT_API_URL, "https://api.github.com/repos/trukhinyuri/codex-superpower/commits/main");
   assert.equal(defaultSourceRoot("/Users/example"), "/Users/example/.codex-chatgpt-web-source");
   assert.equal(sourceUpdateVersion("5.0.8", MAIN), "5.0.8+2222222");
 });
@@ -309,7 +310,21 @@ test("the managed checkout is cloned, pinned to the exact commit, and cleaned", 
   await assert.rejects(prepareCheckout({ sourceRoot, commit: "f".repeat(40), env, cloneUrl: origin }), /git merge-base|git cat-file|fatal|not a valid/i);
   await assert.rejects(prepareCheckout({ sourceRoot, commit: second, env, cloneUrl: "https://example.com/other.git" }), /tracks .* not https:\/\/example\.com\/other\.git/);
   await assert.rejects(prepareCheckout({ sourceRoot, commit: "main", env, cloneUrl: origin }), /invalid commit/);
+
+  // A clone made before the repository was renamed moves to the new address instead of failing.
+  const renamed = path.join(root, "renamed-origin");
+  fs.renameSync(origin, renamed);
+  await prepareCheckout({ sourceRoot, commit: second, env, cloneUrl: renamed, legacyCloneUrls: [origin] });
+  assert.equal(gitIn(sourceRoot, "remote", "get-url", "origin"), renamed);
+  assert.equal(gitIn(sourceRoot, "rev-parse", "HEAD"), second);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("the old repository address is accepted only as a legacy origin of the managed clone", () => {
+  assert.deepEqual(LEGACY_SOURCE_CLONE_URLS, ["https://github.com/trukhinyuri/codex-chatgpt-web.git"]);
+  const installer = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "install-fork-macos.sh"), "utf8");
+  assert.match(installer, /REPO_URL="https:\/\/github\.com\/trukhinyuri\/codex-superpower\.git"/);
+  assert.match(installer, /\*trukhinyuri\/codex-chatgpt-web\|\*trukhinyuri\/codex-chatgpt-web\.git\) git -C "\$SRC" remote set-url origin "\$REPO_URL"/);
 });
 
 function loadQuitWhenIdle(context) {

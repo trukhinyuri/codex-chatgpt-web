@@ -1,7 +1,7 @@
 #!/bin/bash
 # Put the previous build of Codex Web GPT back into /Applications.
 #
-#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/rollback-fork-macos.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/rollback-fork-macos.sh | bash
 #
 # The launcher's updater and the installer keep the two builds they replaced in
 # ~/Library/Application Support/Codex Web GPT/rollback.noindex. This script restores the newest one

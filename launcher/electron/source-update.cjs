@@ -7,9 +7,11 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 // This fork ships from source: the launcher updates itself from the main branch of the fork's
 // GitHub repository and installs a new build only after the complete verification suite passes.
-const SOURCE_REPOSITORY = "trukhinyuri/codex-chatgpt-web";
+const SOURCE_REPOSITORY = "trukhinyuri/codex-superpower";
 const SOURCE_BRANCH = "main";
 const SOURCE_CLONE_URL = `https://github.com/${SOURCE_REPOSITORY}.git`;
+// The repository was renamed from codex-chatgpt-web; managed clones made before that still point there.
+const LEGACY_SOURCE_CLONE_URLS = ["https://github.com/trukhinyuri/codex-chatgpt-web.git"];
 const SOURCE_API_ROOT = `https://api.github.com/repos/${SOURCE_REPOSITORY}`;
 const SOURCE_COMMIT_API_URL = `${SOURCE_API_ROOT}/commits/${SOURCE_BRANCH}`;
 const SOURCE_CHECK_INTERVAL_MS = 60 * 60_000;
@@ -301,7 +303,15 @@ function git(args, { env }) {
 }
 
 /** Check out exactly the verified commit in the managed clone; nothing local survives except ignored caches. */
-async function prepareCheckout({ sourceRoot, commit, env, log, cloneUrl = SOURCE_CLONE_URL, branch = SOURCE_BRANCH }) {
+async function prepareCheckout({
+  sourceRoot,
+  commit,
+  env,
+  log,
+  cloneUrl = SOURCE_CLONE_URL,
+  legacyCloneUrls = LEGACY_SOURCE_CLONE_URLS,
+  branch = SOURCE_BRANCH,
+}) {
   if (!COMMIT.test(commit)) throw new Error(`Refusing to build an invalid commit: ${commit}`);
   if (!fs.existsSync(path.join(sourceRoot, ".git"))) {
     if (fs.existsSync(sourceRoot) && fs.readdirSync(sourceRoot).length > 0) {
@@ -312,7 +322,10 @@ async function prepareCheckout({ sourceRoot, commit, env, log, cloneUrl = SOURCE
     await git(["clone", "--quiet", "--no-tags", "--branch", branch, cloneUrl, sourceRoot], { env });
   }
   const origin = await git(["-C", sourceRoot, "remote", "get-url", "origin"], { env });
-  if (normalizedRemote(origin) !== normalizedRemote(cloneUrl)) {
+  if (legacyCloneUrls.some(url => normalizedRemote(url) === normalizedRemote(origin))) {
+    log?.(`moving ${sourceRoot} from ${origin} to ${cloneUrl}`);
+    await git(["-C", sourceRoot, "remote", "set-url", "origin", cloneUrl], { env });
+  } else if (normalizedRemote(origin) !== normalizedRemote(cloneUrl)) {
     throw new Error(`${sourceRoot} tracks ${origin}, not ${cloneUrl}`);
   }
   await git(["-C", sourceRoot, "fetch", "--quiet", "--no-tags", "origin", branch], { env });
@@ -604,6 +617,7 @@ function createSourceUpdateController({
 
 module.exports = {
   COMMIT,
+  LEGACY_SOURCE_CLONE_URLS,
   ROLLBACK_DIRECTORY,
   ROLLBACK_KEEP,
   SOURCE_API_ROOT,

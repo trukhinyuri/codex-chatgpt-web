@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build Codex Web GPT from the trukhinyuri fork and install it on macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/install-fork-macos.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | bash
 #
 # Environment overrides:
 #   REF=<branch>      branch to build (default: main)
@@ -20,7 +20,7 @@
 # Roll back by hand with scripts/rollback-fork-macos.sh.
 set -euo pipefail
 
-REPO_URL="https://github.com/trukhinyuri/codex-chatgpt-web.git"
+REPO_URL="https://github.com/trukhinyuri/codex-superpower.git"
 UPSTREAM_URL="https://github.com/miuuyy/codex-chatgpt-web.git"
 MANAGED_SRC="$HOME/.codex-chatgpt-web-source"
 REF="${REF:-main}"
@@ -69,8 +69,10 @@ trap cleanup EXIT
 if [ -d "$SRC/.git" ]; then
   origin="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
   case "$origin" in
-    *trukhinyuri/codex-chatgpt-web|*trukhinyuri/codex-chatgpt-web.git) ;;
-    *) die "$SRC is not a checkout of the trukhinyuri fork (origin: ${origin:-none})" ;;
+    *trukhinyuri/codex-superpower|*trukhinyuri/codex-superpower.git) ;;
+    # The repository was renamed from codex-chatgpt-web; move older clones to the new address.
+    *trukhinyuri/codex-chatgpt-web|*trukhinyuri/codex-chatgpt-web.git) git -C "$SRC" remote set-url origin "$REPO_URL" ;;
+    *) die "$SRC is not a checkout of trukhinyuri/codex-superpower (origin: ${origin:-none})" ;;
   esac
   git -C "$SRC" fetch --quiet origin
   if [ "$SRC" = "$MANAGED_SRC" ]; then

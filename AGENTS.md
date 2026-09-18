@@ -23,7 +23,7 @@ Instructions for AI coding agents (Codex, Claude Code and others) that install, 
 2. Run the installer. It clones this repository into `~/.codex-chatgpt-web-source`, runs `bun run verify`, packages the app and installs it into `/Applications`; expect 5–15 minutes.
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/install-fork-macos.sh | WAIT_FOR_IDLE=1 bash
+   curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/install-fork-macos.sh | WAIT_FOR_IDLE=1 bash
    ```
 
    Success ends with `==> RESULT installed commit=<sha> runtime=<sha>`. A failing test stops the script before anything is installed; report the failing test.
@@ -69,7 +69,7 @@ Run every check and report each as passed or failed.
 - **Rollback:** the two builds replaced last are in `~/Library/Application Support/Codex Web GPT/rollback.noindex`. Restore the newest with the command below (`LIST=1` lists them, `ENTRY=<name>` picks one, `NOW=1` skips the idle wait and cancels running turns). It ends with `RESULT rolled-back commit=<sha> from=<sha>`; automatic updates then skip the commit rolled back from.
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-chatgpt-web/main/scripts/rollback-fork-macos.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/trukhinyuri/codex-superpower/main/scripts/rollback-fork-macos.sh | bash
   ```
 
 ## Troubleshoot
