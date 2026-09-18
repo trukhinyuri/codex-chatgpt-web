@@ -28,6 +28,16 @@ const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+// The bridge marks a line that only matters while debugging (for example a model catalog request
+// Codex closed itself) as `[codex-chatgpt-web] debug <event> …`; it is kept at debug level.
+const CHILD_DEBUG_LINE = /^\[[a-z-]+\] debug [a-z_]+\b/;
+
+/** The launcher log level of one line a runtime child printed. */
+function childOutputLevel(stream, line) {
+  if (stream === "stderr") return "warn";
+  return CHILD_DEBUG_LINE.test(line) ? "debug" : "info";
+}
+
 function collectLines(stream, onLine, onError) {
   let buffered = "";
   stream.on("data", (chunk) => {
@@ -498,6 +508,12 @@ class RuntimeSupervisor {
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;
     collectLines(child.stdout, (line) => {
+      if (childOutputLevel("stdout", line) === "debug") {
+        // A debug line never becomes the explanation of a later exit.
+        if (typeof this.logger.debug === "function") this.logger.debug(`runtime.${name}_stdout`, { line });
+        else this.logger.info(`runtime.${name}_stdout`, { line });
+        return;
+      }
       this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
       this.logger.info(`runtime.${name}_stdout`, { line });
     }, (error) => {
@@ -2108,6 +2124,7 @@ module.exports = {
   TUNNEL_MONITOR_INTERVAL_MS,
   TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
+  childOutputLevel,
   managedTunnelConnectArgs,
   validateConfig,
 };

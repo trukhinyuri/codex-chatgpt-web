@@ -970,14 +970,15 @@ function sendHarness(options: {
 
 async function collectWarnings<T>(run: () => Promise<T>): Promise<{ outcome: PromiseSettledResult<T>; warnings: string[] }> {
   const warnings: string[] = [];
-  const spy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
-    warnings.push(args.map(String).join(" "));
-  });
+  const record = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  const warnSpy = spyOn(console, "warn").mockImplementation(record);
+  const infoSpy = spyOn(console, "info").mockImplementation(record);
   try {
     const [outcome] = await Promise.allSettled([run()]);
     return { outcome: outcome!, warnings };
   } finally {
-    spy.mockRestore();
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
   }
 }
 
@@ -1115,7 +1116,8 @@ test("a Codex cancellation during the Send key press stops the visible generatio
   expect((outcome as PromiseRejectedResult).reason).toMatchObject({ name: "AbortError" });
   expect(state.sendPresses).toBe(1);
   expect(state.stopPresses).toBe(1);
-  expect(warnings).toContain("[chatgpt-web] browser turn send_cancelled pressed Stop site=send");
+  expect(warnings.some(line => line.startsWith("[chatgpt-web] stop_pressed ")
+    && JSON.parse(line.slice("[chatgpt-web] stop_pressed ".length)).reason === "send_aborted")).toBe(true);
 });
 
 test("a stage deadline during a pending Send key press never presses Stop", async () => {
@@ -1140,7 +1142,10 @@ test("a stage deadline during a pending Send key press never presses Stop", asyn
   expect(warnings.filter(line => line.includes("Stop"))).toEqual([]);
 });
 
-test("every Stop press names its turn and site in the log", async () => {
+test("every Stop press names its reason and whether it landed in the log", async () => {
+  // pressVisibleChatGptStop's own log format and privacy properties (no raw error text, no
+  // secrets/URLs/paths) are covered by tests/browser-diagnostics.test.ts; this test only checks
+  // that this adapter's call sites reach it and that a hidden button is never pressed.
   const stopPage = (visible: boolean, press: () => Promise<void>) => ({
     locator: (selector: string) => {
       expect(selector).toBe(CHATGPT_STOP_BUTTON_SELECTOR);
@@ -1150,20 +1155,20 @@ test("every Stop press names its turn and site in the log", async () => {
   let presses = 0;
 
   const { outcome, warnings } = await collectWarnings(async () => [
-    await pressVisibleChatGptStop(stopPage(true, async () => { presses += 1; }), "stop_log_turn", "response_observation"),
-    await pressVisibleChatGptStop(stopPage(false, async () => { presses += 1; }), "stop_log_turn", "send"),
+    await pressVisibleChatGptStop(stopPage(true, async () => { presses += 1; }), "response_aborted"),
+    await pressVisibleChatGptStop(stopPage(false, async () => { presses += 1; }), "send_aborted"),
     await pressVisibleChatGptStop(
       stopPage(true, async () => { throw new Error("Target closed"); }),
-      undefined,
-      "multipart_acknowledgement",
+      "multipart_stage_aborted",
     ),
   ]);
 
   expect(outcome).toEqual({ status: "fulfilled", value: [true, false, false] });
   expect(presses).toBe(1);
-  expect(warnings).toEqual([
-    "[chatgpt-web] browser turn stop_log_turn pressed Stop site=response_observation",
-    "[chatgpt-web] browser turn unknown could not press Stop site=multipart_acknowledgement: Target closed",
+  const stopLines = warnings.filter(line => line.startsWith("[chatgpt-web] stop_pressed "));
+  expect(stopLines.map(line => JSON.parse(line.slice("[chatgpt-web] stop_pressed ".length)))).toEqual([
+    { reason: "response_aborted", pressed: true },
+    { reason: "multipart_stage_aborted", pressed: false },
   ]);
 });
 

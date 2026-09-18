@@ -24,6 +24,7 @@ import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
+import { NativeModelCatalogLastGood, nativeModelCatalogCachePath } from "./model-catalog-cache";
 import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
@@ -587,8 +588,13 @@ async function main(): Promise<void> {
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
-    // Models from a local CLIProxyAPI join when <home>/cliproxy.json enables them.
-    const server = startServer(config, { cliProxy: { home: getConfigDir() } });
+    // Models from a local CLIProxyAPI join when <home>/cliproxy.json enables them. The last native
+    // catalog chatgpt.com served keeps the ChatGPT Web rows available through a catalog outage.
+    const home = getConfigDir();
+    const server = startServer(config, {
+      cliProxy: { home },
+      modelCatalogLastGood: new NativeModelCatalogLastGood({ path: nativeModelCatalogCachePath(home) }),
+    });
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
