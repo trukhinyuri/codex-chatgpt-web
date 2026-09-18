@@ -136,6 +136,11 @@ export function defaultBrokerEndpoint(home = getConfigDir(), platform = process.
   return `\\\\.\\pipe\\codex-chatgpt-web-${identity}`;
 }
 
+/** Durable evidence of compaction handoffs this daemon already completed; see compaction-continuation.ts. */
+export function defaultCompactionContinuationStatePath(home = getConfigDir()): string {
+  return join(home, "runtime", "compaction-continuations.json");
+}
+
 export function resolveBrokerEndpoint(value: string): string {
   const expanded = expandUserPath(value);
   return isWindowsPipeEndpoint(expanded) ? expanded : resolve(expanded);

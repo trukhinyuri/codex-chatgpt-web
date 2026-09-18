@@ -17,11 +17,11 @@ import {
   extractChatGptCompactionSourceRevision,
   chatGptTurnUserRevisionHistory,
 } from "./adapters/chatgpt-web/environment";
-import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import { bindCompactionContinuationStore, ChatGptCompactionContinuationStore, rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { rememberRetryableTurnFailure } from "./adapters/chatgpt-web/retry-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { defaultCompactionContinuationStatePath, providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -618,6 +618,14 @@ export async function responseRequest(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    // A restart must not lose evidence of a compaction handoff this daemon already completed for
+    // a still-open native turn. Resolved fresh per request (matching ChatGptThreadEnvironmentStore
+    // and ChatGptLunaCheckpointStore in index.ts) rather than cached at module scope, so it always
+    // reflects the config this request is actually running under. Bind before any later call can
+    // consult isAcceptedCompactionContinuation for this exact `parsed` object (see
+    // extractChatGptTurnUserRevision/isChatGptCompactionContinuation in environment.ts, reached
+    // deep inside the adapter's own turn processing below).
+    bindCompactionContinuationStore(parsed, new ChatGptCompactionContinuationStore(defaultCompactionContinuationStatePath()));
     route = routeChatGptWebRequest(parsed, config);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
