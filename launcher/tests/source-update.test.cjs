@@ -19,6 +19,9 @@ const {
   lowPriorityCommand,
   prepareCheckout,
   isTransientBuildFailure,
+  prepareBuildHome,
+  sourceBuildEnvironment,
+  sourceBuildHome,
   readUpdateState,
   recordFailedCommit,
   releaseLock,
@@ -71,6 +74,11 @@ function controller(overrides = {}, dependencies = {}) {
       releaseLock: lockPath => calls.push(["unlock", lockPath]),
       appendLog: () => {},
       prepareCheckout: async ({ commit, env }) => calls.push(["checkout", commit, env.PATH]),
+      prepareBuildHome: () => {
+        const buildHome = path.join(logs, "build-home");
+        fs.mkdirSync(buildHome, { recursive: true });
+        return buildHome;
+      },
       run: async (command, args, { cwd }) => calls.push(["run", command, args.join(" "), path.basename(cwd)]),
       findPackage: () => path.join(logs, "codex-web-gpt-5.0.8-mac-arm64.zip"),
       extractMac: (_archive, destination) => {
@@ -307,6 +315,52 @@ test("a network failure during the build defers the update instead of rejecting 
   assert.equal(isTransientBuildFailure(Object.assign(new Error("bun run verify exited with code 1"), { outputTail: ["expect(received).toBe(expected)"] })), false);
 });
 
+test("update builds run in a private home, so no test can reach the user's Codex or bridge state", async () => {
+  const seen = [];
+  const { instance, logs } = controller({}, {
+    prepareCheckout: async ({ env }) => seen.push(["checkout", env.HOME]),
+    run: async (command, args, { env }) => seen.push([args.join(" "), env.HOME, env.CODEX_HOME, env.CODEX_CHATGPT_WEB_HOME, env.CODEX_SUPERPOWER_UPDATE_BUILD]),
+  });
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  const buildHome = path.join(logs, "build-home");
+  assert.equal(seen[0][0], "checkout");
+  assert.equal(seen[0][1], process.env.HOME, "git keeps the real home for its proxy and credential settings");
+  for (const step of seen.slice(1)) {
+    assert.deepEqual(step.slice(1), [buildHome, path.join(buildHome, ".codex"), path.join(buildHome, ".codex-chatgpt-web"), "1"], step[0]);
+  }
+  assert.equal(seen.length, 5);
+  instance.cancelInstall(prepared);
+
+  const home = tempDir("cwg-real-home-");
+  fs.writeFileSync(path.join(home, ".npmrc"), "registry=https://registry.example/\n");
+  fs.mkdirSync(path.join(home, "Library", "Application Support", "go"), { recursive: true });
+  fs.writeFileSync(path.join(home, "Library", "Application Support", "go", "env"), "GOPROXY=https://proxy.example\n");
+  const privateHome = prepareBuildHome(home);
+  assert.equal(privateHome, sourceBuildHome(home));
+  assert.equal(privateHome, path.join(home, ".csp-build-home"));
+  assert.equal(fs.readlinkSync(path.join(privateHome, ".npmrc")), path.join(home, ".npmrc"), "the company registry still applies");
+  assert.equal(fs.existsSync(path.join(privateHome, ".bunfig.toml")), false);
+  fs.writeFileSync(path.join(privateHome, "left-by-a-test"), "x");
+  prepareBuildHome(home);
+  assert.equal(fs.existsSync(path.join(privateHome, "left-by-a-test")), false, "every build starts from an empty home");
+  const env = sourceBuildEnvironment({ baseEnv: { PATH: "/usr/bin", HTTPS_PROXY: "http://proxy:3128" }, home, buildHome: privateHome, pathValue: "/bin" });
+  assert.deepEqual(env, {
+    PATH: "/bin",
+    HTTPS_PROXY: "http://proxy:3128",
+    HOME: privateHome,
+    CODEX_HOME: path.join(privateHome, ".codex"),
+    CODEX_CHATGPT_WEB_HOME: path.join(privateHome, ".codex-chatgpt-web"),
+    BUN_INSTALL_CACHE_DIR: path.join(home, ".bun", "install", "cache"),
+    ELECTRON_CACHE: path.join(home, "Library", "Caches", "electron"),
+    ELECTRON_BUILDER_CACHE: path.join(home, "Library", "Caches", "electron-builder"),
+    CODEX_SUPERPOWER_CACHE: path.join(home, "Library", "Caches", "codex-superpower"),
+    GOENV: path.join(home, "Library", "Application Support", "go", "env"),
+    CODEX_SUPERPOWER_UPDATE_BUILD: "1",
+  });
+  assert.ok(Buffer.byteLength(path.join(sourceBuildHome("/Users/a-rather-long-user-name"), ".codex-chatgpt-web", "runtime", "turn-broker.sock")) <= 103, "a socket under the private home fits macOS's limit");
+});
+
 test("an update build runs every test but leaves the online dependency audit to CI", () => {
   const verify = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "verify.ts"), "utf8");
   assert.match(verify, /const updateBuild = process\.env\.CODEX_SUPERPOWER_UPDATE_BUILD === "1";/);
@@ -314,6 +368,7 @@ test("an update build runs every test but leaves the online dependency audit to 
   assert.match(verify, /await run\(\["run", "test"\]\);/);
   const updater = fs.readFileSync(path.join(__dirname, "..", "electron", "source-update.cjs"), "utf8");
   assert.match(updater, /CODEX_SUPERPOWER_UPDATE_BUILD: "1",/);
+  assert.match(updater, /const env = sourceBuildEnvironment\(\{ buildHome: deps\.prepareBuildHome\(\), pathValue: buildPath \}\);/);
 });
 
 test("a package that is not the announced commit is rejected", async () => {
