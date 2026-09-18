@@ -58,7 +58,8 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. `bun run verify` passes in a clean clone, and the updater's own build path (private home, full suite, packaging) is exercised before a release.
 3. Problems known from upstream projects (codex-chatgpt-web, CLIProxyAPI) and their forks are fixed here too, not carried over.
 4. Everything that is decided or learned is written into this repository (requirements, process, roadmap, plans), so any agent can continue without the conversation in which it happened.
-5. Performance: every path is built for the highest throughput and the lowest latency the providers allow (no avoidable waits, polling, serialization or repeated work on the hot path), but never at the cost of correctness or stability; latency and throughput of the main paths are measured and regressions are caught.
+5. The project improves itself without being given tasks: problem reports from installed apps and a daily watch of Codex releases, upstream projects and forks open issues automatically, and an agent told only "continue" or "set up", in any language and from any harness, finds and finishes the most valuable work by [agent-playbook.md](agent-playbook.md).
+6. Performance: every path is built for the highest throughput and the lowest latency the providers allow (no avoidable waits, polling, serialization or repeated work on the hot path), but never at the cost of correctness or stability; latency and throughput of the main paths are measured and regressions are caught.
 
 ## R9. Many ChatGPT accounts scale horizontally
 

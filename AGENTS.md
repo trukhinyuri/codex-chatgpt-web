@@ -2,6 +2,8 @@
 
 Instructions for AI coding agents (Codex, Claude Code and others) that install, verify, update or change Codex Superpower (the **Codex Web GPT** app, its bridge, and the CLIProxyAPI connection) from this repository. Human-oriented overview: [README.md](README.md).
 
+**If the person only says "continue" or "set up" (in any language), follow [docs/agent-playbook.md](docs/agent-playbook.md).** It tells you where the work queue is and how to finish it without earlier conversation.
+
 Before changing anything in this repository, read [docs/requirements.md](docs/requirements.md) (what must always hold), [docs/engineering-process.md](docs/engineering-process.md) (how to change, test, release and repair) and [docs/roadmap.md](docs/roadmap.md) (current state and open work). They are the complete record: no earlier conversation is needed to continue the work.
 
 ## Rules
