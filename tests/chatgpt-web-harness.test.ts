@@ -1611,6 +1611,99 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(serialized).toContain("current request");
   });
 
+  test("dedupes exact replayed images while preserving every historical attachment reference", () => {
+    const replayedImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
+    const newerImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56m0fAAAAFElEQVR4nGP4z8DwH4QZGBgY/jMAAFcMCPV4CsNQAAAAAElFTkSuQmCC";
+    const request = parsed();
+    request.context.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "First copy" },
+          { type: "image", imageUrl: replayedImage, detail: "high" },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Consumed first copy" }],
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Replayed copy" },
+          { type: "image", imageUrl: replayedImage, detail: "high" },
+          { type: "image", imageUrl: newerImage, detail: "high" },
+        ],
+        timestamp: 3,
+      },
+    ];
+
+    const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
+    expect(compiled.images.map(image => image.imageUrl)).toEqual([replayedImage, newerImage]);
+
+    const contextJson = compiled.text.match(/<codex_context_json>\n([\s\S]*?)\n<\/codex_context_json>/)?.[1];
+    expect(contextJson).toBeDefined();
+    const envelope = JSON.parse(contextJson!);
+    expect(envelope.messages[0].content.at(-1)).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-1",
+      detail: "high",
+    });
+    expect(envelope.messages[2].content[1]).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-1",
+      detail: "high",
+    });
+    expect(envelope.messages[2].content[2]).toEqual({
+      type: "image_attachment",
+      attachment_ref: "codex-input-image-2",
+      detail: "high",
+    });
+    expect(chatGptPromptFilePayloads(compiled).map(file => file.name)).toEqual([
+      "codex-input-image-1.png",
+      "codex-input-image-2.png",
+    ]);
+  });
+
+  test("duplicate image replays do not consume unique-image attachment budget", () => {
+    const duplicate = "data:image/png;base64,duplicate-image";
+    const request = parsed();
+    request.context.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "old duplicate" },
+          { type: "image", imageUrl: duplicate, detail: "high" },
+        ],
+        timestamp: 1,
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: `unique-${index}` },
+          { type: "image" as const, imageUrl: `data:image/png;base64,unique-${index}`, detail: "high" as const },
+        ],
+        timestamp: index + 2,
+      })),
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "new duplicate" },
+          { type: "image", imageUrl: duplicate, detail: "high" },
+        ],
+        timestamp: 20,
+      },
+    ];
+
+    const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
+    expect(compiled.images).toHaveLength(10);
+    expect(compiled.images.filter(image => image.imageUrl === duplicate)).toHaveLength(1);
+    expect(compiled.images.some(image => image.imageUrl === "data:image/png;base64,unique-0")).toBeFalse();
+    expect(compiled.images.some(image => image.imageUrl === "data:image/png;base64,unique-9")).toBeTrue();
+  });
+
   test("keeps a large context inline and uploads only its referenced images", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = parsed();

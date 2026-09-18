@@ -35,7 +35,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       expect(localTools).toBe(false);
       actions.push("attach:plain");
     },
-    attachPromptWithCompactionRetry: async (_page: unknown, _text: string, localTools: boolean) => {
+    attachPromptWithIntegrityRetry: async (_page: unknown, _text: string, localTools: boolean) => {
       expect(localTools).toBe(tools);
       actions.push(localTools ? "attach:tools" : "attach:plain");
     },

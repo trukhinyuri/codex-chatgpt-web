@@ -5,6 +5,8 @@ export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=t
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
+  'div.ProseMirror[contenteditable="true"]',
+  'div[role="textbox"][aria-label="Chat with ChatGPT"][contenteditable="true"]',
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
@@ -151,6 +153,27 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+/**
+ * ChatGPT can replace or close the effort popover between the moment a caller resolves the
+ * slider locator and the moment it reads that slider's ARIA attributes. Reading `aria-valuemin`,
+ * `-valuemax` and `-valuenow` as three separate round-trips lets that race turn into either a
+ * false "invalid ARIA range" failure or, on the removed element, a hang. Reading all three in one
+ * `evaluate` call makes the read atomic with respect to the page; a rejected `evaluate` means the
+ * element detached mid-read, which callers can distinguish from a genuinely invalid range and
+ * recover from by reopening the menu, instead of failing the whole turn.
+ */
+export async function readChatGptEffortSliderState(
+  slider: Locator,
+): Promise<ChatGptEffortSliderState | undefined | "detached"> {
+  const raw = await slider.evaluate(element => ({
+    min: element.getAttribute("aria-valuemin"),
+    max: element.getAttribute("aria-valuemax"),
+    value: element.getAttribute("aria-valuenow"),
+  })).catch(() => undefined);
+  if (raw === undefined) return "detached";
+  return parseChatGptEffortSliderState(raw.min, raw.max, raw.value);
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -214,12 +237,11 @@ export async function detectChatGptAccountCapabilities(
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-  const menuVisible = await menu.isVisible().catch(() => false);
-  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
-  if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
   try {
-    const { sliderContainer, slider } = chatGptEffortSlider(page);
+    // Setup needs the same verified activation as turns: aria-expanded can read "true" while the
+    // menu itself is still closed, especially on a background surface. A manual isVisible/
+    // aria-expanded shortcut here could leave the menu closed and fail the capability probe.
+    const { sliderContainer, slider } = await activateChatGptEffortMenu(page, effortButton);
     const timeout = options.selectorTimeoutMs ?? 70_000;
     // Model radio rows can hydrate before the effort control. They carry no evidence
     // of the account's reasoning range, so an absent slider must fail, not cache false.

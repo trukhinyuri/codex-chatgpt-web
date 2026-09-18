@@ -2403,6 +2403,57 @@ test("a connector conversation is not reused until its connector was bound", asy
   );
 });
 
+test("a retained tab whose window was closed long ago is evicted instead of reused (PR #256)", async () => {
+  const conversationKey = "e".repeat(64);
+  const destroyed = {
+    id: "destroyed",
+    surfaceId: "surface-destroyed",
+    traceId: "trace_old",
+    status: "ready",
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: true,
+    interactionMode: "automatic",
+    view: { webContents: { isDestroyed: () => true } },
+  };
+  const created = { id: "fresh", surfaceId: "surface-fresh" };
+  const events = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[destroyed.id, destroyed]]),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: "home",
+    syncPowerSaveBlocker() {},
+    createTurnTab: (...args) => {
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Codex Native2"]);
+      return created;
+    },
+    writeDescriptor: () => events.push("descriptor"),
+    syncViewVisibility: () => events.push("visible"),
+    publishState: () => events.push("published"),
+    snapshot: () => ({ tabs: [] }),
+    logger: { info: (event) => events.push(event) },
+  });
+
+  const lease = await BrowserHost.prototype.beginTurn.call(
+    fixture,
+    "trace_next",
+    false,
+    222,
+    conversationKey,
+    "Codex Native2",
+  );
+
+  assert.deepEqual(lease, {
+    surfaceId: "surface-fresh",
+    tabId: "fresh",
+    reused: false,
+    connectorBound: false,
+  });
+  // The destroyed record must not survive as a candidate for a later lookup either.
+  assert.equal(fixture.turnTabs.has(destroyed.id), false);
+});
+
 test("a required retained conversation fails before creating a browser tab", async () => {
   let created = false;
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {

@@ -59,7 +59,9 @@ import {
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
-  parseChatGptEffortSliderState,
+  readChatGptEffortSliderState,
+  type ChatGptEffortActivation,
+  type ChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
@@ -210,6 +212,39 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
       retryable: false,
       cause: new Error(diagnostic),
     },
+  );
+}
+
+/**
+ * Reads the effort slider's ARIA state, reopening the effort menu and retrying when ChatGPT
+ * replaces or closes the popover between locating the slider and reading it. Three sequential
+ * `getAttribute` round-trips used to race a disappearing popover: each one could independently
+ * hang or read a stale/removed element instead of failing fast with a retryable signal. Bounded
+ * to a few attempts so a genuinely broken control still fails the turn instead of hanging.
+ */
+async function readEffortSliderStateOrReopen(
+  page: Page,
+  control: Locator,
+  activation: ChatGptEffortActivation,
+  captureDiagnostic?: (checkpoint: string) => Promise<void>,
+): Promise<{ activation: ChatGptEffortActivation; state: ChatGptEffortSliderState }> {
+  let current = activation;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const state = await readChatGptEffortSliderState(current.slider);
+    if (state === "detached") {
+      await captureDiagnostic?.("effort-slider-reopen-retry");
+      current = await activateChatGptEffortMenu(page, control);
+      continue;
+    }
+    if (!state) {
+      throw chatGptModelControlUnavailableAdapterError(
+        "ChatGPT effort slider exposed an invalid ARIA range",
+      );
+    }
+    return { activation: current, state };
+  }
+  throw chatGptModelControlUnavailableAdapterError(
+    "ChatGPT effort slider kept disappearing before its ARIA state could be read",
   );
 }
 
@@ -1759,6 +1794,20 @@ interface ChatGptResponseDomCache {
   cacheHits?: number;
 }
 
+export const CHATGPT_RESPONSE_POLL_ACTIVE_MS = 100;
+export const CHATGPT_RESPONSE_POLL_IDLE_MS = 250;
+
+/**
+ * Adaptive cadence for the response-polling loop: once a response DOM snapshot is cached
+ * (ChatGPT has produced visible response structure to compare against), the next read is a cheap
+ * cache-hit rather than a full scan, so polling faster during active streaming cuts avoidable
+ * per-iteration latency without adding load. Before any response structure exists yet, the slower
+ * cadence stands. Ported from upstream PR #320 (the poll-cadence slice only).
+ */
+export function pollSleep(cache: { snapshot?: unknown }): number {
+  return cache.snapshot ? CHATGPT_RESPONSE_POLL_ACTIVE_MS : CHATGPT_RESPONSE_POLL_IDLE_MS;
+}
+
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   responsePresent: false,
   visibleText: "",
@@ -2264,11 +2313,19 @@ export class ChatGptBrowserWorker {
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
   /**
-   * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
-   * through DOM textContent. Treat that DOM-only representation as equivalent only when the
-   * expected U+0020 belongs to a multi-space run. Single spaces, tabs, newlines, intentional
-   * expected NBSP characters, and every other mutation remain exact and fail closed.
+   * ChatGPT's rich-text composer performs two confirmed, same-width typographic substitutions on
+   * pasted text: it may render an ASCII space as NBSP (Lexical's whitespace-preservation, seen both
+   * within multi-space runs and, per real occurrence traceId 6ee7bb84c46e, on an isolated single
+   * space), and it may autocorrect a lone ASCII hyphen into a typographic dash (seen in two
+   * separate real occurrences). Both are cosmetic-only and directional: only expected-ASCII /
+   * observed-substitute is tolerated, never the reverse, and every other mutation -- tabs,
+   * newlines, quotes/ellipsis (also autocorrect targets, but never yet confirmed live), or any
+   * other divergence -- remains exact and fails closed.
    */
+  private static readonly PROMPT_DASH_SUBSTITUTES = new Set([
+    "\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212",
+  ]);
+
   private promptCodeUnitEquivalent(
     expected: string,
     observed: string,
@@ -2278,9 +2335,12 @@ export class ChatGptBrowserWorker {
     const observedUnit = observed[index];
 
     if (expectedUnit === observedUnit) return true;
-    if (expectedUnit !== " " || observedUnit !== "\u00A0") return false;
+    if (expectedUnit === " " && observedUnit === "\u00A0") return true;
+    if (expectedUnit === "-" && ChatGptBrowserWorker.PROMPT_DASH_SUBSTITUTES.has(observedUnit!)) {
+      return true;
+    }
 
-    return expected[index - 1] === " " || expected[index + 1] === " ";
+    return false;
   }
 
   private promptTextEquivalent(
@@ -2582,19 +2642,19 @@ export class ChatGptBrowserWorker {
     } finally {
       waitAbort.abort();
     }
-    let sliderState = parseChatGptEffortSliderState(
-      await effortSlider.getAttribute("aria-valuemin"),
-      await effortSlider.getAttribute("aria-valuemax"),
-      await effortSlider.getAttribute("aria-valuenow"),
-    );
-    if (!sliderState) {
-      throw chatGptModelControlUnavailableAdapterError(
-        "ChatGPT effort slider exposed an invalid ARIA range",
-      );
-    }
+    let currentActivation = activation;
+    let effortSliderLocator = effortSlider;
+    let sliderState: ChatGptEffortSliderState;
+    ({ activation: currentActivation, state: sliderState } = await readEffortSliderStateOrReopen(
+      page,
+      currentEffort,
+      currentActivation,
+      captureDiagnostic,
+    ));
+    effortSliderLocator = currentActivation.slider;
     const targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
-      const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(activation.menu) : undefined;
+      const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(currentActivation.menu) : undefined;
       const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
         ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
         : "";
@@ -2605,7 +2665,7 @@ export class ChatGptBrowserWorker {
         detail,
       );
     }
-    const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+    let sliderControl = effortSliderLocator.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
       await throwIfChatGptRateLimitDialog(page);
       const direction = targetValue > sliderState.value ? 1 : -1;
@@ -2613,20 +2673,38 @@ export class ChatGptBrowserWorker {
       const previousValue = sliderState.value;
       await sliderControl.press(key);
       const changeDeadline = Date.now() + 5_000;
+      let detachedDuringWait = false;
       do {
-        sliderState = parseChatGptEffortSliderState(
-          await effortSlider.getAttribute("aria-valuemin"),
-          await effortSlider.getAttribute("aria-valuemax"),
-          await effortSlider.getAttribute("aria-valuenow"),
-        );
-        if (!sliderState) {
+        const read = await readChatGptEffortSliderState(effortSliderLocator);
+        if (read === "detached") {
+          detachedDuringWait = true;
+          break;
+        }
+        if (!read) {
           throw chatGptModelControlUnavailableError(
             "ChatGPT effort slider lost its semantic ARIA state",
           );
         }
+        sliderState = read;
         if (sliderState.value !== previousValue) break;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
       } while (Date.now() < changeDeadline);
+      if (detachedDuringWait) {
+        // ChatGPT replaced the popover between the keypress and this read (the race the
+        // maintainer flagged as left unguarded by the original PR). Reopen and trust the
+        // reopened state instead of asserting on a now-stale slider reference.
+        const reopened = await readEffortSliderStateOrReopen(
+          page,
+          currentEffort,
+          currentActivation,
+          captureDiagnostic,
+        );
+        currentActivation = reopened.activation;
+        effortSliderLocator = currentActivation.slider;
+        sliderControl = effortSliderLocator.locator("xpath=ancestor::*[@role='menuitem'][1]");
+        sliderState = reopened.state;
+        continue;
+      }
       if (sliderState.value !== previousValue + direction) {
         throw chatGptModelControlUnavailableError(
           `ChatGPT effort slider did not move exactly one step with ${key}`
@@ -3723,7 +3801,7 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async resetCompactionComposerForRetry(
+  private async resetComposerForIntegrityRetry(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     abortSignal?: AbortSignal,
@@ -3732,7 +3810,7 @@ export class ChatGptBrowserWorker {
     const before = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (before) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared after prompt attachment failed: ${before}`),
       );
     }
@@ -3746,23 +3824,27 @@ export class ChatGptBrowserWorker {
     const after = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (after) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being reset. Check the ChatGPT tab before retrying.",
+        "ChatGPT changed while the prompt was being reset. Check the ChatGPT tab before retrying.",
         new Error(`Submission evidence appeared while resetting the prompt: ${after}`),
       );
     }
     const observed = await this.attachedPromptText(page, abortSignal);
     if (observed.length > 0) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        `ChatGPT composer could not reset cleanly for compaction retry (actualChars=${observed.length})`,
+        `ChatGPT composer could not reset cleanly for retry (actualChars=${observed.length})`,
       );
     }
   }
 
-  private async attachPromptWithCompactionRetry(
+  /**
+   * Every prompt attachment gets exactly one retry on a `ChatGptPromptAttachmentIntegrityError`
+   * (ChatGPT's Lexical composer occasionally fails to preserve pasted text intact, independent of
+   * turn size), provided there's no DOM evidence the prompt was already submitted.
+   */
+  private async attachPromptWithIntegrityRetry(
     page: Page,
     prompt: string,
     localTools: boolean,
-    compaction: boolean,
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
@@ -3771,7 +3853,7 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
     requireThink = false,
   ): Promise<void> {
-    let retryAvailable = compaction;
+    let retryAvailable = true;
     for (;;) {
       try {
         await this.attachPrompt(
@@ -3792,12 +3874,12 @@ export class ChatGptBrowserWorker {
         const evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
         if (evidence) {
           throw new ChatGptPromptAttachmentIntegrityError(
-            "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+            "ChatGPT changed while the prompt was being prepared. Check the ChatGPT tab before retrying.",
             new Error(`Prompt attachment failed before submission evidence appeared: ${evidence}`, { cause: error }),
           );
         }
         await captureDiagnostic?.("prompt-attachment-integrity-retry");
-        await this.resetCompactionComposerForRetry(page, baseline, abortSignal);
+        await this.resetComposerForIntegrityRetry(page, baseline, abortSignal);
       }
     }
   }
@@ -4906,11 +4988,10 @@ export class ChatGptBrowserWorker {
               const promptAbortSignal = turn.abortSignal
                 ? AbortSignal.any([stageSignal, turn.abortSignal])
                 : stageSignal;
-              return this.attachPromptWithCompactionRetry(
+              return this.attachPromptWithIntegrityRetry(
                 page,
                 finalPrompt,
                 mode.localTools,
-                turn.compaction === true,
                 submissionBaseline,
                 checkpoint => diagnostics.capture(page, checkpoint),
                 promptAbortSignal,
@@ -5067,7 +5148,7 @@ export class ChatGptBrowserWorker {
           () => diagnostics.capture(page, "tool-confirmation-visible"),
         )) {
           internalObservationFaults = 0;
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
           continue;
         }
 
@@ -5144,7 +5225,7 @@ export class ChatGptBrowserWorker {
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
           domHealthTracker.clearMissingResponse();
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
           continue;
         }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
@@ -5189,7 +5270,7 @@ export class ChatGptBrowserWorker {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
                 if (revision === undefined) {
-                  await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                  await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                   continue;
                 }
                 completionFenceRevision = revision;
@@ -5198,14 +5279,14 @@ export class ChatGptBrowserWorker {
                 // stale cached completion and the broker's terminal decision.
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                 continue;
               }
               if (!await turn.completionFence.commit(completionFenceRevision)) {
                 completionFenceRevision = undefined;
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
                 continue;
               }
             }
@@ -5254,7 +5335,7 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
@@ -5276,7 +5357,7 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, "internal-observation-fault");
         responseDomCache.key = undefined;
         responseDomCache.snapshot = undefined;
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, pollSleep(responseDomCache)));
        }
       }
 
