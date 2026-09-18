@@ -143,6 +143,15 @@ its bounded MCP deadline.
 - Include the exact model, Browser-only or Full harness mode, whether tools ran, and whether the
   ChatGPT page showed a final answer.
 
+A failure that repeating the request cannot fix, such as `did not confirm that the prompt was
+sent`, a missing connector or a spent retry budget, ends the Codex turn once with the bridge's own
+message instead of `Reconnecting 1/5…5/5`. A briefly unavailable local service (the runtime
+restarting for an update or a setting, the launcher's browser host, ChatGPT controls that have not
+loaded yet) appears as `rate limit exceeded: … Please try again in 10s.`: Codex waits and retries by
+itself. The `rate limit exceeded` label is Codex's name for any paced retry, not a ChatGPT limit.
+A turn that starts while the runtime prepares a restart waits up to two minutes instead of failing;
+if the runtime restarts meanwhile, Codex sends the turn again 10 seconds later.
+
 Do not assume that a generic 502 means the Tunnel is broken. Since v4.0.7, a native tool that
 outlives its turn binding is reported explicitly as `codex_tool_timeout` and retired rather than
 being presented as an ambiguous proxy success.

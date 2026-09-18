@@ -22,6 +22,13 @@ import { rememberRetryableTurnFailure } from "./adapters/chatgpt-web/retry-conti
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { defaultCompactionContinuationStatePath, providerConfig } from "./config";
+import {
+  DRAIN_HOLD_MS,
+  DRAINING_MESSAGE,
+  DrainGate,
+  drainedHttpResponse,
+  heldStreamingResponse,
+} from "./drain-gate";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -117,6 +124,14 @@ const reportHttpStreamFailure: HttpStreamFailureReporter = evidence => {
 };
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Grace for held turns' last frames to leave before shutdown closes their connections. */
+const HELD_TURN_SHUTDOWN_FLUSH_MS = 250;
+
+/** Codex asks for every Responses turn as a stream (codex-api endpoint/responses.rs sets Accept). */
+function acceptsEventStream(req: Request): boolean {
+  return (req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream");
+}
 
 /**
  * Reject a request whose Host header does not name this loopback bridge, and, for a browser
@@ -933,6 +948,10 @@ export function startServer(
     fetchUpstream?: NativeFetch;
     adapterFactory?: ChatGptWebAdapterFactory;
     cliProxy?: CliProxyWiring;
+    /** Test seam: how long a turn that arrives during a drain waits for it to end. */
+    drainHoldMs?: number;
+    /** Test seam: heartbeat interval of a waiting turn's response stream. */
+    drainHeartbeatMs?: number;
   } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
@@ -949,7 +968,9 @@ export function startServer(
       );
     });
   }
-  let draining = false;
+  const drainGate = new DrainGate();
+  const drainHoldMs = dependencies.drainHoldMs ?? DRAIN_HOLD_MS;
+  const drainHeartbeatMs = dependencies.drainHeartbeatMs ?? 2_000;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
@@ -991,7 +1012,8 @@ export function startServer(
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: !drainGate.isDraining,
+          drain_held_requests: drainGate.held,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
@@ -1001,9 +1023,10 @@ export function startServer(
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        draining = url.pathname === "/admin/drain";
-        turnBroker?.setExternalOwnersAccepted(!draining);
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+        if (url.pathname === "/admin/drain") drainGate.drain();
+        else drainGate.resume();
+        turnBroker?.setExternalOwnersAccepted(!drainGate.isDraining);
+        return Response.json({ status: "ok", accepting_turns: !drainGate.isDraining, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1124,11 +1147,11 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         const current = activity();
-        if (!draining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
+        if (!drainGate.isDraining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
           return Response.json(
             {
               status: "refused",
-              accepting_turns: !draining,
+              accepting_turns: !drainGate.isDraining,
               ...current,
             },
             { status: 409 },
@@ -1138,13 +1161,7 @@ export function startServer(
         return Response.json({ status: "ok", accepting_turns: false, ...current });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        if (draining) {
-          return formatErrorResponse(
-            503,
-            "server_error",
-            "codex-chatgpt-web is draining for a requested service operation",
-          );
-        }
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         return httpTurns.track(async signal => {
           const request = ++modelCatalogRequests;
           const started = Date.now();
@@ -1195,8 +1212,7 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(
+        const runTurn = () => httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
             config,
@@ -1207,9 +1223,29 @@ export function startServer(
           process.platform,
           "responses",
         );
+        if (drainGate.isDraining) {
+          // Codex streams every turn (Accept: text/event-stream). Such a turn waits for the drain
+          // with heartbeats instead of failing; the wait is not an active turn, so the drain can
+          // still prove idleness. A client without a stream has nothing to wait on and is refused.
+          if (!acceptsEventStream(req)) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
+          return heldStreamingResponse({
+            gate: drainGate,
+            signal: req.signal,
+            holdMs: drainHoldMs,
+            heartbeatMs: drainHeartbeatMs,
+            run: runTurn,
+          });
+        }
+        return runTurn();
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) {
+          // Codex waits for its compaction answer without a response stream: hold the request
+          // (not an active turn) until the drain ends, then answer a 503 Codex retries.
+          const outcome = await drainGate.wait(drainHoldMs, req.signal);
+          if (outcome === "aborted") return new Response(null, { status: 499, statusText: "Client Closed Request" });
+          if (outcome !== "resumed") return drainedHttpResponse();
+        }
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
@@ -1223,7 +1259,7 @@ export function startServer(
         );
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         return httpTurns.track(
           signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
           req.signal,
@@ -1233,7 +1269,7 @@ export function startServer(
       }
       if (req.method === "POST"
         && (url.pathname === "/v1/images/generations" || url.pathname === "/v1/images/edits")) {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
           ? "images/generations"
           : "images/edits";
@@ -1249,13 +1285,18 @@ export function startServer(
   });
   function shutdown(): void {
     if (shutdownPromise) return;
-    draining = true;
+    // Turns still waiting for the drain get their paced-retry failure now, so Codex waits for the
+    // restarted runtime instead of seeing a dropped connection.
+    const heldAtShutdown = drainGate.held;
+    drainGate.close();
     chatGptTurnSessions.clear();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
+        // Give those failure frames a moment to leave before stop(true) closes the connections.
+        heldAtShutdown > 0 ? Bun.sleep(HELD_TURN_SHUTDOWN_FLUSH_MS) : undefined,
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
