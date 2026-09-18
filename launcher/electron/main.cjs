@@ -117,6 +117,10 @@ let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
 let automaticUpdateRunning = false;
+let manualUpdateRunning = false;
+// The prepared update waiting for an idle Codex; a click on the update button shortens its wait.
+let updateIdleWait = null;
+let updateInstallRequested = false;
 let problemReporter = null;
 let launcherStateStore = null;
 
@@ -270,6 +274,10 @@ const NATIVE_COPY = Object.freeze({
     quitRunningDetail: "Quitting stops them now. Keep the launcher running to let them finish.",
     quitKeepRunning: "Keep running",
     quitAnyway: "Quit and stop them",
+    updateRunningTitle: "Codex is running {count} task(s)",
+    updateRunningDetail: "The update installs 30 seconds after they finish. Installing now stops them.",
+    updateWhenIdle: "Install when they finish",
+    updateNow: "Install now and stop them",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -295,6 +303,10 @@ const NATIVE_COPY = Object.freeze({
     quitRunningDetail: "现在退出会停止这些任务。保持启动器运行可以让它们完成。",
     quitKeepRunning: "保持运行",
     quitAnyway: "退出并停止",
+    updateRunningTitle: "Codex 正在运行 {count} 个任务",
+    updateRunningDetail: "更新将在任务完成 30 秒后安装。立即安装会停止这些任务。",
+    updateWhenIdle: "任务完成后安装",
+    updateNow: "立即安装并停止任务",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -320,6 +332,10 @@ const NATIVE_COPY = Object.freeze({
     quitRunningDetail: "現在結束會停止這些工作。讓啟動器保持執行即可讓它們完成。",
     quitKeepRunning: "保持執行",
     quitAnyway: "結束並停止",
+    updateRunningTitle: "Codex 正在執行 {count} 個工作",
+    updateRunningDetail: "更新會在工作完成 30 秒後安裝。立即安裝會停止這些工作。",
+    updateWhenIdle: "工作完成後安裝",
+    updateNow: "立即安裝並停止工作",
   }),
   "ja": Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -345,6 +361,10 @@ const NATIVE_COPY = Object.freeze({
     quitRunningDetail: "今終了するとタスクは停止します。完了させるにはランチャーを起動したままにしてください。",
     quitKeepRunning: "起動したままにする",
     quitAnyway: "終了して停止",
+    updateRunningTitle: "Codex は {count} 件のタスクを実行中です",
+    updateRunningDetail: "アップデートはタスク完了の 30 秒後にインストールされます。今すぐインストールするとタスクは停止します。",
+    updateWhenIdle: "完了後にインストール",
+    updateNow: "今すぐインストールして停止",
   }),
   "ko": Object.freeze({
     openLauncher: "Codex Web GPT 열기",
@@ -370,6 +390,10 @@ const NATIVE_COPY = Object.freeze({
     quitRunningDetail: "지금 종료하면 작업이 중지됩니다. 작업을 끝내려면 런처를 계속 실행하세요.",
     quitKeepRunning: "계속 실행",
     quitAnyway: "종료하고 중지",
+    updateRunningTitle: "Codex가 작업 {count}개를 실행 중입니다",
+    updateRunningDetail: "업데이트는 작업이 끝나고 30초 뒤에 설치됩니다. 지금 설치하면 작업이 중지됩니다.",
+    updateWhenIdle: "작업이 끝나면 설치",
+    updateNow: "지금 설치하고 중지",
   }),
 });
 
@@ -1027,15 +1051,21 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    // The automatic path is already building or waiting for an idle window for this update.
-    if (automaticUpdateRunning) return true;
+    // An update is already building or waiting for an idle window: install that one sooner.
+    if (automaticUpdateRunning || manualUpdateRunning) return installPendingUpdateSooner();
     // Build, test and stage while Codex keeps working; replace the app only in an idle window.
-    const prepared = await updateController.beginInstall();
+    manualUpdateRunning = true;
+    updateInstallRequested = true;
     try {
-      await quitWhenIdleForUpdate(prepared, logger);
-    } catch (error) {
-      updateController.cancelInstall(prepared);
-      throw error;
+      const prepared = await updateController.beginInstall();
+      try {
+        await quitWhenIdleForUpdate(prepared, logger);
+      } catch (error) {
+        updateController.cancelInstall(prepared);
+        throw error;
+      }
+    } finally {
+      manualUpdateRunning = false;
     }
     return true;
   });
@@ -1052,6 +1082,16 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
+function activeTurnCount(health) {
+  return (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0);
+}
+
+async function showNativeDialog(options) {
+  return mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+}
+
 async function runtimeActivity() {
   try {
     const config = runtimeSupervisor?.readConfig();
@@ -1065,25 +1105,62 @@ async function runtimeActivity() {
 /**
  * Wait until Codex has had no active HTTP or browser turn for a quiet period, then let the prepared
  * update replace the app. The runtime drains without cancelling work; if a turn arrives during the
- * drain, the worker is stopped and the wait continues. Nothing is interrupted to install an update.
+ * drain, the worker is stopped and the wait continues. Nothing is interrupted to install an update
+ * unless the user chose "install now" in the dialog of installPendingUpdateSooner.
  */
 async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUIET_MS) {
+  const wait = { quietMs: updateInstallRequested ? Math.min(quietMs, UPDATE_IDLE_QUIET_MS) : quietMs, now: false };
+  updateIdleWait = wait;
   let idleSince = null;
-  for (;;) {
-    const health = await runtimeActivity();
-    const idle = !health
-      || (health.active_http_turns === 0 && health.active_browser_turns === 0);
-    idleSince = idle ? (idleSince ?? Date.now()) : null;
-    if (idleSince !== null && Date.now() - idleSince >= quietMs) {
-      const launch = await updateController.launchInstall(prepared);
-      const result = await requestQuit({ preserveActiveTurns: true, quiet: true });
-      if (result.ok) return;
-      updateController.abortLaunch(launch);
-      logger?.info("launcher.update_waiting_for_idle", { reason: result.message });
-      idleSince = null;
+  try {
+    for (;;) {
+      const running = activeTurnCount(await runtimeActivity());
+      updateController.noteInstallProgress({ activeTurns: running, requested: wait.quietMs <= UPDATE_IDLE_QUIET_MS });
+      idleSince = running === 0 ? (idleSince ?? Date.now()) : null;
+      if (wait.now || (idleSince !== null && Date.now() - idleSince >= wait.quietMs)) {
+        const launch = await updateController.launchInstall(prepared);
+        const result = await requestQuit({ preserveActiveTurns: !wait.now, quiet: true });
+        if (result.ok) return;
+        updateController.abortLaunch(launch);
+        logger?.info("launcher.update_waiting_for_idle", { reason: result.message });
+        wait.now = false;
+        idleSince = null;
+      }
+      await new Promise(resolve => setTimeout(resolve, UPDATE_IDLE_POLL_MS));
     }
-    await new Promise(resolve => setTimeout(resolve, UPDATE_IDLE_POLL_MS));
+  } finally {
+    if (updateIdleWait === wait) updateIdleWait = null;
+    updateInstallRequested = false;
   }
+}
+
+/**
+ * The update button while an update builds or waits for an idle Codex: install it 30 seconds after
+ * Codex's tasks finish instead of after the unattended ten-minute window. With tasks running, a
+ * dialog says so and offers to install now, which stops them; keeping them is the default.
+ */
+async function installPendingUpdateSooner() {
+  updateInstallRequested = true;
+  updateController.noteInstallProgress({ requested: true });
+  const wait = updateIdleWait;
+  // Still building: the wait that follows uses the short window.
+  if (!wait) return true;
+  wait.quietMs = Math.min(wait.quietMs, UPDATE_IDLE_QUIET_MS);
+  const running = activeTurnCount(await runtimeActivity());
+  updateController.noteInstallProgress({ activeTurns: running, requested: true });
+  if (running === 0) return true;
+  const copy = nativeCopyFor(launcherLanguage());
+  const answer = await showNativeDialog({
+    type: "question",
+    message: copy.updateRunningTitle.replace("{count}", String(running)),
+    detail: copy.updateRunningDetail,
+    buttons: [copy.updateWhenIdle, copy.updateNow],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (answer.response === 1 && updateIdleWait === wait) wait.now = true;
+  return true;
 }
 
 /**
@@ -1117,11 +1194,10 @@ async function installAutomaticUpdate({ logger, stateStore }) {
  */
 async function quitAfterConfirmation() {
   if (exitCommitted || shutdownInProgress) return;
-  const health = await runtimeActivity();
-  const running = (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0);
+  const running = activeTurnCount(await runtimeActivity());
   if (running > 0) {
     const copy = nativeCopyFor(launcherLanguage());
-    const options = {
+    const answer = await showNativeDialog({
       type: "warning",
       message: copy.quitRunningTitle.replace("{count}", String(running)),
       detail: copy.quitRunningDetail,
@@ -1129,10 +1205,7 @@ async function quitAfterConfirmation() {
       defaultId: 0,
       cancelId: 0,
       noLink: true,
-    };
-    const answer = mainWindow && !mainWindow.isDestroyed()
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options);
+    });
     if (answer.response !== 1) return;
   }
   await requestQuit();

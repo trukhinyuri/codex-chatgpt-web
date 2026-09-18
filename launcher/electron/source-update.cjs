@@ -608,8 +608,10 @@ function createSourceUpdateController({
           };
           await deps.prepareCheckout({ sourceRoot, commit: target.commit, env, log });
           const startedAt = deps.now();
-          for (const step of sourceBuildSteps()) {
+          const steps = sourceBuildSteps();
+          for (const [index, step] of steps.entries()) {
             log(`step: ${step.label}`);
+            transition({ ...state, step: index + 1, steps: steps.length });
             try {
               await deps.run(step.command, step.args, { cwd: path.join(sourceRoot, step.cwd), env, log });
             } catch (error) {
@@ -648,7 +650,7 @@ function createSourceUpdateController({
         fs.writeFileSync(jobPath, `${JSON.stringify(job)}\n`, { mode: 0o600 });
         log(`verified and staged ${target.commit}; waiting for Codex to be idle`);
         logger?.info("launcher.update_prepared", { commit: target.commit, automatic, channel: "source" });
-        transition({ status: "installing", version: target.version, automatic, waitingForIdle: true });
+        transition({ status: "installing", version: target.version, automatic, waitingForIdle: true, ...(state.requested ? { requested: true } : {}) });
         return { tempRoot, workerPath, jobPath, version: target.version, commit: target.commit };
       } catch (error) {
         fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -698,6 +700,19 @@ function createSourceUpdateController({
     return { child, prepared };
   }
 
+  /**
+   * Publish what a pending update waits for — the user asked to install it, how many Codex tasks run —
+   * so the launcher can say so instead of looking stuck. Publishes only on a change.
+   */
+  function noteInstallProgress({ activeTurns, requested } = {}) {
+    if (state.status !== "downloading" && state.status !== "installing") return state;
+    const next = { ...state };
+    if (requested === true) next.requested = true;
+    if (Number.isInteger(activeTurns)) next.activeTurns = Math.max(0, activeTurns);
+    if (next.requested === state.requested && next.activeTurns === state.activeTurns) return state;
+    return transition(next);
+  }
+
   /** Stop a worker whose launcher did not exit; the staged build stays ready for the next idle window. */
   function abortLaunch(launch) {
     try { launch?.child?.kill(); } catch {}
@@ -717,6 +732,7 @@ function createSourceUpdateController({
     launchInstall,
     abortLaunch,
     cancelInstall,
+    noteInstallProgress,
   };
 }
 

@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { updateButtonState } from "./update-button";
 import { CLIPROXY_LOGIN_PROVIDERS } from "./types";
 import type {
   BrowserInteractionMode,
@@ -368,9 +369,8 @@ function LauncherShell({
     && snapshot.state.codexCatalogVerified === true
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
-  const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
-  const updateWaitingForIdle = snapshot.update.status === "installing" && snapshot.update.waitingForIdle === true;
+  const updateButton = updateButtonState(snapshot.update, copy);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
 
   useEffect(() => {
@@ -617,10 +617,11 @@ function LauncherShell({
               {updateVisible ? (
                 <SidebarItem
                   active={false}
-                  disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
+                  disabled={updateButton.disabled || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateWaitingForIdle ? copy.updateReady : updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
+                  label={updateButton.label ?? `${copy.updateAvailable} v${updateVersion}`}
                   onClick={() => void installUpdate()}
+                  title={updateButton.title}
                   tone="update"
                 />
               ) : null}
@@ -779,6 +780,7 @@ function SidebarItem({
   icon,
   label,
   onClick,
+  title,
   tone,
 }: {
   active: boolean;
@@ -787,6 +789,7 @@ function SidebarItem({
   icon: IconName;
   label: string;
   onClick: () => void;
+  title?: string;
   tone?: "update";
 }) {
   return (
@@ -795,6 +798,7 @@ function SidebarItem({
       className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
       disabled={disabled}
       onClick={onClick}
+      title={title}
       type="button"
     >
       {icon === "mcp" ? <McpMark /> : <Icon name={icon} />}

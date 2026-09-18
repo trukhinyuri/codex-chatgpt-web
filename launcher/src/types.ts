@@ -103,6 +103,13 @@ export type UpdateState =
     blocked?: string;
     /** Built, tested and staged; waiting until Codex has no active turns. */
     waitingForIdle?: boolean;
+    /** Build progress while status is "downloading". */
+    step?: number;
+    steps?: number;
+    /** The user asked to install this update: it installs 30 s after Codex's tasks finish. */
+    requested?: boolean;
+    /** Codex tasks the staged update is waiting for. */
+    activeTurns?: number;
   }
   | { status: "error"; message: string };
 

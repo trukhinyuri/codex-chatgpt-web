@@ -218,6 +218,28 @@ test("an update builds the announced commit, passes all checks, and stages witho
   assert.deepEqual(instance.getState(), { status: "available", version: "5.0.8+2222222", automatic: true });
 });
 
+test("the update reports its build step and what it waits for, publishing only changes", async () => {
+  const { instance, published } = controller();
+  await instance.checkOnce();
+  const prepared = await instance.beginInstall();
+  const steps = published.filter(state => state.status === "downloading" && state.step).map(state => `${state.step}/${state.steps}`);
+  assert.deepEqual(steps, ["1/4", "2/4", "3/4", "4/4"]);
+  const before = published.length;
+  instance.noteInstallProgress({ activeTurns: 2, requested: false });
+  instance.noteInstallProgress({ activeTurns: 2, requested: false });
+  assert.equal(published.length, before + 1, "an unchanged note publishes nothing");
+  instance.noteInstallProgress({ activeTurns: 0, requested: true });
+  assert.deepEqual(instance.getState(), {
+    status: "installing", version: "5.0.8+2222222", automatic: false, waitingForIdle: true, activeTurns: 0, requested: true,
+  });
+  instance.noteInstallProgress({ requested: false });
+  assert.equal(instance.getState().requested, true, "a request is never withdrawn by a later note");
+  instance.cancelInstall(prepared);
+  const after = published.length;
+  instance.noteInstallProgress({ activeTurns: 1, requested: true });
+  assert.equal(published.length, after, "no note outside a pending install");
+});
+
 test("a failing test run keeps the installed build and leaves the update available", async () => {
   const { instance, calls, logs } = controller({}, {
     run: async (command, args) => {
@@ -363,6 +385,9 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     UPDATE_IDLE_POLL_MS: 1,
     Date,
     setTimeout,
+    updateIdleWait: null,
+    updateInstallRequested: false,
+    activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
     runtimeActivity: async () => {
       const next = activity.shift() ?? { active_http_turns: 0, active_browser_turns: 0 };
       events.push(`activity:${next.active_http_turns + next.active_browser_turns}`);
@@ -371,6 +396,7 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
     updateController: {
       launchInstall: prepared => { events.push(`launch:${prepared.version}`); launches += 1; return { id: launches }; },
       abortLaunch: launch => events.push(`abort:${launch.id}`),
+      noteInstallProgress: () => {},
     },
     requestQuit: async (options) => {
       events.push(`quit:${JSON.stringify(options)}`);
@@ -389,6 +415,78 @@ test("an update replaces the app only after Codex stays idle, and never cancels 
   ]);
   assert.equal(events[0], "activity:2", "the first poll saw active turns and did not launch the install");
   assert.equal(events[1], "activity:0");
+});
+
+test("a click on a waiting update installs it 30 s after Codex's tasks, or now if the user chooses to stop them", async () => {
+  const running = { active_http_turns: 1, active_browser_turns: 1 };
+  const idle = { active_http_turns: 0, active_browser_turns: 0 };
+  const makeContext = ({ activity, answer }) => {
+    const events = [];
+    const context = {
+      UPDATE_IDLE_QUIET_MS: 30_000,
+      UPDATE_IDLE_POLL_MS: 1,
+      Date,
+      setTimeout,
+      updateIdleWait: null,
+      updateInstallRequested: false,
+      activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
+      runtimeActivity: async () => activity(),
+      launcherLanguage: () => "en",
+      nativeCopyFor: () => ({
+        updateRunningTitle: "Codex is running {count} task(s)",
+        updateRunningDetail: "detail",
+        updateWhenIdle: "Install when they finish",
+        updateNow: "Install now and stop them",
+      }),
+      showNativeDialog: async options => { events.push(`dialog:${options.message}:${options.buttons.join("|")}:${options.defaultId}`); return { response: answer }; },
+      updateController: {
+        launchInstall: () => { events.push("launch"); return {}; },
+        abortLaunch: () => events.push("abort"),
+        noteInstallProgress: note => events.push(`note:${JSON.stringify(note)}`),
+      },
+      requestQuit: async options => { events.push(`quit:${JSON.stringify(options)}`); return { ok: true }; },
+    };
+    const vm = require("node:vm");
+    const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+    const start = main.indexOf("async function quitWhenIdleForUpdate(");
+    const end = main.indexOf("\n/**\n * Unattended updates:", start);
+    assert.ok(start >= 0 && end > start);
+    vm.runInNewContext(`${main.slice(start, end)}\nglobalThis.quitWhenIdleForUpdate = quitWhenIdleForUpdate;\nglobalThis.installPendingUpdateSooner = installPendingUpdateSooner;\nglobalThis.waitState = () => updateIdleWait;`, context);
+    return { context, events };
+  };
+
+  // Tasks keep running: the unattended ten-minute wait never ends until the user clicks "install now".
+  {
+    const { context, events } = makeContext({ activity: () => running, answer: 1 });
+    const waiting = context.quitWhenIdleForUpdate({ version: "v" }, { info() {} }, 10 * 60_000);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(context.waitState().quietMs, 10 * 60_000);
+    assert.equal(await context.installPendingUpdateSooner(), true);
+    await waiting;
+    assert.ok(events.includes("dialog:Codex is running 2 task(s):Install when they finish|Install now and stop them:0"), "the dialog keeps the tasks by default");
+    assert.deepEqual(events.filter(event => event === "launch" || event.startsWith("quit:")), ["launch", 'quit:{"preserveActiveTurns":false,"quiet":true}']);
+    assert.ok(events.some(event => event === 'note:{"activeTurns":2,"requested":true}'), "the button learns what the update waits for");
+  }
+
+  // The user keeps the tasks: the wait shortens to 30 s and the update never stops them.
+  {
+    let polls = 0;
+    const { context, events } = makeContext({ activity: () => (++polls < 4 ? running : idle), answer: 0 });
+    context.UPDATE_IDLE_QUIET_MS = 0;
+    const waiting = context.quitWhenIdleForUpdate({ version: "v" }, { info() {} }, 10 * 60_000);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    await context.installPendingUpdateSooner();
+    await waiting;
+    assert.deepEqual(events.filter(event => event.startsWith("quit:")), ['quit:{"preserveActiveTurns":true,"quiet":true}']);
+    assert.ok(polls >= 4, "the install waited for the tasks to finish");
+  }
+
+  // A click while the update still builds: the wait that follows starts with the short window.
+  {
+    const { context } = makeContext({ activity: () => idle, answer: 0 });
+    assert.equal(await context.installPendingUpdateSooner(), true);
+    assert.equal(context.updateInstallRequested, true);
+  }
 });
 
 test("the update quit drains without cancelling while an ordinary quit keeps cancelling", () => {
@@ -618,6 +716,8 @@ test("a quit asks first while Codex has turns in flight; signals and idle quits 
       mainWindow: null,
       String,
       runtimeActivity: async () => ({ active_http_turns: active, active_browser_turns: 0 }),
+      activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
+      showNativeDialog: async options => context.dialog.showMessageBox(options),
       nativeCopyFor: () => ({ quitRunningTitle: "Codex is running {count} task(s)", quitRunningDetail: "d", quitKeepRunning: "Keep", quitAnyway: "Quit" }),
       launcherLanguage: () => "en",
       dialog: { showMessageBox: async (options) => { events.push(["dialog", options.message, options.defaultId, options.cancelId]); return { response: answer }; } },
