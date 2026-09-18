@@ -88,7 +88,7 @@ test("adopting stops the old agent, keeps its plist, and runs this app's binary 
   expect(loaded.has(SERVICE_LABEL)).toBe(true);
   const paths = servicePaths(home, agents);
   expect(readFileSync(paths.binary, "utf8")).toBe("v1");
-  expect(statSync(paths.binary).mode & 0o777).toBe(0o755);
+  if (process.platform !== "win32") expect(statSync(paths.binary).mode & 0o777).toBe(0o755);
   expect(readFileSync(paths.plist, "utf8")).toBe(launchAgentPlist(paths, config));
   const state = readServiceState(paths)!;
   expect(state).toMatchObject({ enabled: true, configPath: config, adoptedFrom: { label: "com.example.cliproxyapi" } });

@@ -63,6 +63,9 @@ jobs:
       - run: bun run app:package
         env:
           CODEX_SUPERPOWER_CACHE: ${{ runner.temp }}/codex-superpower-cache
+          # electron-builder skips signing in pull requests; the build is ad-hoc signed and CI holds
+          # no signing secrets, so sign here too and let package.cjs verify the signature.
+          CSC_FOR_PULL_REQUEST: "true"
       - name: Verify Linux AppImage ABI on current Arch
         if: runner.os == 'Linux'
         run: |

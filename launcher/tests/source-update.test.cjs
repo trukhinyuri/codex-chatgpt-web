@@ -1,4 +1,9 @@
-const test = require("node:test");
+const nodeTest = require("node:test");
+// Source updates exist only in packaged macOS builds (the controller disables itself elsewhere, and a
+// test below checks that); their paths and processes are macOS paths and processes.
+const test = process.platform === "win32"
+  ? (name, ...rest) => nodeTest(name, { skip: "source updates are macOS-only" }, typeof rest.at(-1) === "function" ? rest.at(-1) : () => {})
+  : nodeTest;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");

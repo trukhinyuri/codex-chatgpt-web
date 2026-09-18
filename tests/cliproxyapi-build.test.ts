@@ -22,10 +22,11 @@ function response(body: string | Buffer, status = 200): Response {
 
 describe("CLIProxyAPI build inputs", () => {
   test("the cache lives in the per-user cache folder of each platform", () => {
-    expect(build.cacheRoot({}, "darwin", "/Users/a")).toBe("/Users/a/Library/Caches/codex-superpower");
-    expect(build.cacheRoot({ XDG_CACHE_HOME: "/x" }, "linux", "/home/a")).toBe("/x/codex-superpower");
-    expect(build.cacheRoot({}, "linux", "/home/a")).toBe("/home/a/.cache/codex-superpower");
-    expect(build.cacheRoot({ CODEX_SUPERPOWER_CACHE: "/ci/cache" }, "darwin", "/Users/a")).toBe("/ci/cache");
+    expect(build.cacheRoot({}, "darwin", "/Users/a")).toBe(join("/Users/a", "Library", "Caches", "codex-superpower"));
+    expect(build.cacheRoot({ XDG_CACHE_HOME: "/x" }, "linux", "/home/a")).toBe(join("/x", "codex-superpower"));
+    expect(build.cacheRoot({}, "linux", "/home/a")).toBe(join("/home/a", ".cache", "codex-superpower"));
+    expect(build.cacheRoot({ LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local" }, "win32", "C:\\Users\\a")).toBe(join("C:\\Users\\a\\AppData\\Local", "codex-superpower", "cache"));
+    expect(build.cacheRoot({ CODEX_SUPERPOWER_CACHE: "/ci/cache" }, "darwin", "/Users/a")).toBe(resolve("/ci/cache"));
   });
 
   test("the pins name official sources with SHA-256 checksums", () => {
@@ -58,7 +59,7 @@ describe("CLIProxyAPI build inputs", () => {
         expect(client).toEqual({ clientId: fakeClientId, clientSecret: fakeSecret });
         expect(urls).toEqual([`https://raw.githubusercontent.com/${pinned.repository}/${pinned.commit}/${pinned.path}`]);
         const cached = join(cache, `antigravity-client-${build.MANIFEST.antigravityClient.sha256.slice(0, 16)}.json`);
-        expect(statSync(cached).mode & 0o777).toBe(0o600);
+        if (process.platform !== "win32") expect(statSync(cached).mode & 0o777).toBe(0o600);
         expect(await build.antigravityClient({ fetchImpl: async () => { throw new Error("no network"); }, cache })).toEqual(client);
         expect(build.antigravityLdflags(client)).toBe(
           `-X ${build.ANTIGRAVITY_PACKAGE}.ClientID=${fakeClientId} -X ${build.ANTIGRAVITY_PACKAGE}.ClientSecret=${fakeSecret}`,
@@ -96,10 +97,13 @@ describe("CLIProxyAPI build inputs", () => {
         .rejects.toThrow(/does not match its pinned SHA-256/);
       expect(existsSync(join(cache, "toolchains", `go${build.MANIFEST.go.version}`))).toBe(false);
       await expect(build.ensureGo({ env: {}, platform: "aix", arch: "ppc64", cache })).rejects.toThrow(/No pinned Go toolchain for aix-ppc64/);
-      const fakeGo = join(cache, "go");
-      writeFileSync(fakeGo, "#!/bin/sh\necho 'go version go1.26.3 darwin/arm64'\n");
-      chmodSync(fakeGo, 0o755);
-      expect(await build.ensureGo({ env: { CODEX_SUPERPOWER_GO: fakeGo }, cache })).toEqual({ go: fakeGo, version: "1.26.3", source: "override", cache });
+      // A stand-in toolchain is a shell script, which Windows cannot run.
+      if (process.platform !== "win32") {
+        const fakeGo = join(cache, "go");
+        writeFileSync(fakeGo, "#!/bin/sh\necho 'go version go1.26.3 darwin/arm64'\n");
+        chmodSync(fakeGo, 0o755);
+        expect(await build.ensureGo({ env: { CODEX_SUPERPOWER_GO: fakeGo }, cache })).toEqual({ go: fakeGo, version: "1.26.3", source: "override", cache });
+      }
       await expect(build.ensureGo({ env: { CODEX_SUPERPOWER_GO: join(cache, "missing") }, cache })).rejects.toThrow(/is not a working Go toolchain/);
     } finally {
       rmSync(cache, { recursive: true, force: true });
@@ -108,7 +112,7 @@ describe("CLIProxyAPI build inputs", () => {
 
   test("go commands use only the local toolchain, the pinned modules and private caches", () => {
     const env = build.goEnv("/c", { PATH: "/bin" });
-    expect(env).toMatchObject({ PATH: "/bin", GOTOOLCHAIN: "local", GOFLAGS: "-mod=readonly", GOPATH: "/c/gopath", GOMODCACHE: "/c/gomod", GOCACHE: "/c/gobuild" });
+    expect(env).toMatchObject({ PATH: "/bin", GOTOOLCHAIN: "local", GOFLAGS: "-mod=readonly", GOPATH: join("/c", "gopath"), GOMODCACHE: join("/c", "gomod"), GOCACHE: join("/c", "gobuild") });
   });
 
   test("the guard finds an embedded OAuth client, and cliproxyapi/ has none", () => {

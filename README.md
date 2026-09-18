@@ -179,7 +179,9 @@ More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), **Activity** and **Settings → 
 
 ## Develop
 
-Building from source requires Bun 1.4.0 exactly; the CLIProxyAPI component in `cliproxyapi/` also needs Go 1.26 or newer.
+Requirements, process and current state for contributors and agents: [docs/requirements.md](docs/requirements.md), [docs/engineering-process.md](docs/engineering-process.md), [docs/roadmap.md](docs/roadmap.md).
+
+Building from source requires Bun 1.4.0 exactly. The CLIProxyAPI component in `cliproxyapi/` builds with a Go toolchain the build downloads from go.dev on first use and checks by SHA-256, so Go does not need to be installed.
 
 ```bash
 git clone https://github.com/trukhinyuri/codex-superpower.git
