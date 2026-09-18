@@ -25,6 +25,7 @@ Updated with every release. It lists where the product still falls short of [req
 
 ## Next
 
+- **Staged rollout and a kill switch** (practice gap): every installation now takes a new `main` within about an hour, so one bad release reaches everyone at once. Give each installation a stable random bucket, widen the eligible share with the age of the commit, halt a release through a file in the repository, and halt automatically when problem reports for the new commit rise.
 - **Several ChatGPT accounts** (requirement R9): a browser profile and connector per account, an account pool in the bridge that schedules turns by load and per-account limits, account-sticky continuations, and setup of additional accounts from the launcher. Design in progress (`plans/multi-account.md`).
 - ChatGPT Web reliability, wave 2:
   - status of limits and queues in the launcher (plan 2.3);
