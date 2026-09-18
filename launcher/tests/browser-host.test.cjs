@@ -17,6 +17,7 @@ const {
   BrowserHost,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
+  isChatGptOriginUrl,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
@@ -434,6 +435,15 @@ test("smoke preserves an already-hydrated Temporary Chat page", () => {
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/?temporary-chat=false"), false);
   assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc?temporary-chat=true"), false);
   assert.equal(isTemporaryChatUrl("not a url"), false);
+});
+
+test("isChatGptOriginUrl rejects a hostname that merely starts with the ChatGPT origin", () => {
+  assert.equal(isChatGptOriginUrl("https://chatgpt.com"), true);
+  assert.equal(isChatGptOriginUrl("https://chatgpt.com/c/abc"), true);
+  assert.equal(isChatGptOriginUrl("https://chatgpt.com.attacker.example/"), false);
+  assert.equal(isChatGptOriginUrl("https://chatgpt.com@attacker.example/"), false);
+  assert.equal(isChatGptOriginUrl("https://attacker.example/?u=chatgpt.com"), false);
+  assert.equal(isChatGptOriginUrl("not a url"), false);
 });
 
 test("session inspection delegates navigation and capability detection to the shared browser helper", async () => {

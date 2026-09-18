@@ -113,6 +113,34 @@ const reportHttpStreamFailure: HttpStreamFailureReporter = evidence => {
   console.warn(`[codex-chatgpt-web] http_stream_failed ${JSON.stringify(evidence)}`);
 };
 
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Reject a request whose Host header does not name this loopback bridge, and, for a browser
+ * request, whose Origin does not match it either. A hostile web page can point a hostname it
+ * controls at 127.0.0.1 after the browser's initial DNS lookup (DNS rebinding); the Host header
+ * still names that hostname, and the Origin header still names the page's real origin, so both are
+ * checked against the loopback set and the port this server actually bound. Codex CLI/Desktop send
+ * no Origin header at all and are accepted on Host alone. A Host header with no port (never sent by
+ * a real HTTP client talking to a non-default port, only ever seen from a hand-built request) is
+ * accepted on hostname alone rather than compared to a default port that would never match.
+ */
+function isLoopbackRequest(url: URL, req: Request, boundPort: number): boolean {
+  if (!LOOPBACK_HOSTNAMES.has(url.hostname)) return false;
+  if (url.port !== "" && Number(url.port) !== boundPort) return false;
+  const origin = req.headers.get("origin");
+  if (origin === null) return true;
+  try {
+    const parsedOrigin = new URL(origin);
+    const originPort = parsedOrigin.port === "" ? 80 : Number(parsedOrigin.port);
+    return parsedOrigin.protocol === "http:"
+      && LOOPBACK_HOSTNAMES.has(parsedOrigin.hostname)
+      && originPort === boundPort;
+  } catch {
+    return false;
+  }
+}
+
 function emitHttpStreamFailure(
   reporter: HttpStreamFailureReporter,
   evidence: HttpStreamFailureEvidence,
@@ -901,6 +929,14 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      const boundPort = server.port;
+      if (boundPort === undefined || !isLoopbackRequest(url, req, boundPort)) {
+        console.warn(`[codex-chatgpt-web] rejected request with a non-loopback Host or Origin: ${JSON.stringify({
+          host: req.headers.get("host"),
+          origin: req.headers.get("origin"),
+        })}`);
+        return formatErrorResponse(403, "invalid_request_error", "Request Host or Origin is not allowed");
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
