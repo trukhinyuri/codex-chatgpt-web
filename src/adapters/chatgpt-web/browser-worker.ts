@@ -136,6 +136,11 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
 export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
+/**
+ * Sending is a bounded browser action, not the open-ended stage that owns it. A stalled renderer
+ * must fail this one action instead of leaving the composer looking frozen for the whole budget.
+ */
+export const CHATGPT_SEND_ACTION_TIMEOUT_MS = 15_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -3570,26 +3575,33 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
-    await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
-    const evidence = await this.waitForSubmissionAcceptedWithRecovery(
-      page,
-      baseline,
-      abortSignal,
-      externalProgress,
-      initialToolBatchRevision,
-      completionTracker,
-      recoverObservation,
-    );
-    submissionLifecycle?.onSubmitted?.();
-    return evidence;
+    try {
+      await submissionLifecycle?.onSendActivated?.();
+      await sendButton.press("Enter", {
+        noWaitAfter: true,
+        signal: abortSignal,
+        // runStage still owns the 180-second Bigger Context budget; this only bounds the browser
+        // action itself so a stalled renderer cannot make the whole stage look frozen forever.
+        timeout: CHATGPT_SEND_ACTION_TIMEOUT_MS,
+      });
+      const evidence = await this.waitForSubmissionAcceptedWithRecovery(
+        page,
+        baseline,
+        abortSignal,
+        externalProgress,
+        initialToolBatchRevision,
+        completionTracker,
+        recoverObservation,
+      );
+      submissionLifecycle?.onSubmitted?.();
+      return evidence;
+    } catch (error) {
+      // Neither an aborted send nor a failed one has any local consumer left for a remote
+      // generation ChatGPT may still be running; stop it instead of leaving it to burn quota.
+      const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+      if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
+      throw error;
+    }
   }
 
   private async waitForMultipartAcknowledgement(

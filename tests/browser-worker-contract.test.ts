@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, ChatGptRateLimitCooldown, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, throwIfChatGptUnusualActivityAlert, withChatGptBrowserObservationTimeout, CHATGPT_SEND_ACTION_TIMEOUT_MS, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS, chatGptMultipartAcknowledgementTimeoutMs, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -804,7 +804,9 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
       options?: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number },
     ) => {
       pressOptions = options;
-      if (options?.timeout !== 0) throw new Error("nested locator timeout replaced the outer stage budget");
+      if (options?.timeout !== CHATGPT_SEND_ACTION_TIMEOUT_MS) {
+        throw new Error("send action must use its own bounded browser-action timeout");
+      }
     },
   };
   worker.activeComposer = async () => ({
@@ -818,8 +820,100 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     1_000,
     stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal),
   )).resolves.toBe("user_turn");
-  expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
+  expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: CHATGPT_SEND_ACTION_TIMEOUT_MS });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("aborting a send stops a still-running ChatGPT generation", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://send-abort-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  let stopPresses = 0;
+  const stopButton = {
+    last() { return this; },
+    isVisible: async () => true,
+    press: async () => { stopPresses += 1; },
+  };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("stop-button") ? stopButton : hiddenLocator,
+  } as unknown as Page;
+  const controller = new AbortController();
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async (_key: string, options?: { signal?: AbortSignal }) => await new Promise<never>((_resolve, reject) => {
+      options?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }),
+  };
+  worker.activeComposer = async () => ({
+    locator: () => ({ getByTestId: () => sendButton }),
+  });
+
+  setTimeout(() => controller.abort(), 350);
+  await expect(worker.sendAttachedPrompt(page, {}, undefined, controller.signal))
+    .rejects.toMatchObject({ name: "AbortError" });
+  expect(stopPresses).toBe(1);
+});
+
+test("a failed send stops a generation even when the outer stage has not aborted", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://send-failure-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  let stopPresses = 0;
+  const stopButton = {
+    last() { return this; },
+    isVisible: async () => true,
+    press: async () => { stopPresses += 1; },
+  };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("stop-button") ? stopButton : hiddenLocator,
+  } as unknown as Page;
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async () => { throw new DOMException("renderer timed out", "TimeoutError"); },
+  };
+  worker.activeComposer = async () => ({
+    locator: () => ({ getByTestId: () => sendButton }),
+  });
+
+  await expect(worker.sendAttachedPrompt(page, {}, undefined, new AbortController().signal))
+    .rejects.toMatchObject({ name: "TimeoutError" });
+  expect(stopPresses).toBe(1);
 });
 
 test("submission observation recovery resumes with rebound locators and is strictly bounded", async () => {
