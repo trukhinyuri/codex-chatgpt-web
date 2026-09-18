@@ -916,6 +916,22 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+// ChatGPT can end a turn with "Unusual activity has been detected from your device. Try again
+// later." instead of the generic terminal-error alert or a normal completion. Left unclassified,
+// the turn stalls on whatever generic timeout owns the wait loop instead of surfacing a fast,
+// retryable rate limit the way the other terminal alerts above do.
+const chatGptUnusualActivityAlert = (scope: ChatGptTextScope): Locator => scope
+  .getByText(/Unusual activity has been detected from your device\.[\s\S]*Try again later\.(?:\s*\([^)]+\))?/i)
+  .last();
+
+export async function throwIfChatGptUnusualActivityAlert(scope: ChatGptTextScope): Promise<void> {
+  if (!await chatGptUnusualActivityAlert(scope).isVisible().catch(() => false)) return;
+  throw new ChatGptWebAdapterError(
+    "ChatGPT temporarily blocked the turn after detecting unusual activity from this device. Retry later.",
+    { status: 429, errorType: "rate_limit_error", code: "unusual_activity_detected", retryable: true },
+  );
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -3595,6 +3611,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+      await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
@@ -5004,6 +5021,7 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        await throwIfChatGptUnusualActivityAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
