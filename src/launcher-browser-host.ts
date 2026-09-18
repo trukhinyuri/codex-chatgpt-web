@@ -435,6 +435,8 @@ export type LauncherTurnActivity =
       helperPid: number;
       status: "completed" | "failed" | "aborted";
       message?: string;
+      /** A structured connector failure code (connector_not_found:<kind>), so the launcher re-checks. */
+      failureCode?: string;
       retain?: boolean;
       connectorBound?: boolean;
       /** Structural diagnostics the launcher logs with browser.turn_ended; never message text. */
@@ -670,6 +672,17 @@ export async function cancelLauncherManualTurn(
   if (!response.ok) throwManualControlError(response, body);
 }
 
+/** A background connector check ends within seconds; a turn start waits for it at most this long. */
+export const LAUNCHER_BACKGROUND_CHECK_WAIT_MS = 120_000;
+const LAUNCHER_BACKGROUND_CHECK_RETRY_MS = 500;
+
+class LauncherBackgroundCheckActiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBackgroundCheckActiveError";
+  }
+}
+
 export async function notifyLauncherTurn(
   descriptorPath: string,
   activity: LauncherTurnActivity,
@@ -678,6 +691,31 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
+  backgroundCheckWaitMs = LAUNCHER_BACKGROUND_CHECK_WAIT_MS,
+): Promise<{
+  surfaceId?: string;
+  reused?: boolean;
+  connectorBound?: boolean;
+  cancelledByUser?: boolean;
+}> {
+  const deadline = Date.now() + backgroundCheckWaitMs;
+  for (;;) {
+    try {
+      return await notifyLauncherTurnOnce(descriptorPath, activity, timeoutMs);
+    } catch (error) {
+      // The launcher is finishing a short background connector check on its own ChatGPT surface;
+      // the turn starts right after it instead of failing.
+      if (!(error instanceof LauncherBackgroundCheckActiveError)) throw error;
+      if (Date.now() >= deadline) throw new Error(`Launcher browser control channel failed: ${error.message}`);
+      await new Promise(resolveWait => setTimeout(resolveWait, LAUNCHER_BACKGROUND_CHECK_RETRY_MS));
+    }
+  }
+}
+
+async function notifyLauncherTurnOnce(
+  descriptorPath: string,
+  activity: LauncherTurnActivity,
+  timeoutMs: number,
 ): Promise<{
   surfaceId?: string;
   reused?: boolean;
@@ -710,6 +748,9 @@ export async function notifyLauncherTurn(
         );
       }
       const detail = typeof body.error === "string" ? body.error : "";
+      if (response.status === 409 && body.code === "background_check_active" && activity.phase === "start") {
+        throw new LauncherBackgroundCheckActiveError(`HTTP 409${detail ? `: ${detail}` : ""}`);
+      }
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -738,10 +779,80 @@ export async function notifyLauncherTurn(
     return {};
   } catch (error) {
     if (error instanceof LauncherBrowserTurnCancelledError
-      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
+      || error instanceof LauncherRetainedConversationUnavailableError
+      || error instanceof LauncherBackgroundCheckActiveError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export type LauncherTunnelContactStatus = "observed" | "not-observed" | "unknown";
+
+export interface LauncherConnectorTunnelRequest {
+  traceId: string;
+  helperPid: number;
+  /** Ask for one tunnel restart; the launcher grants it only if /readyz does not answer and no tool call is in flight. */
+  restart?: boolean;
+  /** Progress of the turn's wait for ChatGPT to list the connector, shown in the launcher. */
+  waitStep?: number;
+  waitTotal?: number;
+  waitMs?: number;
+}
+
+export interface LauncherConnectorTunnelStatus {
+  tunnelReady: boolean | null;
+  readyz: boolean | null;
+  contact: { status: LauncherTunnelContactStatus; at: string | null };
+  restart: string;
+}
+
+export const LAUNCHER_CONNECTOR_TUNNEL_TIMEOUT_MS = 10_000;
+
+function parseLauncherConnectorTunnelStatus(body: Record<string, unknown>): LauncherConnectorTunnelStatus {
+  const optionalBoolean = (value: unknown): boolean | null => typeof value === "boolean" ? value : null;
+  const contact = body.contact && typeof body.contact === "object" ? body.contact as Record<string, unknown> : {};
+  const status = contact.status === "observed" || contact.status === "not-observed" ? contact.status : "unknown";
+  const at = typeof contact.at === "string" && Number.isFinite(Date.parse(contact.at)) ? contact.at : null;
+  return {
+    tunnelReady: optionalBoolean(body.tunnelReady),
+    readyz: optionalBoolean(body.readyz),
+    contact: { status, at },
+    restart: typeof body.restart === "string" && /^[a-z-]{1,40}$/.test(body.restart) ? body.restart : "unknown",
+  };
+}
+
+/** Tunnel readiness and ChatGPT's contact with it, from the launcher that supervises the tunnel. */
+export async function requestLauncherConnectorTunnel(
+  descriptorPath: string,
+  request: LauncherConnectorTunnelRequest,
+  timeoutMs = LAUNCHER_CONNECTOR_TUNNEL_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<LauncherConnectorTunnelStatus> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/connector/tunnel`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      const detail = typeof body.error === "string" ? `: ${body.error}` : "";
+      throw new Error(`HTTP ${response.status}${detail}`);
+    }
+    return parseLauncherConnectorTunnelStatus(body);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 

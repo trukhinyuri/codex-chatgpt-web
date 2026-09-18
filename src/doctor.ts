@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
@@ -227,6 +228,102 @@ export function modelCatalogDoctorCheck(input: {
   };
 }
 
+/**
+ * What the launcher's tunnel supervisor last read from tunnel-client's /metrics: when ChatGPT last
+ * sent this tunnel an MCP command, and whether a fresh, fully understood reading saw none.
+ * Counts and times only; no request content.
+ */
+export interface TunnelContactRecord {
+  version: 1;
+  tunnel: string;
+  lastContactAt: string | null;
+  observedAt: string;
+  metricsReadable: boolean;
+  metricsVerified: boolean;
+  processStartSeconds: number | null;
+}
+
+export type TunnelContactStatus =
+  | { status: "observed"; at: string }
+  | { status: "not-observed"; at: string | null }
+  | { status: "unknown" };
+
+export const TUNNEL_CONTACT_OBSERVATION_FRESH_MS = 60_000;
+
+export function tunnelFingerprint(tunnelId: string): string {
+  return createHash("sha256").update(tunnelId).digest("hex");
+}
+
+export function readTunnelContactRecord(
+  config: AppConfig,
+  path = join(getConfigDir(), "runtime", "tunnel-contact.json"),
+): TunnelContactRecord | undefined {
+  if (config.mode !== "full" || !config.tunnel) return undefined;
+  try {
+    const record = JSON.parse(readFileSync(path, "utf8")) as Partial<TunnelContactRecord>;
+    if (record?.version !== 1 || record.tunnel !== tunnelFingerprint(config.tunnel.tunnelId)) return undefined;
+    return record as TunnelContactRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Mirrors the launcher's reading: a missing or unverified metric is never proof of no contact. */
+export function tunnelContactStatus(record: TunnelContactRecord | undefined, now = Date.now()): TunnelContactStatus {
+  if (!record) return { status: "unknown" };
+  if (typeof record.lastContactAt === "string" && Number.isFinite(Date.parse(record.lastContactAt))) {
+    return { status: "observed", at: record.lastContactAt };
+  }
+  const observedAt = Date.parse(record.observedAt);
+  if (record.metricsReadable === true
+    && record.metricsVerified === true
+    && Number.isFinite(observedAt)
+    && now - observedAt <= TUNNEL_CONTACT_OBSERVATION_FRESH_MS) {
+    const at = typeof record.processStartSeconds === "number" && Number.isFinite(record.processStartSeconds)
+      ? new Date(record.processStartSeconds * 1_000).toISOString()
+      : null;
+    return { status: "not-observed", at };
+  }
+  return { status: "unknown" };
+}
+
+/**
+ * The connector check from local evidence: ChatGPT reaching this tunnel proves a connector is
+ * attached to it. Without a readable reading the check stays unproven, as before.
+ */
+export function connectorDoctorCheck(
+  config: AppConfig,
+  record: TunnelContactRecord | undefined,
+  now = Date.now(),
+): DoctorCheck {
+  const name = JSON.stringify(config.appName);
+  const contact = tunnelContactStatus(record, now);
+  if (contact.status === "observed") {
+    return {
+      id: "connector",
+      status: "ok",
+      message: `ChatGPT reached this tunnel at ${contact.at}`,
+      detail: `ChatGPT sent MCP commands to this computer's tunnel, so a connector is attached to it; the launcher confirms that it is named ${name}.`,
+    };
+  }
+  if (contact.status === "not-observed") {
+    return {
+      id: "connector",
+      status: "warning",
+      unprovenLocally: true,
+      message: `ChatGPT has not connected to this tunnel since it started${contact.at ? ` at ${contact.at}` : ""}`,
+      detail: `If connector ${name} does not exist yet, create it in ChatGPT for this tunnel (Developer Mode on, Authentication: None); Codex Web GPT detects it by itself.`,
+    };
+  }
+  return {
+    id: "connector",
+    status: "warning",
+    unprovenLocally: true,
+    message: `Local checks cannot prove that ChatGPT connector ${name} is attached to this tunnel`,
+    detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
+  };
+}
+
 export async function runDoctor(): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   checks.push({ id: "build", status: "ok", message: `Runtime ${VERSION}, ${formatRuntimeBuildStamp()}` });
@@ -349,13 +446,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(runtime.ok
       ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }
       : { id: "tunnel-runtime", status: "error", message: "Tunnel runtime is not ready", detail: runtime.detail });
-    checks.push({
-      id: "connector",
-      status: "warning",
-      unprovenLocally: true,
-      message: `Local checks cannot prove that ChatGPT connector ${JSON.stringify(config.appName)} is attached to this tunnel`,
-      detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
-    });
+    checks.push(connectorDoctorCheck(config, readTunnelContactRecord(config)));
   } else {
     checks.push({ id: "tools", status: "warning", message: "Browser-only mode intentionally has no local tools or MCP tunnel" });
   }

@@ -1654,6 +1654,151 @@ test("connector verification records the helper failure in launcher diagnostics"
   ]);
 });
 
+test("background connector checks wait for an idle launcher the person is not looking at", () => {
+  const window = { visible: true, minimized: false, isVisible() { return this.visible; }, isMinimized() { return this.minimized; } };
+  const fixture = {
+    window,
+    activeTraceId: null,
+    authView: null,
+    visible: false,
+    surfaceActive: false,
+    currentOperation: () => null,
+  };
+  const allowed = () => BrowserHost.prototype.backgroundCheckAllowed.call(fixture);
+  assert.equal(allowed(), true);
+  fixture.visible = true;
+  fixture.surfaceActive = true;
+  assert.equal(allowed(), false, "the embedded browser is on screen");
+  window.minimized = true;
+  assert.equal(allowed(), true);
+  window.minimized = false;
+  fixture.surfaceActive = false;
+  assert.equal(allowed(), true, "another launcher page is shown");
+  fixture.activeTraceId = "trace_running";
+  assert.equal(allowed(), false);
+  fixture.activeTraceId = null;
+  fixture.currentOperation = () => "ChatGPT login";
+  assert.equal(allowed(), false);
+  fixture.currentOperation = () => null;
+  fixture.authView = {};
+  assert.equal(allowed(), false);
+  fixture.authView = null;
+  let url = "https://chatgpt.com/c/the-persons-own-conversation";
+  fixture.view = { webContents: { getURL: () => url } };
+  assert.equal(allowed(), false, "a ChatGPT page the person opened is never reloaded");
+  url = "https://chatgpt.com/?temporary-chat=true";
+  assert.equal(allowed(), true);
+  url = IDLE_BROWSER_URL;
+  assert.equal(allowed(), true);
+});
+
+test("a background connector check is quiet and puts the launcher surface back", async () => {
+  const events = [];
+  const retained = { id: "tab-retained", status: "ready" };
+  const failure = new Error("ChatGPT connector menu opened but exposed no row named \"Codex Native2\"");
+  failure.code = "connector_not_found:not_listed";
+  let url = IDLE_BROWSER_URL;
+  const fixture = {
+    ready: async () => {},
+    activeTraceId: null,
+    manualOperation: null,
+    authView: null,
+    selectedTabId: retained.id,
+    turnTabs: new Map([[retained.id, retained]]),
+    visible: false,
+    surfaceActive: false,
+    window: { isVisible: () => true, isMinimized: () => false },
+    currentOperation() { return this.manualOperation; },
+    backgroundCheckAllowed: BrowserHost.prototype.backgroundCheckAllowed,
+    browserInteractionMode: () => "automatic",
+    interactionModeOverride: null,
+    getBrowserInteractionMode: () => "automatic",
+    activateHomeSurface() { this.selectedTabId = "home"; events.push("home"); },
+    syncViewVisibility: () => events.push("visibility"),
+    publishState: () => events.push("publish"),
+    snapshot: () => ({}),
+    setState: (patch) => events.push(["state", patch.status]),
+    returnToIdle: async () => { url = IDLE_BROWSER_URL; events.push("idle"); },
+    runConnectorVerification: async (_name, options) => {
+      events.push(["verify", options]);
+      url = "https://chatgpt.com/?temporary-chat=true";
+      throw failure;
+    },
+    view: { webContents: { getURL: () => url, isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  fixture.withManualOperation = BrowserHost.prototype.withManualOperation;
+
+  await assert.rejects(BrowserHost.prototype.verifyConnectorInBackground.call(fixture, "Codex Native2"), failure);
+  assert.deepEqual(events.filter(event => Array.isArray(event) && event[0] === "state"), [], "no error banner");
+  assert.deepEqual(events.find(event => Array.isArray(event) && event[0] === "verify"), ["verify", { background: true }]);
+  assert.ok(events.includes("idle"), "the surface returns to its idle page");
+  assert.equal(fixture.selectedTabId, retained.id, "the retained task tab is selected again");
+  assert.equal(fixture.manualOperation, null);
+
+  fixture.activeTraceId = "trace_running";
+  await assert.rejects(
+    BrowserHost.prototype.verifyConnectorInBackground.call(fixture, "Codex Native2"),
+    error => error.code === "launcher_busy",
+  );
+});
+
+test("a background connector check never blocks a turn, a setting or a user operation for long", async () => {
+  let finishCheck;
+  const events = [];
+  const fixture = {
+    ready: async () => {},
+    activeTraceId: null,
+    manualOperation: null,
+    loginOperation: null,
+    authView: null,
+    selectedTabId: "home",
+    turnTabs: new Map(),
+    visible: false,
+    surfaceActive: false,
+    state: { authenticated: true },
+    window: { isVisible: () => true, isMinimized: () => false },
+    browserInteractionMode: () => "automatic",
+    interactionModeOverride: null,
+    getBrowserInteractionMode: () => "automatic",
+    activateHomeSurface: () => events.push("home"),
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({}),
+    setState() {},
+    returnToIdle: async () => {},
+    runConnectorVerification: () => new Promise(resolve => { finishCheck = resolve; }),
+    view: { webContents: { getURL: () => IDLE_BROWSER_URL, isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  for (const method of [
+    "backgroundCheckAllowed",
+    "backgroundCheckInProgress",
+    "currentOperation",
+    "withManualOperation",
+    "verifyConnectorInBackground",
+    "beginTurn",
+  ]) fixture[method] = BrowserHost.prototype[method];
+
+  const check = fixture.verifyConnectorInBackground("Codex Native2");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.backgroundCheckInProgress(), true);
+  assert.equal(fixture.currentOperation(), null, "settings and quit do not see a background check as busy");
+  await assert.rejects(
+    fixture.beginTurn("trace_waiting", true, process.pid),
+    error => error.code === "background_check_active",
+  );
+  let userOperationRan = false;
+  const userOperation = fixture.withManualOperation("ChatGPT login", async () => { userOperationRan = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(userOperationRan, false, "the user operation waits for the check");
+  finishCheck({ ok: true, appName: "Codex Native2" });
+  await check;
+  await userOperation;
+  assert.equal(userOperationRan, true);
+  assert.equal(fixture.backgroundCheckInProgress(), false);
+  fixture.state.authenticated = false;
+  assert.equal(fixture.backgroundCheckAllowed(), false, "a signed-out browser is not checked");
+});
+
 test("a live helper retains exclusive ownership of its running turn", async () => {
   const tab = {
     id: "tab-live-owner",

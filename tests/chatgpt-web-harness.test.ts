@@ -2361,6 +2361,23 @@ describe("ChatGPT outer-native harness v4", () => {
     await broker.close();
   });
 
+  test("counts MCP requests in flight across turns so a tunnel restart can wait for them", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-active-tools-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const first = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000, "tools-a");
+    const second = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000, "tools-b");
+    expect(broker.activeToolCallCount()).toBe(0);
+    const a = await callTurnBroker<{ activityId: string }>(socketPath, { method: "claim", token: first });
+    const b = await callTurnBroker<{ activityId: string }>(socketPath, { method: "claim", token: second });
+    expect(broker.activeToolCallCount()).toBe(2);
+    await callTurnBroker(socketPath, { method: "activity_complete", token: first, activityId: a.activityId });
+    expect(broker.activeToolCallCount()).toBe(1);
+    broker.revoke(second);
+    expect(broker.activeToolCallCount()).toBe(0);
+    void b;
+    await broker.close();
+  });
+
   test("batches parallel ChatGPT MCP calls into one native Responses round", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-parallel-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);

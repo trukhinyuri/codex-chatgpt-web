@@ -184,3 +184,43 @@ test("session refresh reminders are deferred by exactly 48 hours", () => {
   assert.equal(nextSessionRefreshReminderAt(now), "2026-08-07T12:00:00.000Z");
   assert.throws(() => nextSessionRefreshReminderAt(Number.NaN), /must be finite/);
 });
+
+test("connector readiness evidence persists only timestamps and a known failure kind", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-connector-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    store.update({
+      mcpSetupComplete: true,
+      connectorVerifiedAt: "2026-09-18T08:41:55.000Z",
+      connectorLastCheckedAt: "2026-09-18T08:41:55.000Z",
+      connectorLastFailureKind: "not_listed",
+    });
+    const reloaded = createStateStore(file).read();
+    assert.equal(reloaded.connectorVerifiedAt, "2026-09-18T08:41:55.000Z");
+    assert.equal(reloaded.connectorLastCheckedAt, "2026-09-18T08:41:55.000Z");
+    assert.equal(reloaded.connectorLastFailureKind, "not_listed");
+
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      connectorVerifiedAt: "yesterday",
+      connectorLastCheckedAt: 42,
+      connectorLastFailureKind: "ChatGPT said: private text",
+    }));
+    const repaired = createStateStore(file).read();
+    assert.equal(Object.hasOwn(repaired, "connectorVerifiedAt"), false);
+    assert.equal(Object.hasOwn(repaired, "connectorLastCheckedAt"), false);
+    assert.equal(Object.hasOwn(repaired, "connectorLastFailureKind"), false);
+
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      connectorVerifiedAt: null,
+      connectorLastFailureKind: null,
+    }));
+    const cleared = createStateStore(file).read();
+    assert.equal(cleared.connectorVerifiedAt, null);
+    assert.equal(cleared.connectorLastFailureKind, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

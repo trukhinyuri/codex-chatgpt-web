@@ -1225,6 +1225,9 @@ export function startServer(
             ? null
             : Math.max(0, Math.floor((Date.now() - staleModelCatalogFetchedAtMs) / 1_000)),
           ...activity(),
+          // In-flight MCP tool calls through the tunnel (Full mode only); the launcher restarts the
+          // tunnel on a turn's behalf only when this is zero.
+          ...(turnBroker ? { active_tool_calls: turnBroker.activeToolCallCount() } : {}),
         });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {

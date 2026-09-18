@@ -189,6 +189,55 @@ test("launcher retained-conversation release uses its authenticated exact-key en
   }
 });
 
+test("a turn that starts during the launcher's background connector check waits for it instead of failing", async () => {
+  const phases: string[] = [];
+  let busyAnswers = 3;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    phases.push(request.url ?? "");
+    if (request.url === "/v1/turn/start" && busyAnswers > 0) {
+      busyAnswers -= 1;
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end('{"error":"ChatGPT browser is finishing a background connector check","code":"background_check_active"}\n');
+      return;
+    }
+    if (request.url === "/v1/turn/heartbeat") {
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end('{"error":"busy","code":"background_check_active"}\n');
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":false,"connectorBound":false}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(notifyLauncherTurn(path, { phase: "start", traceId: "abc123def456", helperPid: process.pid }))
+      .resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB", reused: false, connectorBound: false });
+    expect(phases).toEqual(["/v1/turn/start", "/v1/turn/start", "/v1/turn/start", "/v1/turn/start"]);
+
+    // Only a turn start waits; and never longer than its budget.
+    await expect(notifyLauncherTurn(path, { phase: "heartbeat", traceId: "abc123def456", helperPid: process.pid }))
+      .rejects.toThrow("HTTP 409");
+    busyAnswers = 1_000;
+    const startedAt = Date.now();
+    await expect(notifyLauncherTurn(
+      path,
+      { phase: "start", traceId: "abc123def456", helperPid: process.pid },
+      undefined,
+      1_200,
+    )).rejects.toThrow("background connector check");
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("launcher turn control preserves explicit user cancellation as a terminal signal", async () => {
   const server = createServer(async (request, response) => {
     for await (const _chunk of request) { /* drain request */ }
