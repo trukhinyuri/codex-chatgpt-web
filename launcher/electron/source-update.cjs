@@ -24,6 +24,10 @@ const UPDATE_STATE_FILE = "source-update-state.json";
 const STARTUP_HEALTH_FILE = "source-update-health.json";
 const ROLLBACK_DIRECTORY = "rollback.noindex";
 const MAX_FAILED_COMMITS = 20;
+// A build that passed every check is staged under a name derived from its commit and marked; a
+// launcher restarted while it waits for an idle window reuses it instead of building it again.
+const STAGING_PREFIX = "codex-web-gpt-update-";
+const VERIFIED_MARKER = "verified.json";
 const USER_AGENT = "codex-web-gpt-launcher-source-updater";
 const MAX_REDIRECTS = 5;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -392,7 +396,44 @@ function defaultDependencies() {
       return spawn(runtimeExecutable, [workerPath, jobPath], { detached: true, stdio: "ignore", windowsHide: true });
     },
     now: () => Date.now(),
+    stagingParent: os.tmpdir(),
   };
+}
+
+function stagingDirectory(parent, commit) {
+  return path.join(parent, `${STAGING_PREFIX}${commit.slice(0, 12)}`);
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove staged builds this launcher no longer needs: every one for the installed commit, every
+ * unverified or legacy one, and any verified one other than `keep`. Only folders whose job names
+ * this app bundle are touched.
+ */
+function cleanStagedBuilds({ parent, bundle, currentCommit, keep = null }) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(parent).filter(name => name.startsWith(STAGING_PREFIX));
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const dir = path.join(parent, name);
+    if (dir === keep) continue;
+    const job = readJsonFile(path.join(dir, "job.json"));
+    const verified = readJsonFile(path.join(dir, VERIFIED_MARKER));
+    const ours = job?.target === bundle || verified?.bundle === bundle;
+    if (!ours) continue;
+    const stale = verified?.commit === currentCommit || !verified || !/^[0-9a-f]{12}$/.test(name.slice(STAGING_PREFIX.length)) || keep !== null;
+    if (stale) fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function createSourceUpdateController({
@@ -429,6 +470,7 @@ function createSourceUpdateController({
   const healthPath = supported ? path.join(userDataDirectory, STARTUP_HEALTH_FILE) : null;
 
   if (supported) {
+    try { cleanStagedBuilds({ parent: deps.stagingParent, bundle: applicationBundle(executablePath), currentCommit }); } catch {}
     // Surface what the previous update did: a rollback is a problem the maintainer needs to hear about.
     const updateState = readUpdateState(statePath);
     const last = updateState.lastResult;
@@ -531,35 +573,50 @@ function createSourceUpdateController({
     pending = (async () => {
       transition({ status: "downloading", version: target.version, automatic });
       const log = line => deps.appendLog(logPath, line);
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-update-"));
+      const bundle = applicationBundle(executablePath);
+      const tempRoot = stagingDirectory(deps.stagingParent, target.commit);
+      const stagingRoot = path.join(tempRoot, "stage");
       let lock = null;
       try {
-        lock = deps.acquireLock(`${sourceRoot}.lock`);
-        log(`source update ${currentCommit} -> ${target.commit} from ${SOURCE_CLONE_URL}`);
-        const env = {
-          ...process.env,
-          PATH: sourceBuildPath({
-            runtimeExecutable,
-            loginShellPath: await deps.readLoginShellPath(),
-            inheritedPath: process.env.PATH,
-          }),
-        };
-        await deps.prepareCheckout({ sourceRoot, commit: target.commit, env, log });
-        const startedAt = deps.now();
-        for (const step of sourceBuildSteps()) {
-          log(`step: ${step.label}`);
-          try {
-            await deps.run(step.command, step.args, { cwd: path.join(sourceRoot, step.cwd), env, log });
-          } catch (error) {
-            throw new Error(`${step.label} failed: ${errorMessage(error)}`);
+        cleanStagedBuilds({ parent: deps.stagingParent, bundle, currentCommit, keep: tempRoot });
+        const marker = readJsonFile(path.join(tempRoot, VERIFIED_MARKER));
+        let reused = false;
+        try {
+          reused = marker?.commit === target.commit && marker?.bundle === bundle
+            && deps.readPackagedCommit(stagingRoot) === target.commit;
+        } catch {}
+        if (reused) {
+          log(`reusing the verified build of ${target.commit} staged at ${marker.at}`);
+        } else {
+          fs.rmSync(tempRoot, { recursive: true, force: true });
+          fs.mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
+          lock = deps.acquireLock(`${sourceRoot}.lock`);
+          log(`source update ${currentCommit} -> ${target.commit} from ${SOURCE_CLONE_URL}`);
+          const env = {
+            ...process.env,
+            PATH: sourceBuildPath({
+              runtimeExecutable,
+              loginShellPath: await deps.readLoginShellPath(),
+              inheritedPath: process.env.PATH,
+            }),
+          };
+          await deps.prepareCheckout({ sourceRoot, commit: target.commit, env, log });
+          const startedAt = deps.now();
+          for (const step of sourceBuildSteps()) {
+            log(`step: ${step.label}`);
+            try {
+              await deps.run(step.command, step.args, { cwd: path.join(sourceRoot, step.cwd), env, log });
+            } catch (error) {
+              throw new Error(`${step.label} failed: ${errorMessage(error)}`);
+            }
           }
-        }
-        const archive = deps.findPackage(sourceRoot, arch, startedAt);
-        const stagingRoot = path.join(tempRoot, "stage");
-        deps.extractMac(archive, stagingRoot);
-        const builtCommit = deps.readPackagedCommit(stagingRoot);
-        if (builtCommit !== target.commit) {
-          throw new Error(`The package was built from ${builtCommit || "an unknown commit"}, not ${target.commit}`);
+          const archive = deps.findPackage(sourceRoot, arch, startedAt);
+          deps.extractMac(archive, stagingRoot);
+          const builtCommit = deps.readPackagedCommit(stagingRoot);
+          if (builtCommit !== target.commit) {
+            throw new Error(`The package was built from ${builtCommit || "an unknown commit"}, not ${target.commit}`);
+          }
+          fs.writeFileSync(path.join(tempRoot, VERIFIED_MARKER), `${JSON.stringify({ commit: target.commit, bundle, at: new Date().toISOString() })}\n`, { mode: 0o600 });
         }
         // The worker replaces the app, keeps the previous one for rollback and waits for a healthy start.
         const workerPath = path.join(tempRoot, "source-update-worker.cjs");
@@ -568,7 +625,7 @@ function createSourceUpdateController({
           version: 1,
           parentPid: process.pid,
           source: findMacApplication(stagingRoot),
-          target: applicationBundle(executablePath),
+          target: bundle,
           executableName: path.basename(executablePath),
           commit: target.commit,
           previousCommit: currentCommit,

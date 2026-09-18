@@ -60,6 +60,7 @@ function controller(overrides = {}, dependencies = {}) {
     logger: { info: () => {}, warn: (event, fields) => calls.push(["warn", event, fields]) },
     ...overrides,
     dependencies: {
+      stagingParent: logs,
       fetchLatestCommit: async () => MAIN,
       fetchComparison: async () => ({ status: "ahead" }),
       fetchCheckRuns: async () => ({ total_count: 0, check_runs: [] }),
@@ -505,4 +506,49 @@ test("the launcher reports its start, installs unattended updates only after a l
   assert.match(main, /userDataDirectory: app\.getPath\("userData"\),/);
   const state = fs.readFileSync(path.join(__dirname, "..", "electron", "state.cjs"), "utf8");
   assert.match(state, /automaticUpdates: true,/);
+});
+
+test("a verified build survives a launcher restart and is not built again", async () => {
+  const logs = tempDir("cwg-source-restart-");
+  const first = controller({ logsDirectory: logs, userDataDirectory: logs }, { stagingParent: logs });
+  await first.instance.checkOnce();
+  const prepared = await first.instance.beginInstall();
+  assert.ok(first.calls.some(call => call[0] === "run"), "the first launcher builds and tests");
+  assert.equal(path.basename(prepared.tempRoot), `codex-web-gpt-update-${MAIN.slice(0, 12)}`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(prepared.tempRoot, "verified.json"), "utf8")).commit, MAIN);
+
+  // The launcher quits before an idle window arrives; the next one finds the same verified build.
+  const lines = [];
+  const second = controller({ logsDirectory: logs, userDataDirectory: logs }, { stagingParent: logs, appendLog: (_file, line) => lines.push(line) });
+  await second.instance.checkOnce();
+  const again = await second.instance.beginInstall();
+  assert.equal(again.tempRoot, prepared.tempRoot);
+  assert.ok(!second.calls.some(call => call[0] === "run" || call[0] === "checkout" || call[0] === "lock"), "nothing is built or locked again");
+  assert.ok(lines.some(line => line.startsWith(`reusing the verified build of ${MAIN}`)));
+  assert.equal(JSON.parse(fs.readFileSync(again.jobPath, "utf8")).parentPid, process.pid);
+  second.instance.cancelInstall(again);
+  assert.equal(fs.existsSync(prepared.tempRoot), false);
+});
+
+test("a start removes only this app's stale staged builds", () => {
+  const logs = tempDir("cwg-source-clean-");
+  const bundle = "/Applications/Codex Web GPT.app";
+  const stage = (name, job, verified) => {
+    const dir = path.join(logs, name);
+    fs.mkdirSync(path.join(dir, "stage"), { recursive: true });
+    if (job) fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify(job));
+    if (verified) fs.writeFileSync(path.join(dir, "verified.json"), JSON.stringify(verified));
+    return dir;
+  };
+  const legacy = stage("codex-web-gpt-update-Ab3xYz", { target: bundle, commit: MAIN }, null);
+  const installed = stage(`codex-web-gpt-update-${INSTALLED.slice(0, 12)}`, { target: bundle, commit: INSTALLED }, { commit: INSTALLED, bundle });
+  const unverified = stage("codex-web-gpt-update-333333333333", { target: bundle, commit: "3".repeat(40) }, null);
+  const pending = stage(`codex-web-gpt-update-${MAIN.slice(0, 12)}`, { target: bundle, commit: MAIN }, { commit: MAIN, bundle });
+  const otherApp = stage("codex-web-gpt-update-Qw9zzz", { target: "/Applications/Other.app", commit: MAIN }, null);
+  controller({ logsDirectory: logs, userDataDirectory: logs }, { stagingParent: logs });
+  assert.equal(fs.existsSync(legacy), false);
+  assert.equal(fs.existsSync(installed), false);
+  assert.equal(fs.existsSync(unverified), false);
+  assert.equal(fs.existsSync(pending), true, "a verified build for a newer commit waits for the next idle window");
+  assert.equal(fs.existsSync(otherApp), true, "folders of another app are never touched");
 });
