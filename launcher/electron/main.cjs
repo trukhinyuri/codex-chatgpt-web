@@ -41,6 +41,7 @@ const {
   writeStartupHealth,
 } = require("./source-update.cjs");
 const { createProblemReporter } = require("./problem-report.cjs");
+const { createCliProxyPanel } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
@@ -566,6 +567,21 @@ function registerIpc({ logger, stateStore }) {
     update: updateController?.getState() ?? { status: "disabled" },
     problemReports: problemReporter?.consent() ?? "unavailable",
   }));
+  const cliproxy = createCliProxyPanel({
+    invocationFor: args => runtimeSupervisor.runtimeCommand(args),
+    env: { ...process.env, CODEX_CHATGPT_WEB_HOME: CORE_HOME },
+    openExternal: url => shell.openExternal(url),
+  });
+  handle("launcher:cliproxy", (_event, action, payload) => {
+    if (action === "status") return cliproxy.status();
+    if (action === "connect") return cliproxy.connect(payload ?? {});
+    if (action === "disconnect") return cliproxy.disconnect();
+    if (action === "management-key") return cliproxy.setManagementKey(payload);
+    if (action === "accounts") return cliproxy.accounts();
+    if (action === "login") return cliproxy.login(payload);
+    if (action === "remove") return cliproxy.remove(payload);
+    throw new Error("Unknown CLIProxyAPI action");
+  });
   handle("launcher:problem-reports", (_event, enabled) => {
     if (!problemReporter) throw new Error("Problem reports are available in installed builds of Codex Superpower");
     return problemReporter.setConsent(enabled === true ? "auto" : "never");

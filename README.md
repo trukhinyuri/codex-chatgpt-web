@@ -99,6 +99,7 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 - Compaction works for proxy models too: the bridge asks the model for the same summary Codex's own compaction would.
 - `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
 - Manage the proxy's accounts from here once you add its management key (`remote-management.secret-key` in its config), again on standard input: `cliproxy management-key --stdin`, then `cliproxy accounts` (e-mail addresses masked unless `--show-emails`), `cliproxy login claude` (also `codex`, `antigravity`, `kimi`, `xai`, `devin`, `meta`; opens the provider's sign-in page and waits), and `cliproxy remove NAME`.
+- The launcher's **CLIProxyAPI** section does the same with buttons: connect, add the management key, sign accounts in and remove them. Keys are cleared from the form as soon as they are sent.
 - You run CLIProxyAPI itself; its [README](https://github.com/router-for-me/CLIProxyAPI) covers installation.
 
 ## What this fork changes

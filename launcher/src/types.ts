@@ -3,7 +3,7 @@ import languages from "../electron/languages.json";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "cliproxy" | "activity" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -135,6 +135,29 @@ export interface LauncherSnapshot {
 
 export type ProblemReportConsent = "unknown" | "auto" | "never" | "unavailable";
 
+export interface CliProxyStatus {
+  configured: boolean;
+  enabled: boolean;
+  baseUrl: string | null;
+  reachable?: boolean;
+  proxyModels?: number | null;
+  error?: string;
+  modelsInLastCodexCatalog: number | null;
+}
+
+export interface CliProxyAccount {
+  name: string;
+  provider: string;
+  /** E-mail addresses arrive masked. */
+  label: string;
+  disabled: boolean;
+  status: string;
+  coolingDown: boolean;
+}
+
+export const CLIPROXY_LOGIN_PROVIDERS = ["claude", "codex", "antigravity", "kimi", "xai", "devin", "meta"] as const;
+export type CliProxyLoginProvider = (typeof CLIPROXY_LOGIN_PROVIDERS)[number];
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   setLanguage(language: Language): Promise<LauncherState>;
@@ -187,6 +210,13 @@ export interface LauncherApi {
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
   setProblemReports(enabled: boolean): Promise<ProblemReportConsent>;
+  cliproxy(action: "status"): Promise<CliProxyStatus>;
+  cliproxy(action: "connect", payload: { baseUrl: string; apiKey: string }): Promise<{ connected: true; proxyModels: number }>;
+  cliproxy(action: "disconnect"): Promise<{ connected: false }>;
+  cliproxy(action: "management-key", payload: string): Promise<{ management: true; accounts: number }>;
+  cliproxy(action: "accounts"): Promise<{ accounts: CliProxyAccount[] }>;
+  cliproxy(action: "login", payload: CliProxyLoginProvider): Promise<{ signedIn: true }>;
+  cliproxy(action: "remove", payload: string): Promise<{ removed: string }>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
