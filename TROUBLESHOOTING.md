@@ -204,7 +204,7 @@ does not provide credentials or additional allowance for native Image Gen.
 
 ## Update, repair, and remove
 
-To update, quit **Codex Web GPT** and run the same installer command from the README. The installer
+To update, quit **Codex Web GPT** and run the same installer command from the [upstream README](docs/upstream/README.md) (this fork: [README](README.md#updates-and-rollback)). The installer
 replaces the application and runtime while preserving the launcher configuration and private
 ChatGPT profile.
 

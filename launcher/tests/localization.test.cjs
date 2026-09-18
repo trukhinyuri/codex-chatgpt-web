@@ -8,10 +8,10 @@ const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
 const read = (...parts) => fs.readFileSync(path.join(repositoryRoot, ...parts), "utf8");
 
-const englishReadme = read("README.md");
-const chineseReadme = read("README.zh-CN.md");
-const japaneseReadme = read("README.ja.md");
-const koreanReadme = read("README.ko.md");
+const englishReadme = read("docs", "upstream", "README.md");
+const chineseReadme = read("docs", "upstream", "README.zh-CN.md");
+const japaneseReadme = read("docs", "upstream", "README.ja.md");
+const koreanReadme = read("docs", "upstream", "README.ko.md");
 const languages = require("../electron/languages.json");
 const appSource = read("launcher", "src", "App.tsx");
 
