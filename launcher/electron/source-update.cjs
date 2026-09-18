@@ -134,6 +134,71 @@ function applicationBundle(executablePath) {
   return bundle;
 }
 
+/**
+ * Which process replaces the application bundle.
+ *
+ * Since macOS Ventura the system asks the user for the "App Management" permission when a process
+ * modifies an application bundle that is not its own; a process that is part of the bundle it
+ * replaces is what every self-updating Mac app (Sparkle's Autoupdate, Squirrel's ShipIt) uses to
+ * stay outside that prompt. The worker therefore runs from the installed bundle's own executable,
+ * in Electron's Node mode, instead of the Bun binary that lives in the user's home and has nothing
+ * to do with the bundle. The worker keeps running from the replaced copy: macOS keeps an open
+ * executable alive after its file is renamed, and the previous build stays in the rollback store.
+ *
+ * `ELECTRON_RUN_AS_NODE` makes the launcher's own executable behave as Node: no window, no
+ * single-instance lock, no Codex session touched.
+ */
+function updateWorkerCommand({ platform, executablePath, runtimeExecutable, baseEnv = process.env }) {
+  if (platform === "darwin" && typeof executablePath === "string" && path.isAbsolute(executablePath)) {
+    // Throws when the launcher does not run from an application bundle, which leaves the fallback.
+    try {
+      applicationBundle(executablePath);
+      return {
+        executable: executablePath,
+        env: { ...baseEnv, ELECTRON_RUN_AS_NODE: "1" },
+        insideBundle: true,
+      };
+    } catch {}
+  }
+  if (typeof runtimeExecutable !== "string" || !path.isAbsolute(runtimeExecutable)) {
+    throw new Error("No executable is available to run the update worker");
+  }
+  return { executable: runtimeExecutable, env: { ...baseEnv }, insideBundle: false };
+}
+
+// A file the launcher writes into its own bundle for a moment to learn whether it may replace it.
+const BUNDLE_PROBE_NAME = ".codex-superpower-update-probe";
+
+/**
+ * May this launcher replace its own application bundle without anyone approving anything?
+ *
+ * macOS (Ventura and later) refuses a write into an application bundle by a program that is not
+ * part of it and reports EPERM, then offers the user the "App Management" permission. An update
+ * that would hit that refusal must not quit a working launcher: the answer is needed before the
+ * app exits, and the smallest honest question is the write itself, made and undone.
+ *
+ * Both halves of the swap are asked about: changing the bundle (what the permission covers) and
+ * writing beside it in the folder that holds it (what the two renames need). Neither leaves
+ * anything behind.
+ */
+function probeBundleWritable(bundle, { fileSystem = fs } = {}) {
+  const probes = [
+    path.join(bundle, "Contents", BUNDLE_PROBE_NAME),
+    path.join(path.dirname(bundle), `${BUNDLE_PROBE_NAME}-${process.pid}`),
+  ];
+  for (const probe of probes) {
+    try {
+      fileSystem.rmSync(probe, { force: true });
+      fileSystem.writeFileSync(probe, "", { mode: 0o600 });
+    } catch (error) {
+      return { writable: false, code: String(error?.code || "UNKNOWN") };
+    } finally {
+      try { fileSystem.rmSync(probe, { force: true }); } catch {}
+    }
+  }
+  return { writable: true, code: null };
+}
+
 function normalizedRemote(url) {
   return String(url || "").trim().replace(/\/+$/, "").replace(/\.git$/, "").toLowerCase();
 }
@@ -457,9 +522,15 @@ function defaultDependencies() {
     readPackagedCommit(stagingRoot) {
       return readPackagedCommit(findMacApplication(stagingRoot));
     },
-    spawnWorker(runtimeExecutable, workerPath, jobPath) {
-      return spawn(runtimeExecutable, [workerPath, jobPath], { detached: true, stdio: "ignore", windowsHide: true });
+    spawnWorker(command, workerPath, jobPath) {
+      return spawn(command.executable, [workerPath, jobPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: command.env,
+      });
     },
+    probeBundleWritable,
     now: () => Date.now(),
     sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     stagingParent: os.tmpdir(),
@@ -767,7 +838,28 @@ function createSourceUpdateController({
     }
     const marker = path.join(prepared.tempRoot, WORKER_STARTED_MARKER);
     fs.rmSync(marker, { force: true });
-    const child = deps.spawnWorker(runtimeExecutable, prepared.workerPath, prepared.jobPath);
+    if (platform === "darwin") {
+      const bundle = applicationBundle(executablePath);
+      const probe = deps.probeBundleWritable(bundle);
+      if (!probe.writable) {
+        // Nothing is quit and nothing is thrown away: the verified build waits for the next window,
+        // and the maintainer hears that this installation cannot replace its own bundle.
+        logger?.warn("launcher.update_bundle_not_writable", { code: probe.code, commit: prepared.commit, channel: "source" });
+        onProblem?.({
+          kind: "update-install-failed",
+          code: "bundle-not-writable",
+          stage: "install",
+          version: prepared.version,
+          commit: prepared.commit,
+        });
+        throw Object.assign(
+          new Error(`The launcher could not replace its own application bundle (${probe.code}); the update stays ready and nothing was interrupted`),
+          { keepStaged: true },
+        );
+      }
+    }
+    const command = updateWorkerCommand({ platform, executablePath, runtimeExecutable });
+    const child = deps.spawnWorker(command, prepared.workerPath, prepared.jobPath);
     if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update worker did not start");
     child.unref?.();
     const deadline = deps.now() + WORKER_HANDSHAKE_TIMEOUT_MS;
@@ -845,6 +937,7 @@ module.exports = {
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
+  probeBundleWritable,
   readLoginShellPath,
   readUpdateState,
   recordFailedCommit,
@@ -852,5 +945,6 @@ module.exports = {
   sourceBuildPath,
   sourceBuildSteps,
   sourceUpdateVersion,
+  updateWorkerCommand,
   writeStartupHealth,
 };
