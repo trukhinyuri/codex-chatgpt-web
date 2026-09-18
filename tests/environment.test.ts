@@ -35,7 +35,7 @@ const externalProfileXml = `<permission_profile type="external"><file_system typ
 function currentWire(
   options: {
     workspace?: string; sandbox?: string; includeIds?: boolean; environmentXml?: string;
-    threadId?: string; parentThreadId?: string;
+    threadId?: string; parentThreadId?: string; includeWorkspaces?: boolean;
   } = {},
 ): CodexParsedRequest {
   const workspace = options.workspace ?? root;
@@ -47,7 +47,7 @@ function currentWire(
     ...(options.parentThreadId ? { parent_thread_id: options.parentThreadId } : {}),
     turn_id: "turn_current",
     sandbox,
-    workspaces: { [workspace]: { has_changes: true } },
+    ...(options.includeWorkspaces === false ? {} : { workspaces: { [workspace]: { has_changes: true } } }),
   };
   return {
     modelId: "gpt-5.6-sol",
@@ -398,6 +398,84 @@ describe("trusted current Codex environment envelope", () => {
     });
 
     expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+  });
+
+  // Codex sends canonical `workspaces` metadata only for Git repositories, so a skill invocation in
+  // a plain folder has no metadata roots to bind. Recovery must then rest on the same per-item
+  // native provenance that an ordinary turn already requires, and nothing weaker.
+  function nonGitSkillWire(
+    options: {
+      environmentTurnId?: string; skillTurnId?: string; stampTurns?: boolean;
+      trailingItems?: Array<Record<string, unknown>>; sandbox?: string;
+    } = {},
+  ): CodexParsedRequest {
+    const request = currentWire({ includeWorkspaces: false, ...(options.sandbox ? { sandbox: options.sandbox } : {}) });
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    if (options.stampTurns !== false) {
+      for (const item of body.input) {
+        item.internal_chat_message_metadata_passthrough = { turn_id: "turn_current" };
+      }
+      body.input[0]!.internal_chat_message_metadata_passthrough = { turn_id: options.environmentTurnId ?? "turn_current" };
+    }
+    body.input.push(...(options.trailingItems ?? [{
+      type: "message",
+      id: "msg_skill",
+      role: "user",
+      content: [{ type: "input_text", text: "<skill>\n<name>repository-review</name>\n<path>/skills/repository-review/SKILL.md</path>\nUse this skill.\n</skill>" }],
+      ...(options.stampTurns === false ? {} : {
+        internal_chat_message_metadata_passthrough: { turn_id: options.skillTurnId ?? "turn_current" },
+      }),
+    }]));
+    return request;
+  }
+
+  test("recovers a same-turn skill invocation in a folder without Git workspace metadata", () => {
+    expect(extractChatGptTurnEnvironment(nonGitSkillWire())).toMatchObject({
+      cwd: root,
+      roots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+  });
+
+  test("recovers a non-Git turn that invokes several skills", () => {
+    const skill = (name: string) => ({
+      type: "message",
+      id: `msg_skill_${name}`,
+      role: "user",
+      content: [{ type: "input_text", text: `<skill>\n<name>${name}</name>\nUse this skill.\n</skill>` }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+    });
+    expect(extractChatGptTurnEnvironment(nonGitSkillWire({ trailingItems: [skill("first"), skill("second")] })))
+      .toMatchObject({ cwd: root, roots: [root] });
+  });
+
+  test("does not recover a non-Git skill turn without per-item native turn provenance", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ stampTurns: false }))).toThrow("missing cwd");
+  });
+
+  test("does not reuse an environment stamped with an earlier turn for a non-Git skill turn", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ environmentTurnId: "turn_previous" })))
+      .toThrow("missing cwd");
+  });
+
+  test("does not skip a skill-shaped item that belongs to another turn", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ skillTurnId: "turn_previous" })))
+      .toThrow("missing cwd");
+  });
+
+  test("only same-turn skill injections may follow the instruction in non-Git recovery", () => {
+    const followUp = {
+      type: "message",
+      id: "msg_follow_up",
+      role: "user",
+      content: [{ type: "input_text", text: "Also check the tests" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+    };
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ trailingItems: [followUp] }))).toThrow("missing cwd");
+  });
+
+  test("non-Git skill recovery still requires the envelope to match canonical sandbox metadata", () => {
+    expect(() => extractChatGptTurnEnvironment(nonGitSkillWire({ sandbox: "read-only" }))).toThrow("missing cwd");
   });
 
   test("accepts Codex auxiliary roots that are intentionally absent from git workspace metadata", () => {

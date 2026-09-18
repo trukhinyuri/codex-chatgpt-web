@@ -516,6 +516,38 @@ function hasAssistantOutputBetween(input: unknown[], startIndex: number, endInde
   return false;
 }
 
+/** Codex appends each invoked skill as its own server-owned user item after the instruction. */
+function isSameTurnSkillInjection(value: unknown, turnId: string): boolean {
+  const item = record(value);
+  return item?.type === "message"
+    && item.role === "user"
+    && typeof item.id === "string" && item.id.length > 0
+    && itemTurnId(item) === turnId
+    && /^<skill\b[\s\S]*<\/skill>$/.test(rawMessageText(item).trim());
+}
+
+/**
+ * Codex sends canonical `workspaces` metadata only for Git repositories, so a skill invocation in
+ * a plain folder can never satisfy metadata-bound root recovery. Recover such a turn only through
+ * the per-item native provenance that an ordinary turn already requires: the instruction and its
+ * adjacent environment carry the current turn id, every later item up to the active one is a
+ * same-turn skill injection, and the envelope still agrees with the canonical sandbox metadata.
+ */
+function sameTurnSkillEnvironmentBeforeUser(
+  input: unknown[],
+  userIndex: number,
+  activeUserIndex: number,
+  turnId: string,
+  metadata: Record<string, unknown>,
+): string | undefined {
+  for (let index = userIndex + 1; index <= activeUserIndex; index += 1) {
+    if (!isSameTurnSkillInjection(input[index], turnId)) return undefined;
+  }
+  const environment = environmentBeforeUser(input, userIndex, turnId, metadata);
+  if (!environment || !environmentMatchesCanonicalMetadata(environment, metadata, false)) return undefined;
+  return environment;
+}
+
 function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
@@ -543,13 +575,18 @@ function rawEnvironmentText(parsed: CodexParsedRequest): string | undefined {
   // A skill invocation appends another server-owned user item after the real instruction. Recover
   // the earlier current-turn environment/prompt pair only through canonical metadata, and bind all
   // declared roots to metadata workspaces so user-authored XML cannot widen filesystem authority.
+  const metadataWorkspaces = record(metadata?.workspaces);
+  const withoutWorkspaceMetadata = !metadataWorkspaces || Object.keys(metadataWorkspaces).length === 0;
   let crossedAssistantOutput = false;
   for (let index = activeUserIndex - 1; index > 0; index -= 1) {
     crossedAssistantOutput ||= hasAssistantOutputBetween(input, index, index + 1);
     // Replayed untagged history is not a same-turn skill invocation. Only explicit current-turn
     // provenance may cross an assistant response; otherwise resolve from the native rollout.
     if (crossedAssistantOutput && itemTurnId(input[index]) !== turnId) continue;
-    const sameTurn = canonicalMetadataEnvironmentBeforeUser(input, index, metadata, true);
+    const sameTurn = canonicalMetadataEnvironmentBeforeUser(input, index, metadata, true)
+      ?? (withoutWorkspaceMetadata && metadata && typeof turnId === "string" && turnId
+        ? sameTurnSkillEnvironmentBeforeUser(input, index, activeUserIndex, turnId, metadata)
+        : undefined);
     if (sameTurn) return sameTurn;
   }
 
