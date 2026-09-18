@@ -185,7 +185,15 @@ ChatGPT endpoint so Voice session creation never falls through to the Responses-
 assignments are journaled and restored exactly on disconnect or uninstall; a conflicting existing
 Voice route requires explicit `--replace-codex-route` ownership. The daemon forwards the
 authenticated official model catalog and appends only the routed models owned by the
-`chatgpt-web/` namespace; no static catalog is installed. Subagent protocol selection is explicit,
+`chatgpt-web/` namespace; no static catalog is installed. When chatgpt.com cannot serve that
+catalog, the daemon retries once after 250 ms (never for 401, 403, 429 or a client that left) and
+then rebuilds the answer from the last catalog chatgpt.com served for the same account and Codex
+version, at most 24 hours old, with the current configuration and CLIProxyAPI rows. That answer
+carries `x-codex-chatgpt-web-catalog: stale`, and `/healthz` reports `catalog_stale_age_sec`. The
+fallback lives in memory and in `<home>/runtime/native-model-catalog.json` (owner-only), keyed by a
+SHA-256 of the account id; the token is never stored. 401 and 403 pass through so Codex signs in
+again. Native Responses streams no longer carry the upstream `X-Models-Etag`, which never matches
+the daemon's own catalog ETag and made Codex refresh the catalog on every native turn. Subagent protocol selection is explicit,
 and new installations default to Compatibility V1 because it is the only surface portable across
 native and routed Web backends:
 

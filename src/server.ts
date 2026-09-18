@@ -22,6 +22,13 @@ import { rememberRetryableTurnFailure } from "./adapters/chatgpt-web/retry-conti
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { defaultCompactionContinuationStatePath, providerConfig } from "./config";
+import {
+  DRAIN_HOLD_MS,
+  DRAINING_MESSAGE,
+  DrainGate,
+  drainedHttpResponse,
+  heldStreamingResponse,
+} from "./drain-gate";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -38,8 +45,14 @@ import {
   requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
-import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
-import { fetchNativeCodex } from "./native-network";
+import {
+  forwardNativeCodexRequest,
+  nativeModelsClientVersion,
+  type NativeFetch,
+  type NativeImageEndpoint,
+} from "./native-passthrough";
+import { fetchNativeCodex, nativeFailureOrigin, type NativeFailureOrigin } from "./native-network";
+import { NativeModelCatalogLastGood, nativeModelCatalogKey } from "./model-catalog-cache";
 import {
   buildCompactV1Output,
   COMPACT_PROMPT,
@@ -117,6 +130,14 @@ const reportHttpStreamFailure: HttpStreamFailureReporter = evidence => {
 };
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Grace for held turns' last frames to leave before shutdown closes their connections. */
+const HELD_TURN_SHUTDOWN_FLUSH_MS = 250;
+
+/** Codex asks for every Responses turn as a stream (codex-api endpoint/responses.rs sets Accept). */
+function acceptsEventStream(req: Request): boolean {
+  return (req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream");
+}
 
 /**
  * Reject a request whose Host header does not name this loopback bridge, and, for a browser
@@ -420,14 +441,155 @@ export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppCo
   return route;
 }
 
-interface ModelCatalogFailure {
-  stage: "config" | "request" | "transport" | "upstream" | "catalog";
+export interface ModelCatalogFailure {
+  stage: "config" | "request" | "transport" | "upstream" | "catalog" | "client_aborted";
   code?: string;
+  /** The error's own name (AbortError, TimeoutError, TypeError, SyntaxError, Error). */
+  name?: string;
+  /** Where a transport or catalog failure happened; see NativeFailureOrigin. */
+  origin?: NativeFailureOrigin;
+  /** The upstream HTTP status of an `upstream` failure. */
+  status?: number;
 }
 
-function modelCatalogFailure(stage: ModelCatalogFailure["stage"], error: unknown): ModelCatalogFailure {
+const SAFE_FAILURE_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+const SAFE_FAILURE_NAME = /^[A-Za-z]{1,40}$/;
+
+/** The innermost error of a wrapped failure: its name says more than the wrapper's. */
+function rootError(error: unknown): unknown {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const cause = current instanceof Error ? current.cause : undefined;
+    if (cause === undefined || cause === null) break;
+    current = cause;
+  }
+  return current;
+}
+
+function modelCatalogFailure(
+  stage: ModelCatalogFailure["stage"],
+  error: unknown,
+  origin?: NativeFailureOrigin,
+): ModelCatalogFailure {
   const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-  return { stage, ...(typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? { code } : {}) };
+  const root = rootError(error);
+  const name = root instanceof Error || root instanceof DOMException
+    ? root.name
+    : root && typeof root === "object" ? root.constructor?.name : undefined;
+  return {
+    stage,
+    ...(typeof code === "string" && SAFE_FAILURE_CODE.test(code) ? { code } : {}),
+    ...(error === undefined ? {} : { name: typeof name === "string" && SAFE_FAILURE_NAME.test(name) ? name : "Error" }),
+    ...(origin ? { origin } : {}),
+  };
+}
+
+/** Codex's whole model refresh, retries included, has a 5-second budget (models_endpoint.rs). */
+const MODEL_CATALOG_RETRY_WINDOW_MS = 2_000;
+export const MODEL_CATALOG_RETRY_DELAY_MS = 250;
+export const MODEL_CATALOG_STALE_HEADER = "x-codex-chatgpt-web-catalog";
+
+export interface ModelCatalogStaleServe {
+  failure: ModelCatalogFailure;
+  ageSec: number;
+  fetchedAtMs: number;
+}
+
+export interface ModelCatalogRequestOptions {
+  /** The last successful native catalog; without it a failure is returned as before. */
+  lastGood?: NativeModelCatalogLastGood;
+  onStale?: (stale: ModelCatalogStaleServe) => void;
+  /** A failure that the single retry recovered from. */
+  onRecovered?: (failure: ModelCatalogFailure) => void;
+  retryDelayMs?: number;
+}
+
+type NativeCatalogAttempt =
+  | { kind: "ok"; raw: Record<string, unknown>; catalog: Record<string, unknown>; upstream: Response }
+  | { kind: "status"; upstream: Response; failure: ModelCatalogFailure }
+  | { kind: "failure"; failure: ModelCatalogFailure; error: unknown };
+
+async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => {});
+}
+
+async function fetchNativeCatalogOnce(
+  req: Request,
+  config: AppConfig,
+  fetchUpstream: NativeFetch | undefined,
+  contextOverride: (() => CodexModelContextOverride | undefined) | undefined,
+): Promise<NativeCatalogAttempt> {
+  let upstream: Response;
+  let sent = false;
+  try {
+    upstream = await forwardNativeCodexRequest(req, "models", input => {
+      sent = true;
+      return (fetchUpstream ?? fetchNativeCodex)(input);
+    });
+  } catch (error) {
+    return sent
+      ? { kind: "failure", failure: modelCatalogFailure("transport", error, nativeFailureOrigin(error) ?? "upstream_fetch"), error }
+      : { kind: "failure", failure: modelCatalogFailure("request", error), error };
+  }
+  if (!upstream.ok) {
+    return { kind: "status", upstream, failure: { stage: "upstream", status: upstream.status } };
+  }
+  let raw: unknown;
+  try {
+    raw = await upstream.json();
+  } catch (error) {
+    return { kind: "failure", failure: modelCatalogFailure("catalog", error, "body"), error };
+  }
+  try {
+    const catalog = augmentNativeModelCatalog(raw, config, contextOverride?.());
+    return { kind: "ok", raw: raw as Record<string, unknown>, catalog, upstream };
+  } catch (error) {
+    return { kind: "failure", failure: modelCatalogFailure("catalog", error, "body"), error };
+  }
+}
+
+/**
+ * One quick retry for a failure that may be transient: a transport error, an upstream 5xx, or a
+ * catalog body that could not be read. Never for 401/403 (Codex must refresh its own login), 429
+ * (the account is being throttled) or any other 4xx, and never once the client has gone.
+ */
+function retryableAttempt(
+  attempt: NativeCatalogAttempt,
+): attempt is Exclude<NativeCatalogAttempt, { kind: "ok" }> {
+  if (attempt.kind === "ok") return false;
+  if (attempt.kind === "status") return attempt.upstream.status >= 500;
+  return attempt.failure.stage === "transport" || attempt.failure.stage === "catalog";
+}
+
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise(resolveSleep => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolveSleep();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+function catalogResponseHeaders(source: Headers | undefined, body: string): Headers {
+  const headers = new Headers(source);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  // The upstream load-balancer cookie belongs to chatgpt.com, never to this loopback catalog.
+  headers.delete("set-cookie");
+  headers.set("content-type", "application/json");
+  headers.set("etag", `W/\"${createHash("sha256").update(body).digest("base64url")}\"`);
+  return headers;
+}
+
+function withoutUpstreamCookies(upstream: Response): Response {
+  if (!upstream.headers.has("set-cookie")) return upstream;
+  const headers = new Headers(upstream.headers);
+  headers.delete("set-cookie");
+  return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 export async function modelsRequest(
@@ -437,38 +599,84 @@ export async function modelsRequest(
   contextOverride?: () => CodexModelContextOverride | undefined,
   onFailure?: (failure: ModelCatalogFailure) => void,
   cliProxy?: CliProxyWiring,
+  options: ModelCatalogRequestOptions = {},
 ): Promise<Response> {
-  let upstream: Response;
-  let sent = false;
-  try {
-    upstream = await forwardNativeCodexRequest(req, "models", input => {
-      sent = true;
-      return (fetchUpstream ?? fetchNativeCodex)(input);
+  const started = Date.now();
+  const key = options.lastGood
+    ? nativeModelCatalogKey(req.headers, nativeModelsClientVersion(req))
+    : undefined;
+  const attemptOnce = async (): Promise<NativeCatalogAttempt> => {
+    const result = await fetchNativeCatalogOnce(req, config, fetchUpstream, contextOverride);
+    // A good catalog is worth keeping even when the client that asked for it has already left.
+    if (result.kind === "ok" && key) {
+      try {
+        options.lastGood!.remember(key, result.raw, result.upstream.headers.get("etag") ?? undefined);
+      } catch { /* The fallback is best effort; keeping it never fails a catalog request. */ }
+    }
+    return result;
+  };
+  // Only the client's own signal decides that it left: a server-side timeout also surfaces as an
+  // abort-like error, and that one is a real failure.
+  const clientAborted = (): Response => {
+    onFailure?.({ stage: "client_aborted" });
+    return formatErrorResponse(499, "client_closed_request", "The client closed the model catalog request");
+  };
+  let attempt = await attemptOnce();
+  if (req.signal.aborted) {
+    if (attempt.kind !== "failure") await discardBody(attempt.upstream);
+    return clientAborted();
+  }
+  if (retryableAttempt(attempt) && Date.now() - started < MODEL_CATALOG_RETRY_WINDOW_MS) {
+    const first = attempt;
+    if (first.kind === "status") await discardBody(first.upstream);
+    await sleepUnlessAborted(options.retryDelayMs ?? MODEL_CATALOG_RETRY_DELAY_MS, req.signal);
+    if (req.signal.aborted) return clientAborted();
+    attempt = await attemptOnce();
+    if (req.signal.aborted) {
+      if (attempt.kind !== "failure") await discardBody(attempt.upstream);
+      return clientAborted();
+    }
+    if (attempt.kind === "ok") options.onRecovered?.(first.failure);
+  }
+
+  if (attempt.kind === "ok") {
+    let catalog = attempt.catalog;
+    // CLIProxyAPI models join after the native and ChatGPT Web rows; a proxy failure never costs Codex its catalog.
+    if (cliProxy) catalog = await augmentCatalogWithCliProxy(catalog, req, cliProxy);
+    const body = JSON.stringify(catalog);
+    return new Response(body, {
+      status: attempt.upstream.status,
+      statusText: attempt.upstream.statusText,
+      headers: catalogResponseHeaders(attempt.upstream.headers, body),
     });
-  } catch (error) {
-    onFailure?.(modelCatalogFailure(sent ? "transport" : "request", error));
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
   }
-  if (!upstream.ok) {
-    onFailure?.({ stage: "upstream" });
-    return upstream;
+  const failure = attempt.failure;
+  const authDenied = attempt.kind === "status"
+    && (attempt.upstream.status === 401 || attempt.upstream.status === 403);
+  // A request without Codex authorization and an upstream 401/403 are answered as they are: an
+  // older catalog must never hide that Codex has to sign in again.
+  const stale = !authDenied && failure.stage !== "request" && key ? options.lastGood!.lookup(key) : undefined;
+  if (stale) {
+    try {
+      let catalog = augmentNativeModelCatalog(stale.catalog, config, contextOverride?.());
+      if (cliProxy) catalog = await augmentCatalogWithCliProxy(catalog, req, cliProxy);
+      if (attempt.kind === "status") await discardBody(attempt.upstream);
+      const body = JSON.stringify(catalog);
+      const headers = catalogResponseHeaders(undefined, body);
+      headers.set(MODEL_CATALOG_STALE_HEADER, "stale");
+      headers.set("age", String(stale.ageSec));
+      options.onStale?.({ failure, ageSec: stale.ageSec, fetchedAtMs: stale.fetchedAtMs });
+      return new Response(body, { status: 200, headers });
+    } catch {
+      // The last-good catalog no longer fits the current configuration; report the real failure.
+    }
   }
-  let catalog: Record<string, unknown>;
-  try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
-  } catch (error) {
-    onFailure?.(modelCatalogFailure("catalog", error));
-    return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
-  }
-  // CLIProxyAPI models join after the native and ChatGPT Web rows; a proxy failure never costs Codex its catalog.
-  if (cliProxy) catalog = await augmentCatalogWithCliProxy(catalog, req, cliProxy);
-  const body = JSON.stringify(catalog);
-  const headers = new Headers(upstream.headers);
-  headers.delete("content-encoding");
-  headers.delete("content-length");
-  headers.set("content-type", "application/json");
-  headers.set("etag", `W/\"${createHash("sha256").update(body).digest("base64url")}\"`);
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+  onFailure?.(failure);
+  if (attempt.kind === "status") return withoutUpstreamCookies(attempt.upstream);
+  const error = attempt.error;
+  return failure.stage === "catalog"
+    ? formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error))
+    : formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
 }
 
 export async function nativeSearchRequest(
@@ -933,6 +1141,13 @@ export function startServer(
     fetchUpstream?: NativeFetch;
     adapterFactory?: ChatGptWebAdapterFactory;
     cliProxy?: CliProxyWiring;
+    /** Test seam: how long a turn that arrives during a drain waits for it to end. */
+    drainHoldMs?: number;
+    /** Test seam: heartbeat interval of a waiting turn's response stream. */
+    drainHeartbeatMs?: number;
+    /** The service entry point persists it under its home; embedded servers keep it in memory. */
+    modelCatalogLastGood?: NativeModelCatalogLastGood;
+    modelCatalogRetryDelayMs?: number;
   } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
@@ -949,14 +1164,21 @@ export function startServer(
       );
     });
   }
-  let draining = false;
+  const drainGate = new DrainGate();
+  const drainHoldMs = dependencies.drainHoldMs ?? DRAIN_HOLD_MS;
+  const drainHeartbeatMs = dependencies.drainHeartbeatMs ?? 2_000;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
   let modelCatalogRequests = 0;
   let lastModelCatalogResult: {
-    request: number; at: string; status: number; failure?: ModelCatalogFailure;
+    request: number; at: string; status: number; failure?: ModelCatalogFailure; stale?: true;
   } | null = null;
+  let clientAbortedModelCatalogRequests = 0;
+  let staleModelCatalogResponses = 0;
+  // When the newest catalog answer came from the last-good fallback, when that catalog was fetched.
+  let staleModelCatalogFetchedAtMs: number | null = null;
+  const modelCatalogLastGood = dependencies.modelCatalogLastGood ?? new NativeModelCatalogLastGood();
   const httpTurns = new HttpTurnCounter();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
@@ -991,11 +1213,17 @@ export function startServer(
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: !drainGate.isDraining,
+          drain_held_requests: drainGate.held,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
           last_model_catalog_result: lastModelCatalogResult,
+          client_aborted_model_catalog_requests: clientAbortedModelCatalogRequests,
+          stale_model_catalog_responses: staleModelCatalogResponses,
+          catalog_stale_age_sec: staleModelCatalogFetchedAtMs === null
+            ? null
+            : Math.max(0, Math.floor((Date.now() - staleModelCatalogFetchedAtMs) / 1_000)),
           ...activity(),
           // In-flight MCP tool calls through the tunnel (Full mode only); the launcher restarts the
           // tunnel on a turn's behalf only when this is zero.
@@ -1004,9 +1232,10 @@ export function startServer(
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        draining = url.pathname === "/admin/drain";
-        turnBroker?.setExternalOwnersAccepted(!draining);
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+        if (url.pathname === "/admin/drain") drainGate.drain();
+        else drainGate.resume();
+        turnBroker?.setExternalOwnersAccepted(!drainGate.isDraining);
+        return Response.json({ status: "ok", accepting_turns: !drainGate.isDraining, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1127,11 +1356,11 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         const current = activity();
-        if (!draining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
+        if (!drainGate.isDraining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
           return Response.json(
             {
               status: "refused",
-              accepting_turns: !draining,
+              accepting_turns: !drainGate.isDraining,
               ...current,
             },
             { status: 409 },
@@ -1141,24 +1370,48 @@ export function startServer(
         return Response.json({ status: "ok", accepting_turns: false, ...current });
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        if (draining) {
-          return formatErrorResponse(
-            503,
-            "server_error",
-            "codex-chatgpt-web is draining for a requested service operation",
-          );
-        }
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         return httpTurns.track(async signal => {
           const request = ++modelCatalogRequests;
           const started = Date.now();
+          const log = (level: "debug" | "info" | "warn", event: string, detail: Record<string, unknown>) => {
+            try {
+              const line = `[codex-chatgpt-web] ${level === "debug" ? "debug " : ""}${event} ${JSON.stringify({
+                request,
+                ...detail,
+                elapsedMs: Date.now() - started,
+              })}`;
+              if (level === "debug") console.debug(line);
+              else if (level === "info") console.info(line);
+              else console.warn(line);
+            } catch { /* Logging must not replace the catalog result. */ }
+          };
+          let stale: ModelCatalogStaleServe | undefined;
           const recordResult = (response: Response, failure?: ModelCatalogFailure): Response => {
-            const result = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
+            if (failure?.stage === "client_aborted") {
+              // Codex already left: nobody receives this answer, so it is neither a catalog
+              // failure nor a newer result than the last one Codex actually got.
+              clientAbortedModelCatalogRequests += 1;
+              log("debug", "model_catalog_client_aborted", { clientAborted: clientAbortedModelCatalogRequests });
+              return response;
+            }
+            const recordedFailure = stale?.failure ?? failure;
+            const result = {
+              request,
+              at: new Date().toISOString(),
+              status: response.status,
+              ...(recordedFailure ? { failure: recordedFailure } : {}),
+              ...(stale ? { stale: true as const } : {}),
+            };
             // An older, slower request must not replace a newer completed result.
-            if (!lastModelCatalogResult || request > lastModelCatalogResult.request) lastModelCatalogResult = result;
-            if (!response.ok) {
-              try {
-                console.warn(`[codex-chatgpt-web] model_catalog_failed ${JSON.stringify({ ...result, elapsedMs: Date.now() - started })}`);
-              } catch { /* Logging must not replace the catalog result. */ }
+            if (!lastModelCatalogResult || request > lastModelCatalogResult.request) {
+              lastModelCatalogResult = result;
+              if (response.ok) staleModelCatalogFetchedAtMs = stale ? stale.fetchedAtMs : null;
+            }
+            if (stale) {
+              log("warn", "model_catalog_served_stale", { failure: stale.failure, ageSec: stale.ageSec });
+            } else if (!response.ok) {
+              log("warn", "model_catalog_failed", { at: result.at, status: result.status, ...(failure ? { failure } : {}) });
             }
             return response;
           };
@@ -1183,6 +1436,17 @@ export function startServer(
             readCodexModelContextOverride,
             value => { failure = value; },
             cliProxy,
+            {
+              lastGood: modelCatalogLastGood,
+              ...(dependencies.modelCatalogRetryDelayMs === undefined
+                ? {}
+                : { retryDelayMs: dependencies.modelCatalogRetryDelayMs }),
+              onStale: value => {
+                stale = value;
+                staleModelCatalogResponses += 1;
+              },
+              onRecovered: value => log("info", "model_catalog_retry_recovered", { failure: value }),
+            },
           );
           if (response.ok) {
             successfulModelCatalogRequests += 1;
@@ -1198,8 +1462,7 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(
+        const runTurn = () => httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
             config,
@@ -1210,9 +1473,29 @@ export function startServer(
           process.platform,
           "responses",
         );
+        if (drainGate.isDraining) {
+          // Codex streams every turn (Accept: text/event-stream). Such a turn waits for the drain
+          // with heartbeats instead of failing; the wait is not an active turn, so the drain can
+          // still prove idleness. A client without a stream has nothing to wait on and is refused.
+          if (!acceptsEventStream(req)) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
+          return heldStreamingResponse({
+            gate: drainGate,
+            signal: req.signal,
+            holdMs: drainHoldMs,
+            heartbeatMs: drainHeartbeatMs,
+            run: runTurn,
+          });
+        }
+        return runTurn();
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) {
+          // Codex waits for its compaction answer without a response stream: hold the request
+          // (not an active turn) until the drain ends, then answer a 503 Codex retries.
+          const outcome = await drainGate.wait(drainHoldMs, req.signal);
+          if (outcome === "aborted") return new Response(null, { status: 499, statusText: "Client Closed Request" });
+          if (outcome !== "resumed") return drainedHttpResponse();
+        }
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
@@ -1226,7 +1509,7 @@ export function startServer(
         );
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         return httpTurns.track(
           signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
           req.signal,
@@ -1236,7 +1519,7 @@ export function startServer(
       }
       if (req.method === "POST"
         && (url.pathname === "/v1/images/generations" || url.pathname === "/v1/images/edits")) {
-        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        if (drainGate.isDraining) return formatErrorResponse(503, "server_error", DRAINING_MESSAGE);
         const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
           ? "images/generations"
           : "images/edits";
@@ -1252,13 +1535,18 @@ export function startServer(
   });
   function shutdown(): void {
     if (shutdownPromise) return;
-    draining = true;
+    // Turns still waiting for the drain get their paced-retry failure now, so Codex waits for the
+    // restarted runtime instead of seeing a dropped connection.
+    const heldAtShutdown = drainGate.held;
+    drainGate.close();
     chatGptTurnSessions.clear();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
+        // Give those failure frames a moment to leave before stop(true) closes the connections.
+        heldAtShutdown > 0 ? Bun.sleep(HELD_TURN_SHUTDOWN_FLUSH_MS) : undefined,
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")

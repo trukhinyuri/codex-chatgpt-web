@@ -283,16 +283,29 @@ export async function requestRetainedCompactionHandoff(
   traceId: string,
   signal?: AbortSignal,
   timeoutMs = MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
+  admission: { onAdmissionWait?: () => void; onAdmitted?: () => void } = {},
 ): Promise<string> {
   const conversationKey = source.conversationKey();
   if (!conversationKey) throw new Error("The completed ChatGPT source has no retained conversation identity");
   const operationTimeoutMs = boundedCompactionTimeout(timeoutMs);
   const deadline = new AbortController();
-  const deadlineTimer = setTimeout(
-    () => deadline.abort(new Error(`ChatGPT compaction handoff timed out after ${operationTimeoutMs}ms`)),
-    operationTimeoutMs,
-  );
-  deadlineTimer.unref?.();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const armDeadline = (): void => {
+    if (deadline.signal.aborted) return;
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    deadlineTimer = setTimeout(
+      () => deadline.abort(new Error(`ChatGPT compaction handoff timed out after ${operationTimeoutMs}ms`)),
+      operationTimeoutMs,
+    );
+    deadlineTimer.unref?.();
+  };
+  // Waiting at the account's admission gate (a ChatGPT cooldown or a full queue) sends nothing, so
+  // it cannot stall; the handoff budget pauses there and starts over when the turn is admitted.
+  const pauseDeadline = (): void => {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    deadlineTimer = undefined;
+  };
+  armDeadline();
   const operationSignal = signal
     ? AbortSignal.any([signal, deadline.signal])
     : deadline.signal;
@@ -310,7 +323,8 @@ export async function requestRetainedCompactionHandoff(
       }
     }, () => {});
     transaction = await withCompactionAbort(transactionPromise, operationSignal);
-    const instruction = structuredCompactionHandoffInstruction(transaction);
+    const started = transaction;
+    const instruction = structuredCompactionHandoffInstruction(started);
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
     browser = worker.run({
       traceId,
@@ -325,6 +339,17 @@ export async function requestRetainedCompactionHandoff(
       conversationKey,
       requireRetainedConversation: true,
       abortSignal: browserAbort.signal,
+      // The one-shot transaction expires with the operation budget as well, so it pauses with it.
+      onAdmissionWait: () => {
+        pauseDeadline();
+        broker.pauseCompactionTransaction(started.token);
+        admission.onAdmissionWait?.();
+      },
+      onAdmitted: () => {
+        armDeadline();
+        broker.resumeCompactionTransaction(started.token, operationTimeoutMs);
+        admission.onAdmitted?.();
+      },
       onTextDelta: () => {},
     });
     const browserFailure = browser.then<never>(
@@ -333,7 +358,7 @@ export async function requestRetainedCompactionHandoff(
     );
     const summary = await withCompactionAbort(
       Promise.race([
-        broker.waitForCompactionHandoff(transaction.token, operationSignal),
+        broker.waitForCompactionHandoff(started.token, operationSignal),
         browserFailure,
       ]),
       operationSignal,
@@ -360,7 +385,7 @@ export async function requestRetainedCompactionHandoff(
       ).catch(() => {});
     }
     operationSignal.removeEventListener("abort", abortBrowser);
-    clearTimeout(deadlineTimer);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
   }
 }
 

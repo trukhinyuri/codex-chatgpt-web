@@ -644,13 +644,14 @@ test("while turns keep failing, the waiting update installs in the first quiet m
     updateIdleWait: null,
     updateInstallRequested: false,
     turnOutcomes: failing,
-    connectorMonitor: null,
-    updateDeferredForPairingLogged: false,
     // The real policy with its one-minute floor replaced by zero so the test runs at once.
     updateQuietWindow: options => {
       const decided = updateQuietWindow(options);
       return decided.reason === "failing" ? { ...decided, quietMs: 0 } : decided;
     },
+    // No connector is being paired in this scenario.
+    connectorMonitor: null,
+    updateDeferredForPairingLogged: false,
     activeTurnCount: health => (health?.active_http_turns ?? 0) + (health?.active_browser_turns ?? 0),
     runtimeActivity: async () => ({ active_http_turns: 0, active_browser_turns: 0 }),
     updateController: {
@@ -664,7 +665,7 @@ test("while turns keep failing, the waiting update installs in the first quiet m
   await quitWhenIdleForUpdate({ version: "v" }, { info: (event, detail) => events.push(`${event}:${detail.reason}`) }, 10 * 60_000);
   assert.deepEqual(events, ["launcher.update_quiet_window:failing", "launch", 'quit:{"preserveActiveTurns":true,"quiet":true}'], "the unattended ten minutes do not apply to a failing build, and nothing is cancelled");
   const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
-  assert.match(main, /turnOutcomes\.record\(outcome\?\.status\);/);
+  assert.match(main, /onTurnEnded: \(outcome\) => \{\s*turnOutcomes\.record\(outcome\.status\);/);
 });
 
 test("an unattended update waits while a new ChatGPT connector is being paired; a requested one does not", async () => {
@@ -679,6 +680,7 @@ test("an unattended update waits while a new ChatGPT connector is being paired; 
     setTimeout,
     updateIdleWait: null,
     updateInstallRequested: false,
+    // The failing-build shortcut does not apply in this scenario.
     turnOutcomes: createTurnOutcomeLog(),
     updateQuietWindow,
     updateDeferredForPairingLogged: false,
@@ -703,7 +705,7 @@ test("an unattended update waits while a new ChatGPT connector is being paired; 
   await quitWhenIdleForUpdate({ version: "v" }, { info: event => logged.push(event) }, 10);
   assert.ok(deferralChecks >= 5, "the idle Codex did not install the update while pairing lasted");
   assert.deepEqual(events, ["launch", 'quit:{"preserveActiveTurns":true,"quiet":true}']);
-  assert.equal(logged[0], "launcher.update_deferred_for_connector_pairing");
+  assert.ok(logged.includes("launcher.update_deferred_for_connector_pairing"));
 
   // A requested install uses the short window, which pairing never delays.
   events.length = 0;

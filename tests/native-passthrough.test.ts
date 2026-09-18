@@ -444,3 +444,25 @@ test("a non-event-stream body is passed through untouched", async () => {
 
   expect(await response.text()).toBe('{"ok":true}');
 });
+
+// Codex compares X-Models-Etag on every Responses stream with the ETag of the catalog it loaded
+// and refreshes /models inside the turn when they differ. The bridge's catalog carries its own
+// ETag, so the upstream value never matches and each native turn triggered a catalog refresh.
+test.each(["responses", "responses/compact"] as const)("native %s never forwards the upstream catalog ETag", async endpoint => {
+  const response = await forwardNativeCodexRequest(
+    nativeRequest(),
+    endpoint,
+    async () => new Response("data: native\n\ndata: [DONE]\n\n", {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "x-models-etag": "W/\"89390000000000000000000000000000\"",
+        "x-request-id": "native-request",
+      },
+    }),
+  );
+
+  expect(response.headers.get("x-models-etag")).toBeNull();
+  expect(response.headers.get("x-request-id")).toBe("native-request");
+  expect(await response.text()).toBe("data: native\n\ndata: [DONE]\n\n");
+});

@@ -448,7 +448,13 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void } = {},
+    hooks: {
+      onCompactionProgress?: () => void;
+      /** The account's admission gate holds the browser turn; caller deadlines must pause. */
+      onAdmissionWait?: () => void;
+      /** The gate admitted the browser turn; caller deadlines start over. */
+      onAdmitted?: () => void;
+    } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -562,6 +568,10 @@ export function createChatGptWebAdapter(
     const multipartProgressLifecycle = hooks.onCompactionProgress
       ? { onMultipartStageAcknowledged: hooks.onCompactionProgress }
       : {};
+    const admissionLifecycle = {
+      ...(hooks.onAdmissionWait ? { onAdmissionWait: hooks.onAdmissionWait } : {}),
+      ...(hooks.onAdmitted ? { onAdmitted: hooks.onAdmitted } : {}),
+    };
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
       if (!retainedLauncherDescriptor) throw new Error("ChatGPT Zero Risk requires the Launcher browser host");
@@ -746,6 +756,7 @@ export function createChatGptWebAdapter(
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
+        ...admissionLifecycle,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -810,6 +821,7 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
+      ...admissionLifecycle,
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
@@ -980,6 +992,16 @@ export function createChatGptWebAdapter(
                     );
                     handoffTimer.unref?.();
                   };
+                  // While the account's admission gate holds the compaction browser turn, nothing
+                  // is in flight that could stall; the liveness budget starts over on admission.
+                  const pauseHandoffDeadline = (): void => {
+                    if (handoffTimer) clearTimeout(handoffTimer);
+                    handoffTimer = undefined;
+                  };
+                  const compactionAdmission = {
+                    onAdmissionWait: pauseHandoffDeadline,
+                    onAdmitted: armHandoffDeadline,
+                  };
                   armHandoffDeadline();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
@@ -994,7 +1016,7 @@ export function createChatGptWebAdapter(
                       manualRequest ? environment : undefined,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
-                      { onCompactionProgress: armHandoffDeadline },
+                      { onCompactionProgress: armHandoffDeadline, ...compactionAdmission },
                     );
                     retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                     try {
@@ -1073,6 +1095,7 @@ export function createChatGptWebAdapter(
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
+                        compactionAdmission,
                       );
                     } else {
                       if (source.isActive()) {
@@ -1094,6 +1117,7 @@ export function createChatGptWebAdapter(
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
+                        compactionAdmission,
                       );
                     }
                     const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
@@ -1285,7 +1309,26 @@ export function createChatGptWebAdapter(
 
             let turnToken: string | undefined;
             if (session.runtime.mode === "tools") {
-              turnToken = await withAbort(session.runtime.token, incoming.abortSignal);
+              // A tool-capable turn has no capability token until the browser prepares its
+              // prompt, and that happens only after the account's admission gate lets the turn
+              // start. Relay the gate's status lines meanwhile, so a turn that waits out a ChatGPT
+              // cooldown says so in Codex instead of looking stuck. The token wait itself is
+              // unchanged; the relay stops before this round continues.
+              const stopStatusRelay = new AbortController();
+              void (async () => {
+                for (;;) {
+                  await session.runtime.trace.wait(stopStatusRelay.signal);
+                  if (stopStatusRelay.signal.aborted) return;
+                  const trace = session.runtime.trace.drain();
+                  session.appendRoundReasoning(roundKey, trace.map(event => event.text));
+                  emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
+                }
+              })().catch(() => {});
+              try {
+                turnToken = await withAbort(session.runtime.token, incoming.abortSignal);
+              } finally {
+                stopStatusRelay.abort();
+              }
               if (!environment) throw new Error("Tool-capable ChatGPT web runtime lost its trusted environment");
               await broker.updateEnvironment(turnToken, environment);
 

@@ -735,6 +735,8 @@ export class LauncherBrowserHelperClient {
         helperPid: child.pid!,
         status: "failed",
         message: "Launcher browser helper exited before completing the turn",
+        code: "helper_exited",
+        stage: "helper",
       }).then(
         () => this.finishWithError(
           id,
