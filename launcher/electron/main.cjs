@@ -45,8 +45,9 @@ const { createCliProxyPanel } = require("./cliproxy-cli.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
 const UPDATE_IDLE_QUIET_MS = 30_000;
-// An unattended update waits longer: a short gap between Codex turns is not a finished task.
-const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 5 * 60_000;
+// An unattended update waits longer: a short gap between Codex turns is not a finished task, and
+// while Codex runs a long tool for an OpenAI or CLIProxyAPI model no request reaches the bridge.
+const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 10 * 60_000;
 const UPDATE_IDLE_POLL_MS = 5_000;
 const {
   createStateStore,
@@ -1059,7 +1060,7 @@ async function quitWhenIdleForUpdate(prepared, logger, quietMs = UPDATE_IDLE_QUI
 /**
  * Unattended updates: a fast-forward of main whose CI passed (or that has no CI) and that never failed
  * here is built, fully tested and staged in the background, then installed after Codex has been idle
- * for five minutes. Anything else waits for the user's click.
+ * for ten minutes. Anything else waits for the user's click.
  */
 async function installAutomaticUpdate({ logger, stateStore }) {
   if (automaticUpdateRunning || !updateController) return;

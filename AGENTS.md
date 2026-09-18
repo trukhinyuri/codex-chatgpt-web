@@ -74,7 +74,7 @@ Run every check and report each as passed or failed.
 
 ## Update
 
-- **Automatic:** installed launchers update themselves from `main` within an hour (**Settings → Automatic updates**, on by default). An update installs only if it fast-forwards the installed build, its GitHub checks passed or there are none, `bun run verify` passes on this Mac, and the new launcher reports a healthy start; otherwise the previous app stays or is restored. Nothing is replaced until Codex has been idle for five minutes.
+- **Automatic:** installed launchers update themselves from `main` within an hour (**Settings → Automatic updates**, on by default). An update installs only if it fast-forwards the installed build, its GitHub checks passed or there are none, `bun run verify` passes on this Mac, and the new launcher reports a healthy start; otherwise the previous app stays or is restored. Nothing is replaced until Codex has sent no request through the bridge for ten minutes.
 - **In the launcher:** **Update to v…** installs an update that needs a click (for example one that failed before) with the same checks, after 30 idle seconds.
 - **From a terminal:** rerun the installer command from **Install**. `WAIT_FOR_IDLE=1` waits until no ChatGPT Web turn is active, then quits and replaces the launcher; a build that does not start cleanly is rolled back.
 - **Afterwards:** report the `RESULT` line and the doctor result.

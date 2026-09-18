@@ -498,7 +498,7 @@ test("the launcher reports its start, installs unattended updates only after a l
   assert.match(main, /reportLauncherStartup\(\n\s*runtime\.status === "ready" \|\| runtime\.status === "not-configured" \? "healthy" : "unhealthy",/);
   assert.match(main, /reportLauncherStartup\("unhealthy", "runtime-start-error"\);/);
   assert.match(main, /reportLauncherStartup\("unhealthy", "launcher-start-error"\);/);
-  assert.match(main, /const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 5 \* 60_000;/);
+  assert.match(main, /const AUTOMATIC_UPDATE_IDLE_QUIET_MS = 10 \* 60_000;/);
   assert.match(main, /stateStore\.read\(\)\.automaticUpdates !== true \|\| !updateController\.automaticCandidate\(\)/);
   assert.match(main, /beginInstall\(\{ automatic: true \}\);[\s\S]*?quitWhenIdleForUpdate\(prepared, logger, AUTOMATIC_UPDATE_IDLE_QUIET_MS\)/);
   assert.match(main, /key === "automaticUpdates"/);
