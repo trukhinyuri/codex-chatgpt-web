@@ -390,11 +390,18 @@ test("the update quit drains without cancelling while an ordinary quit keeps can
 });
 
 test("CI and history decide whether an update may install by itself", () => {
+  const mac = (status, conclusion) => ({ name: "verify (macos-15)", status, conclusion });
   assert.equal(classifyCheckRuns({ check_runs: [] }), "none");
-  assert.equal(classifyCheckRuns({ check_runs: [{ status: "in_progress" }] }), "pending");
-  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "success" }, { status: "completed", conclusion: "skipped" }] }), "success");
-  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "success" }, { status: "completed", conclusion: "failure" }] }), "failure");
-  assert.equal(classifyCheckRuns({ check_runs: [{ status: "completed", conclusion: "cancelled" }] }), "failure");
+  assert.equal(classifyCheckRuns({ check_runs: [mac("in_progress")] }), "pending");
+  assert.equal(classifyCheckRuns({ check_runs: [mac("completed", "success"), mac("completed", "skipped")] }), "success");
+  assert.equal(classifyCheckRuns({ check_runs: [mac("completed", "success"), mac("completed", "failure")] }), "failure");
+  assert.equal(classifyCheckRuns({ check_runs: [mac("completed", "cancelled")] }), "failure");
+  assert.equal(classifyCheckRuns({ check_runs: [
+    mac("completed", "success"),
+    { name: "verify (windows-latest)", status: "completed", conclusion: "failure" },
+    { name: "verify (ubuntu-latest)", status: "in_progress" },
+  ] }), "success", "only the macOS jobs gate macOS updates");
+  assert.equal(classifyCheckRuns({ check_runs: [{ name: "actionlint", status: "completed", conclusion: "failure" }] }), "none");
   assert.equal(classifyComparison({ status: "ahead" }), "ahead");
   assert.equal(classifyComparison({ message: "Not Found" }), "unknown");
 
@@ -417,8 +424,8 @@ test("a build newer than main is never downgraded, and doubtful updates wait for
   for (const [dependencies, blocked] of [
     [{ fetchComparison: async () => ({ status: "diverged" }) }, "history-diverged"],
     [{ fetchComparison: async () => { throw new Error("HTTP 403"); } }, "history-unknown"],
-    [{ fetchCheckRuns: async () => ({ check_runs: [{ status: "queued" }] }) }, "ci-pending"],
-    [{ fetchCheckRuns: async () => ({ check_runs: [{ status: "completed", conclusion: "failure" }] }) }, "ci-failure"],
+    [{ fetchCheckRuns: async () => ({ check_runs: [{ name: "verify (macos-15)", status: "queued" }] }) }, "ci-pending"],
+    [{ fetchCheckRuns: async () => ({ check_runs: [{ name: "verify (macos-15)", status: "completed", conclusion: "failure" }] }) }, "ci-failure"],
     [{ fetchCheckRuns: async () => { throw new Error("HTTP 403"); } }, "ci-unknown"],
   ]) {
     const { instance } = controller({}, dependencies);
@@ -427,7 +434,7 @@ test("a build newer than main is never downgraded, and doubtful updates wait for
     await assert.rejects(instance.beginInstall({ automatic: true }), /needs a manual install/);
   }
 
-  const green = controller({}, { fetchCheckRuns: async () => ({ check_runs: [{ status: "completed", conclusion: "success" }] }) });
+  const green = controller({}, { fetchCheckRuns: async () => ({ check_runs: [{ name: "verify (macos-15)", status: "completed", conclusion: "success" }] }) });
   await green.instance.checkOnce();
   assert.equal(green.instance.automaticCandidate().commit, MAIN);
 });

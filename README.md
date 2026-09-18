@@ -98,7 +98,7 @@ printf '%s' "$CLIPROXY_API_KEY" | "/Applications/Codex Web GPT.app/Contents/Reso
 - Codex keeps its own OpenAI provider and ChatGPT sign-in, so its features stay on. Turns of a proxy model go to CLIProxyAPI with the proxy's key; your ChatGPT credentials never reach it. A model that OpenAI also serves stays on your own Codex sign-in.
 - Compaction works for proxy models too: the bridge asks the model for the same summary Codex's own compaction would.
 - `cliproxy status` shows the connection and how many proxy models Codex received; `cliproxy disconnect` removes them at Codex's next model refresh. Restart Codex to see a change at once.
-- `cliproxyapi/` in this repository holds the CLIProxyAPI source; for now you build and run the proxy yourself (`go build ./cmd/server` in `cliproxyapi/`, see its README).
+- You run CLIProxyAPI yourself and sign in to its providers there; its [README](https://github.com/router-for-me/CLIProxyAPI) covers installation and accounts.
 
 ## What this fork changes
 

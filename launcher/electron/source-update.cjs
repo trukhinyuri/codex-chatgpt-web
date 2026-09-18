@@ -52,11 +52,13 @@ function errorMessage(error) {
 }
 
 /**
- * GitHub check runs for a commit: "none" when the repository runs no CI for it, "pending" while any run
- * is unfinished, "failure" when any finished run did not pass, otherwise "success".
+ * GitHub check runs for a commit: "none" when the repository runs no macOS CI for it, "pending" while
+ * any macOS run is unfinished, "failure" when any finished one did not pass, otherwise "success".
+ * Updates install only on macOS, so a Windows or Linux job never holds them back.
  */
 function classifyCheckRuns(payload) {
-  const runs = Array.isArray(payload?.check_runs) ? payload.check_runs : [];
+  const runs = (Array.isArray(payload?.check_runs) ? payload.check_runs : [])
+    .filter(run => /mac/i.test(String(run?.name || "")));
   if (runs.length === 0) return "none";
   if (runs.some(run => run?.status !== "completed")) return "pending";
   const passed = new Set(["success", "neutral", "skipped"]);
