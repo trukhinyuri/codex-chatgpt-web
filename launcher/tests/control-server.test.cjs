@@ -60,7 +60,7 @@ test("browser control server authenticates and owns turn visibility", async () =
     },
     getBrowserHost: () => host,
     getPreferences: () => ({ showBrowserDuringTurns: true }),
-    onTurnEnded: status => ended.push(status),
+    onTurnEnded: outcome => ended.push(outcome.status),
   }).start();
   const descriptor = server.descriptor();
   try {

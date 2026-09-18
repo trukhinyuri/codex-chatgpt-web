@@ -8,7 +8,6 @@ import {
   CHATGPT_CONNECTOR_UNOBSERVED_CONTACT_WAITS_MS,
   ChatGptBrowserWorker,
   ChatGptConnectorCatalogStaleError,
-  ChatGptRateLimitCooldown,
   chatGptConnectorMentionKind,
 } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -66,7 +65,6 @@ function ladderFixture({
   };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics },
-    rateLimitCooldown: new ChatGptRateLimitCooldown(),
     runStage: async (_trace: string, _name: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => (
       action(new AbortController().signal)
     ),

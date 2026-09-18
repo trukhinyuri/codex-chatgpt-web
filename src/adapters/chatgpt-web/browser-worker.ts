@@ -312,7 +312,7 @@ export function chatGptConnectorFailureCode(kind: ChatGptConnectorFailureKind): 
   return `connector_not_found:${kind}`;
 }
 
-const CHATGPT_CONNECTOR_RECHECK_NEXT_STEP = "Codex Web GPT keeps checking the connector by itself; send the task again when its MCP panel shows the connector as ready";
+const CHATGPT_CONNECTOR_RECHECK_NEXT_STEP = "Codex Superpower keeps checking the connector by itself; send the task again when its MCP panel shows the connector as ready";
 /**
  * The one next step of the kinds whose messages come from browser observations. The other kinds
  * build their own message around the step that fits them.
@@ -320,7 +320,7 @@ const CHATGPT_CONNECTOR_RECHECK_NEXT_STEP = "Codex Web GPT keeps checking the co
 const CHATGPT_CONNECTOR_DEFAULT_NEXT_STEPS: Partial<Record<ChatGptConnectorFailureKind, string>> = {
   personalization_unavailable: CHATGPT_CONNECTOR_RECHECK_NEXT_STEP,
   selection_failed: CHATGPT_CONNECTOR_RECHECK_NEXT_STEP,
-  menu_unavailable: "turn on Developer Mode in ChatGPT Settings → Apps if it is off; Codex Web GPT keeps checking by itself and shows in its MCP panel when the connector is ready",
+  menu_unavailable: "turn on Developer Mode in ChatGPT Settings → Apps if it is off; Codex Superpower keeps checking by itself and shows in its MCP panel when the connector is ready",
 };
 
 function normalizedConnectorName(name: string): string {
@@ -388,7 +388,7 @@ interface ChatGptConnectorCatalogLadder {
 function chatGptConnectorTunnelUnavailableError(appName: string): ChatGptWebAdapterError {
   return chatGptConnectorUnavailableError(
     `The local MCP tunnel that ChatGPT connector ${JSON.stringify(appName)} uses did not become ready`
-    + ` within ${CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS / 1_000} seconds; Codex Web GPT keeps restarting it by itself,`
+    + ` within ${CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS / 1_000} seconds; Codex Superpower keeps restarting it by itself,`
     + " so send the task again when its MCP panel shows the tunnel as ready",
     "tunnel_unavailable",
   );
@@ -399,7 +399,7 @@ function chatGptConnectorNeverContactedError(appName: string): ChatGptWebAdapter
     `ChatGPT has not connected to this computer's MCP tunnel since the tunnel started, and its connector menu`
     + ` has no ${JSON.stringify(appName)}; if that connector does not exist yet, create it in ChatGPT`
     + ` (Developer Mode on, named exactly ${JSON.stringify(appName)}, this computer's tunnel, Authentication: None);`
-    + " Codex Web GPT detects it by itself and its MCP panel shows when to send the task again",
+    + " Codex Superpower detects it by itself and its MCP panel shows when to send the task again",
     "never_contacted",
   );
 }
@@ -413,9 +413,9 @@ function chatGptConnectorStillNotListedError(
   return chatGptConnectorUnavailableError(
     contact === "observed"
       ? `ChatGPT reached this computer's MCP tunnel but still does not list connector ${JSON.stringify(appName)}`
-        + ` after ${minutes} minute(s); Codex Web GPT keeps checking by itself and its MCP panel shows when to send the task again`
+        + ` after ${minutes} minute(s); Codex Superpower keeps checking by itself and its MCP panel shows when to send the task again`
       : `ChatGPT still does not list connector ${JSON.stringify(appName)} after ${minutes} minute(s);`
-        + ` create it in ChatGPT for this computer's tunnel if it does not exist, otherwise Codex Web GPT keeps checking`
+        + ` create it in ChatGPT for this computer's tunnel if it does not exist, otherwise Codex Superpower keeps checking`
         + " by itself and its MCP panel shows when to send the task again",
     "not_listed",
   );
@@ -3761,7 +3761,7 @@ export class ChatGptBrowserWorker {
     return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(this.config.appName)}`
       + ` after ${triggerAttempts} complete mention trigger attempt(s)`
       + `; create a connector with exactly that name in ChatGPT for this computer's tunnel,`
-      + ` or wait while Codex Web GPT keeps checking and shows in its MCP panel when it is listed`;
+      + ` or wait while Codex Superpower keeps checking and shows in its MCP panel when it is listed`;
   }
 
   private async clearChatGptComposerState(page: Page): Promise<void> {
@@ -3884,7 +3884,7 @@ export class ChatGptBrowserWorker {
       }
       throw chatGptConnectorUnavailableError(
         `${(error as Error).message}; create a connector named exactly ${JSON.stringify(this.config.appName)}`
-        + ` in ChatGPT for this computer's tunnel, or wait while Codex Web GPT keeps checking`
+        + ` in ChatGPT for this computer's tunnel, or wait while Codex Superpower keeps checking`
         + ` and shows in its MCP panel when it is listed`,
         "not_listed",
       );

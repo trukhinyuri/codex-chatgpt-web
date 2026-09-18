@@ -599,7 +599,7 @@ test("the absolute personalization deadline always returns the connector deadlin
       .rejects.toMatchObject({
         status: 424,
         code: "connector_not_found:personalization_unavailable",
-        message: "ChatGPT personalization preflight exceeded its readiness deadline; Codex Web GPT keeps"
+        message: "ChatGPT personalization preflight exceeded its readiness deadline; Codex Superpower keeps"
           + " checking the connector by itself; send the task again when its MCP panel shows the connector as ready",
       });
   } finally {
