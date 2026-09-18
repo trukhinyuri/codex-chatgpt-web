@@ -5,6 +5,8 @@ export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=t
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
+  'div.ProseMirror[contenteditable="true"]',
+  'div[role="textbox"][aria-label="Chat with ChatGPT"][contenteditable="true"]',
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [

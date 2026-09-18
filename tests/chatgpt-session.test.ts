@@ -28,6 +28,18 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
   expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model"]);
 });
 
+test("the composer selector also recognizes the ProseMirror and textbox DOM variants (TAY0123 fix)", () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<body><form>
+    <div contenteditable="true" id="unrelated-editor"></div>
+    <div class="ProseMirror" contenteditable="true" id="composer-prosemirror"></div>
+    <div role="textbox" aria-label="Chat with ChatGPT" contenteditable="true" id="composer-textbox"></div>
+    <div role="textbox" aria-label="Something else" contenteditable="true" id="unrelated-textbox"></div>
+  </form></body>`);
+  const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
+  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-prosemirror", "composer-textbox"]);
+});
+
 test("effort activation binds the owned menu after the control opens", async () => {
   let opened = false;
   const ownedMenu = { isVisible: async () => opened };
