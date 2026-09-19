@@ -466,7 +466,7 @@ test("session inspection delegates navigation and capability detection to the sh
           temporary: true,
           url: "https://chatgpt.com/?temporary-chat=true",
           solAvailable: true,
-          extraHighAvailable: true, proAvailable: true,
+          extraHighAvailable: true,
         },
       };
     },
@@ -479,7 +479,7 @@ test("session inspection delegates navigation and capability detection to the sh
     temporary: true,
     url: "https://chatgpt.com/?temporary-chat=true",
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
+    extraHighAvailable: true,
   });
   assert.equal(calls.length, 2);
   assert.equal(calls[0].operation, "refresh");

@@ -496,8 +496,9 @@ test("a restarted daemon says that it restored a saved cooldown", async () => {
   const saved = JSON.parse(readFileSync(path, "utf8")) as { version: number; accounts: Record<string, Record<string, unknown>> };
   expect(saved.version).toBe(1);
   expect(Object.keys(saved.accounts.account!).sort()).toEqual([
-    "incidentStartedAt", "incidents", "lastLimitAt", "probeRequired", "recoveredSlots", "recovering",
-    "recoveryStartedAt", "stoppedUntil", "tier", "until", "updatedAt",
+    "failureTier", "incidentStartedAt", "incidents", "lastFailureAt", "lastLimitAt", "probeRequired",
+    "recoveredSlots", "recovering", "recoveryStartedAt", "securityHoldAt", "securityHoldReason",
+    "stoppedUntil", "tier", "until", "updatedAt",
   ].sort());
 });
 

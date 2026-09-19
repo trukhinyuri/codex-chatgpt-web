@@ -26,7 +26,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true };
 const sent = new Error("fixture reached send");
 
 type TunnelAnswer = Partial<LauncherConnectorTunnelStatus> | undefined;

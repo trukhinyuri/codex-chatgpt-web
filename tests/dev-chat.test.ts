@@ -240,8 +240,7 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
     ...defaultConfig("browser-only"),
     purpose: "dev-harness" as const,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
-  };
+    extraHighAvailable: true, };
   const factory = (): ProviderAdapter => ({
     name: "dev-bigger-context-test",
     async runTurn(_parsed, _incoming, emit) {
@@ -255,22 +254,21 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   const store = new DevChatStore(join(root, "chats"));
   const normal = new DevChatDriver(config, store, factory, root);
   const normalState = normal.open("normal-window", "chatgpt-web/high").state;
-  expect(normal.status(normalState).autoCompactTokenLimit).toBe(95_000);
+  expect(normal.status(normalState).autoCompactTokenLimit).toBe(80_000);
 
   const biggerConfig = { ...config, experimentalBiggerContext: true };
   const bigger = new DevChatDriver(biggerConfig, store, factory, root, { biggerContext: true });
   const biggerState = bigger.open("bigger-window", "chatgpt-web/high").state;
   const biggerStatus = bigger.status(biggerState);
   expect(biggerStatus).toMatchObject({
-    autoCompactTokenLimit: 285_000,
-    contextWindow: 333_579,
+    autoCompactTokenLimit: 240_000,
+    contextWindow: 270_000,
   });
-  expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 285_000) * 1_000) / 10);
+  expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 240_000) * 1_000) / 10);
   const luna = new DevChatDriver({
     ...biggerConfig,
     solAvailable: false,
-    extraHighAvailable: false, proAvailable: false,
-  }, store, factory, root, { biggerContext: true });
+    extraHighAvailable: false, }, store, factory, root, { biggerContext: true });
   expect(() => luna.open("luna-window", "chatgpt-web/luna")).toThrow("unavailable for Luna");
   expect(() => luna.open("think-window", "chatgpt-web/think")).toThrow("unavailable for Luna");
   await Promise.all([normal.close(), bigger.close(), luna.close()]);
@@ -282,8 +280,7 @@ test("browser-only DEV driver runs real turns without advertising simulated tool
     ...defaultConfig("browser-only"),
     purpose: "dev-harness" as const,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
-  };
+    extraHighAvailable: true, };
   const factory = (): ProviderAdapter => ({
     name: "dev-browser-only-test",
     async runTurn(parsed, _incoming, emit) {

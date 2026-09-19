@@ -99,12 +99,17 @@ import {
   chatGptAccountKey,
   chatGptAdmissionGateFor,
   chatGptRateLimitError,
+  isChatGptLocalAdmissionRefusal,
   formatChatGptAdmissionStatus,
   withChatGptRetryDelay,
   type ChatGptAdmissionGate,
   type ChatGptAdmissionStatus,
   type ChatGptAdmissionTicket,
 } from "./rate-limit-gate";
+import {
+  chatGptSecurityHoldError,
+  throwIfChatGptSecurityHoldBanner,
+} from "./security-hold";
 import {
   ChatGptCompactionHandoffAccepted,
   ChatGptWebAdapterError,
@@ -513,6 +518,21 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
 }
 
 /**
+ * A model or effort menu with no usable control at all is how ChatGPT's account hold looks from
+ * inside a turn: on 18.09 the picker kept only the plain model rows, with no Thinking effort row,
+ * while the account was held. It ends the turn as a hold, not as a retryable ChatGPT error.
+ *
+ * A menu that still works but offers fewer steps than the selected mode needs is a different thing
+ * (upstream miuuyy/codex-chatgpt-web#564): that degrades to the highest step the account offers.
+ */
+function chatGptModelControlsMissingError(diagnostic: string): ChatGptWebAdapterError {
+  return chatGptSecurityHoldError("model_controls_missing", { diagnostic });
+}
+
+/** The ChatGPT effort step each routed mode sits on, lowest first. */
+const CHATGPT_EFFORT_BY_UI_INDEX = ["low", "medium", "high", "xhigh"] as const;
+
+/**
  * Reads the effort slider's ARIA state, reopening the effort menu and retrying when ChatGPT
  * replaces or closes the popover between locating the slider and reading it. Three sequential
  * `getAttribute` round-trips used to race a disappearing popover: each one could independently
@@ -534,13 +554,14 @@ async function readEffortSliderStateOrReopen(
       continue;
     }
     if (!state) {
-      throw chatGptModelControlUnavailableAdapterError(
+      // The effort control is there but carries no usable range: the shape of a held account.
+      throw chatGptModelControlsMissingError(
         "ChatGPT effort slider exposed an invalid ARIA range",
       );
     }
     return { activation: current, state };
   }
-  throw chatGptModelControlUnavailableAdapterError(
+  throw chatGptModelControlsMissingError(
     "ChatGPT effort slider kept disappearing before its ARIA state could be read",
   );
 }
@@ -1172,6 +1193,9 @@ const chatGptExpiredSessionAlert = (page: Page): Locator => page
   .last();
 
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
+  // ChatGPT's account hold outranks every other alert: while it is up, nothing this account sends
+  // can succeed, and repeating only feeds the check that raised it.
+  await throwIfChatGptSecurityHoldBanner(page);
   if (await chatGptExpiredSessionAlert(page).isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
       "The ChatGPT session has expired. Sign in again in Codex Superpower.",
@@ -2913,6 +2937,11 @@ export class ChatGptBrowserWorker {
         }
         const aborted = turn.abortSignal?.aborted === true
           || (error instanceof DOMException && error.name === "AbortError");
+        const held = aborted ? undefined : gate.classifySecurityHold(error);
+        if (held) {
+          ticket.finish("failed");
+          throw held;
+        }
         const limited = aborted ? undefined : gate.classifyFailure(error, ticket);
         if (limited && !sendActivated) {
           ticket.finish("rate_limited");
@@ -2922,6 +2951,11 @@ export class ChatGptBrowserWorker {
           );
           previous = ticket;
           continue;
+        }
+        if (!aborted && !limited && !isChatGptLocalAdmissionRefusal(error)) {
+          // ChatGPT ended this turn itself. The whole account waits before the next send, so a
+          // failing thread cannot repeat into an account check (R3.3, R3.4).
+          gate.recordChatGptFailure(ticket);
         }
         ticket.finish(aborted ? "aborted" : limited ? "rate_limited" : "failed");
         throw limited ?? error;
@@ -2944,7 +2978,6 @@ export class ChatGptBrowserWorker {
     url: string;
     solAvailable?: boolean;
     extraHighAvailable?: boolean;
-    proAvailable?: boolean;
   }> {
     return this.enqueueMaintenance("session inspection", () => this.inspectSessionExclusive(detectCapabilities));
   }
@@ -3200,18 +3233,30 @@ export class ChatGptBrowserWorker {
       captureDiagnostic,
     ));
     effortSliderLocator = currentActivation.slider;
-    const targetValue = sliderState.min + uiEffortIndex;
+    let selectedMode = mode;
+    let targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
-      const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(currentActivation.menu) : undefined;
-      const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
-        ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
-        : "";
-      throw chatGptModelControlUnavailableAdapterError(
-        `ChatGPT effort slider does not expose item index ${uiEffortIndex}`
-        + ` (min=${sliderState.min}; max=${sliderState.max})`
-        + proUsageLimitHint,
-        detail,
+      // The account no longer offers this step. Take the highest one it does offer instead of
+      // pressing a level that is not there (upstream miuuyy/codex-chatgpt-web#564); a menu with no
+      // usable step at all is the account hold above, not a degradation.
+      const availableIndex = sliderState.max - sliderState.min;
+      const fallbackEffort = CHATGPT_EFFORT_BY_UI_INDEX[availableIndex];
+      if (availableIndex < 0 || !fallbackEffort) {
+        throw chatGptModelControlsMissingError(
+          `ChatGPT effort slider exposes no usable step (min=${sliderState.min}; max=${sliderState.max})`,
+        );
+      }
+      selectedMode = resolveChatGptWebModelMode(modelId, fallbackEffort, {
+        ...capabilities,
+        // The slider itself is the evidence: this account offers this step right now.
+        extraHighAvailable: true,
+      });
+      targetValue = sliderState.min + availableIndex;
+      console.warn(
+        `[chatgpt-web] ChatGPT no longer offers effort step ${uiEffortIndex} for this account`
+        + ` (min=${sliderState.min}; max=${sliderState.max}); this turn runs on ${selectedMode.displayLabel}`,
       );
+      await captureDiagnostic?.("effort-degraded-to-available-step");
     }
     let sliderControl = effortSliderLocator.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
@@ -3262,7 +3307,7 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("effort-selected");
     await page.keyboard.press("Escape");
-    return mode;
+    return selectedMode;
   }
 
   private async activeComposer(
@@ -4681,13 +4726,16 @@ export class ChatGptBrowserWorker {
     url: string;
     solAvailable?: boolean;
     extraHighAvailable?: boolean;
-    proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
+    // A probe that reads this account's model and effort controls again is the evidence that a
+    // person has secured the account and signed back in, so the account hold ends here. This is the
+    // only way it ends: waiting never releases it.
+    this.admissionGate().clearSecurityHold();
     return { authenticated: true, temporary: true, url, ...capabilities };
   }
 

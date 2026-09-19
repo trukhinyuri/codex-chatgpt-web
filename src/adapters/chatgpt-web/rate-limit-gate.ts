@@ -3,6 +3,12 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import { ChatGptWebAdapterError, chatGptTurnAbortError } from "./adapter-error";
+import {
+  chatGptSecurityHoldCause,
+  chatGptSecurityHoldError,
+  writeChatGptSecurityHoldDiagnostic,
+  type ChatGptSecurityHoldReason,
+} from "./security-hold";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { chatGptSuspensionClock } from "./suspension-clock";
 
@@ -30,6 +36,14 @@ export const CHATGPT_RATE_LIMIT_INCIDENT_STOP_COUNT = 3;
  * the terminal wait limit.
  */
 export const CHATGPT_ADMISSION_RAMP_INTERVAL_MS = 2 * 60_000;
+/**
+ * Every failure ChatGPT itself ends a turn with pauses the whole account, not just that turn. On
+ * 18.09 failed turns were repeated every 25 seconds across up to six Codex threads on one account,
+ * which is the pattern an account check reacts to. The pause starts at the base cooldown and
+ * doubles per consecutive failure up to the maximum, shared by every session of the account.
+ */
+export const CHATGPT_FAILURE_BASE_BACKOFF_MS = CHATGPT_RATE_LIMIT_BASE_COOLDOWN_MS;
+export const CHATGPT_FAILURE_MAX_BACKOFF_MS = CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS;
 
 /** Shortest wake-up delay, so an inconsistent schedule can never become a busy loop. */
 const MIN_WAKE_DELAY_MS = 250;
@@ -117,6 +131,13 @@ export interface ChatGptRateLimitState {
   recoveryStartedAt: number;
   /** Clean completions of turns admitted after the incident. */
   recoveredSlots: number;
+  /** Consecutive ChatGPT-side turn failures; it sets the shared failure backoff. */
+  failureTier: number;
+  /** The latest ChatGPT-side turn failure counted into the backoff. */
+  lastFailureAt: number;
+  /** ChatGPT is holding this account; no automatic turn starts until a person restores it. */
+  securityHoldAt: number;
+  securityHoldReason: ChatGptSecurityHoldReason | "";
   updatedAt: number;
 }
 
@@ -132,6 +153,10 @@ function emptyState(): ChatGptRateLimitState {
     recovering: false,
     recoveryStartedAt: 0,
     recoveredSlots: 0,
+    failureTier: 0,
+    lastFailureAt: 0,
+    securityHoldAt: 0,
+    securityHoldReason: "",
     updatedAt: 0,
   };
 }
@@ -164,6 +189,13 @@ function parseAccountState(value: unknown): ChatGptRateLimitState | undefined {
     recovering: record.recovering === true,
     recoveryStartedAt: finiteTime(record.recoveryStartedAt) ?? 0,
     recoveredSlots: Math.min(MAX_CHATGPT_BROWSER_TABS, Math.floor(finiteTime(record.recoveredSlots) ?? 0)),
+    failureTier: Math.min(16, Math.floor(finiteTime(record.failureTier) ?? 0)),
+    lastFailureAt: finiteTime(record.lastFailureAt) ?? 0,
+    securityHoldAt: finiteTime(record.securityHoldAt) ?? 0,
+    securityHoldReason: record.securityHoldReason === "suspicious_activity"
+      || record.securityHoldReason === "model_controls_missing"
+      ? record.securityHoldReason
+      : "",
     updatedAt: finiteTime(record.updatedAt) ?? 0,
   };
 }
@@ -324,7 +356,10 @@ export interface ChatGptAdmissionGateOptions {
 }
 
 export interface ChatGptAdmissionGateSnapshot {
-  state: "normal" | "waiting" | "paused";
+  state: "normal" | "waiting" | "paused" | "held";
+  /** When ChatGPT's account hold was first seen; the account takes no automatic turn until it clears. */
+  securityHoldAt?: number;
+  securityHoldReason?: ChatGptSecurityHoldReason;
   cooldownUntil?: number;
   pausedUntil?: number;
   tier: number;
@@ -377,6 +412,7 @@ export class ChatGptAdmissionGate {
     const now = this.clock.now();
     this.refreshFromDisk(false);
     this.normalize(now);
+    if (this.state.securityHoldAt > 0) return Promise.reject(this.securityHoldError());
     if (now < this.state.stoppedUntil) return Promise.reject(this.pausedError(now));
     return new Promise<ChatGptAdmissionTicket>((resolveWait, rejectWait) => {
       const waiter: Waiter = {
@@ -412,6 +448,8 @@ export class ChatGptAdmissionGate {
    * else is not the gate's business and returns undefined.
    */
   classifyFailure(error: unknown, ticket?: Pick<ChatGptAdmissionTicket, "admittedAt">): ChatGptWebAdapterError | undefined {
+    const held = this.classifySecurityHold(error);
+    if (held) return held;
     if (isChatGptRateLimitError(error)) {
       return chatGptRateLimitError(withChatGptRetryDelay(error.message, this.recordRateLimit(ticket?.admittedAt)), error);
     }
@@ -475,11 +513,98 @@ export class ChatGptAdmissionGate {
     return Math.max(1, Math.ceil((state.until - now) / 1_000));
   }
 
+  /**
+   * Turns ChatGPT's account-hold signal into the account-wide hold. The hold has no expiry: only a
+   * person who secured the account and signed in again clears it, so nothing automatic can walk the
+   * bridge back into the check that produced it.
+   */
+  classifySecurityHold(error: unknown): ChatGptWebAdapterError | undefined {
+    const held = chatGptSecurityHoldCause(error);
+    if (!held) return undefined;
+    const reason: ChatGptSecurityHoldReason = held.message.includes("model and effort controls")
+      ? "model_controls_missing"
+      : "suspicious_activity";
+    this.recordSecurityHold(reason);
+    return this.securityHoldError();
+  }
+
+  /** Records ChatGPT's account hold, empties the queue and stops every automatic turn. */
+  recordSecurityHold(reason: ChatGptSecurityHoldReason): void {
+    const now = this.clock.now();
+    this.refreshFromDisk(false);
+    if (this.state.securityHoldAt === 0) {
+      this.state.securityHoldAt = now;
+      this.state.securityHoldReason = reason;
+      this.log.warn(
+        `[chatgpt-web] ChatGPT is holding this account (reason=${reason});`
+        + ` the bridge stops automatic turns for it queued=${this.waiters.length} active=${this.tickets.size}`,
+      );
+      writeChatGptSecurityHoldDiagnostic({
+        reason,
+        accountKey: this.accountKey,
+        detectedAt: new Date(now).toISOString(),
+        diagnostic: "bridge stopped automatic turns for this account",
+      });
+      this.persist(now);
+    }
+    this.pump();
+  }
+
+  /** Clears the hold after a person secured the account and signed in again. */
+  clearSecurityHold(): void {
+    this.refreshFromDisk(false);
+    if (this.state.securityHoldAt === 0) return;
+    this.state.securityHoldAt = 0;
+    this.state.securityHoldReason = "";
+    this.log.info("[chatgpt-web] the ChatGPT account hold was cleared; automatic turns may start again");
+    this.persist(this.clock.now());
+    this.pump();
+  }
+
+  securityHoldError(): ChatGptWebAdapterError {
+    const reason = (this.state.securityHoldReason || "suspicious_activity") as ChatGptSecurityHoldReason;
+    return markLocalRefusal(chatGptSecurityHoldError(reason, {
+      ...(this.state.securityHoldAt > 0 ? { heldSince: this.state.securityHoldAt } : {}),
+    }));
+  }
+
+  /**
+   * Counts one ChatGPT-side turn failure and pauses the whole account before the next send. The
+   * pause doubles with every consecutive failure, from the base cooldown to the maximum, and a
+   * quiet period clears it. Returns the whole seconds the account now waits.
+   */
+  recordChatGptFailure(ticket?: Pick<ChatGptAdmissionTicket, "admittedAt">): number {
+    const now = this.clock.now();
+    this.refreshFromDisk(false);
+    this.normalize(now);
+    const state = this.state;
+    // A turn admitted before the pause that is already running was sent into the same trouble; it
+    // must not double that pause a second time.
+    if (state.failureTier > 0 && ticket?.admittedAt !== undefined && ticket.admittedAt < state.lastFailureAt) {
+      return Math.max(0, Math.ceil((state.until - now) / 1_000));
+    }
+    state.failureTier = Math.min(16, state.failureTier + 1);
+    state.lastFailureAt = now;
+    const delay = Math.min(
+      CHATGPT_FAILURE_BASE_BACKOFF_MS * 2 ** (state.failureTier - 1),
+      CHATGPT_FAILURE_MAX_BACKOFF_MS,
+    );
+    state.until = Math.min(Math.max(state.until, now + delay), now + CHATGPT_RATE_LIMIT_MAX_COOLDOWN_MS);
+    this.log.warn(
+      "[chatgpt-web] ChatGPT ended a turn with an error; the account waits "
+      + `${Math.ceil((state.until - now) / 1_000)}s before the next send failureTier=${state.failureTier}`,
+    );
+    this.persist(now);
+    this.pump();
+    return Math.max(1, Math.ceil((state.until - now) / 1_000));
+  }
+
   /** Refuses a maintenance operation (smoke test) while the account is paused or cooling down. */
   assertMaintenanceAllowed(operation: string): void {
     const now = this.clock.now();
     this.refreshFromDisk(false);
     this.normalize(now);
+    if (this.state.securityHoldAt > 0) throw this.securityHoldError();
     if (now < this.state.stoppedUntil) throw markLocalRefusal(this.pausedError(now));
     if (now < this.state.until) {
       throw markLocalRefusal(chatGptRateLimitError(withChatGptRetryDelay(
@@ -495,8 +620,11 @@ export class ChatGptAdmissionGate {
     this.normalize(now);
     const paused = now < this.state.stoppedUntil;
     const cooling = now < this.state.until;
+    const held = this.state.securityHoldAt > 0;
     return {
-      state: paused ? "paused" : cooling || this.waiters.length > 0 ? "waiting" : "normal",
+      state: held ? "held" : paused ? "paused" : cooling || this.waiters.length > 0 ? "waiting" : "normal",
+      ...(held ? { securityHoldAt: this.state.securityHoldAt } : {}),
+      ...(held && this.state.securityHoldReason ? { securityHoldReason: this.state.securityHoldReason } : {}),
       ...(cooling ? { cooldownUntil: this.state.until } : {}),
       ...(paused ? { pausedUntil: this.state.stoppedUntil } : {}),
       tier: this.state.tier,
@@ -554,6 +682,11 @@ export class ChatGptAdmissionGate {
       }
       if (changed) this.persist(now);
     }
+    if (outcome === "clean" && state.failureTier !== 0) {
+      // ChatGPT served this account again, so the next failure starts from the base pause.
+      state.failureTier = 0;
+      this.persist(now);
+    }
     this.pump();
   }
 
@@ -602,6 +735,10 @@ export class ChatGptAdmissionGate {
       // still owed: it costs one serialized start, and it is the only evidence the limit cleared.
       state.tier = 0;
       state.recovering = false;
+    }
+    if (state.failureTier > 0 && state.lastFailureAt > 0
+      && now - state.lastFailureAt > CHATGPT_FAILURE_MAX_BACKOFF_MS + CHATGPT_RATE_LIMIT_ESCALATION_RESET_MS) {
+      state.failureTier = 0;
     }
     state.incidents = state.incidents.filter(at => at <= now && now - at < CHATGPT_RATE_LIMIT_INCIDENT_WINDOW_MS);
     // A wrong clock or a long pause must never block work beyond the longest pause ChatGPT asks for.
@@ -657,6 +794,14 @@ export class ChatGptAdmissionGate {
     const now = this.clock.now();
     this.refreshFromDisk(false);
     this.normalize(now);
+    if (this.state.securityHoldAt > 0) {
+      for (const waiter of [...this.waiters]) {
+        this.removeWaiter(waiter);
+        waiter.reject(this.securityHoldError());
+      }
+      this.schedule(Number.POSITIVE_INFINITY, now);
+      return;
+    }
     if (now < this.state.stoppedUntil) {
       for (const waiter of [...this.waiters]) {
         this.removeWaiter(waiter);

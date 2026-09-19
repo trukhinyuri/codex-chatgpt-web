@@ -3069,10 +3069,10 @@ class BrowserHost {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities
-      && (typeof inspected.solAvailable !== "boolean" || typeof inspected.extraHighAvailable !== "boolean" || typeof inspected.proAvailable !== "boolean")) {
+      && (typeof inspected.solAvailable !== "boolean" || typeof inspected.extraHighAvailable !== "boolean")) {
       throw new Error("Browser helper returned incomplete ChatGPT capability evidence");
     }
-    if (detectCapabilities && (inspected.proAvailable || inspected.extraHighAvailable) && !inspected.solAvailable) {
+    if (detectCapabilities && inspected.extraHighAvailable && !inspected.solAvailable) {
       throw new Error("Browser helper returned contradictory ChatGPT capability evidence");
     }
     if (startedIdle) await this.returnToIdle();

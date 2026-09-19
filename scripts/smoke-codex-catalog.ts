@@ -31,7 +31,7 @@ process.env.CODEX_HOME = join(root, "codex");
 process.env.CODEX_CHATGPT_WEB_HOME = join(root, "app");
 mkdirSync(process.env.CODEX_HOME, { recursive: true });
 const config = defaultConfig("browser-only");
-config.proAvailable = true;
+config.extraHighAvailable = true;
 config.subagentProtocol = "compatibility-v1";
 const catalogPath = join(root, "augmented-models.json");
 writeFileSync(catalogPath, `${JSON.stringify(augmentNativeModelCatalog(sourceCatalog, config))}\n`);
@@ -68,10 +68,10 @@ try {
     throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
-  const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");
-  if (nativeSol?.multi_agent_version !== "v1" || webPro?.multi_agent_version !== "v1") {
+  const webTop = catalog.models?.find(model => model.slug === "chatgpt-web/extra-high");
+  if (nativeSol?.multi_agent_version !== "v1" || webTop?.multi_agent_version !== "v1") {
     throw new Error(
-      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webPro })}`,
+      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webTop })}`,
     );
   }
   const features = runCodex(["features", "list"], isolatedEnv).stdout;

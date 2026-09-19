@@ -9,7 +9,7 @@ import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-pr
 test.each([[true, false, true], [false, false, true], [true, true, true], [true, false, false]])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s)", async (owned, tools, multipart) => {
   const diagnostics = mkdtempSync(join(tmpdir(), "compaction-observation-"));
   const finalResponse = new Error("fixture reached final response observation");
-  const capabilities = { localToolsEnabled: tools, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const capabilities = { localToolsEnabled: tools, solAvailable: true, extraHighAvailable: true };
   const progress = tools ? new ChatGptExternalTurnProgress() : undefined;
   const recoveryCallbacks: unknown[] = [];
   const actions: string[] = [];

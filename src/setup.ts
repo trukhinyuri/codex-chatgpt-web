@@ -54,7 +54,6 @@ export interface SetupOptions {
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
   experimentalSkillAttachments?: boolean;
-  zeroRiskProEnabled?: boolean;
   replaceCodexRoute?: boolean;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
@@ -101,8 +100,7 @@ export function launcherCapabilityProbeRequired(
     || existing?.browserInteractionMode === "manual"
     || existing?.browserHost !== "launcher"
     || typeof existing.solAvailable !== "boolean"
-    || typeof existing.extraHighAvailable !== "boolean"
-    || typeof existing.proAvailable !== "boolean";
+    || typeof existing.extraHighAvailable !== "boolean";
 }
 
 export function existingFullSetupCredentials(
@@ -143,10 +141,8 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: before.headed,
     solAvailable: before.solAvailable,
     extraHighAvailable: before.extraHighAvailable,
-    proAvailable: before.proAvailable,
     experimentalBiggerContext: before.experimentalBiggerContext,
     experimentalSkillAttachments: before.experimentalSkillAttachments,
-    zeroRiskProEnabled: before.zeroRiskProEnabled,
     autoApproveToolCalls: before.autoApproveToolCalls,
     controlToken: before.controlToken,
     runtimeCommand: before.runtimeCommand,
@@ -172,10 +168,8 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: after.headed,
     solAvailable: after.solAvailable,
     extraHighAvailable: after.extraHighAvailable,
-    proAvailable: after.proAvailable,
     experimentalBiggerContext: after.experimentalBiggerContext,
     experimentalSkillAttachments: after.experimentalSkillAttachments,
-    zeroRiskProEnabled: after.zeroRiskProEnabled,
     autoApproveToolCalls: after.autoApproveToolCalls,
     controlToken: after.controlToken,
     runtimeCommand: after.runtimeCommand,
@@ -276,12 +270,6 @@ function baseConfig(
   if (options.experimentalBiggerContext !== undefined) {
     config.experimentalBiggerContext = options.experimentalBiggerContext;
   }
-  if (options.zeroRiskProEnabled !== undefined) {
-    if (config.browserInteractionMode !== "manual") {
-      throw new Error("Zero Risk Pro can be configured only with --zero-risk-browser-interaction");
-    }
-    config.zeroRiskProEnabled = options.zeroRiskProEnabled;
-  }
   if (config.browserInteractionMode === "manual") {
     if (options.refreshAccountCapabilities) {
       throw new Error("Zero Risk cannot refresh account capabilities");
@@ -316,7 +304,7 @@ async function inspectLauncherCapabilities(
   existing: AppConfig | undefined,
   refreshAccountCapabilities: boolean,
   expectedProfile: "production" | "development",
-): Promise<{ solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean }> {
+): Promise<{ solAvailable: boolean; extraHighAvailable: boolean }> {
   const detectCapabilities = launcherCapabilityProbeRequired(
     existing,
     refreshAccountCapabilities,
@@ -329,7 +317,6 @@ async function inspectLauncherCapabilities(
   return {
     solAvailable: detectCapabilities ? inspected.solAvailable === true : existing!.solAvailable,
     extraHighAvailable: detectCapabilities ? inspected.extraHighAvailable === true : existing!.extraHighAvailable === true,
-    proAvailable: detectCapabilities ? inspected.proAvailable === true : existing!.proAvailable,
   };
 }
 
@@ -514,7 +501,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   let loginCreated = false;
   let solAvailable: boolean | undefined = config.solAvailable;
   let extraHighAvailable: boolean | undefined = config.extraHighAvailable;
-  let proAvailable: boolean | undefined = config.proAvailable;
   if (config.browserInteractionMode === "manual") {
     // The generic manual route is independent of account capabilities. The launcher may open the
     // authenticated surface, but setup must not inspect its model selector or infer availability.
@@ -528,19 +514,16 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     );
     solAvailable = capabilities.solAvailable;
     extraHighAvailable = capabilities.extraHighAvailable;
-    proAvailable = capabilities.proAvailable;
   } else {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
     extraHighAvailable = stored.extraHighAvailable;
-    proAvailable = stored.proAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
-        || extraHighAvailable === undefined
-        || proAvailable === undefined);
+        || extraHighAvailable === undefined);
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
         "Setup must verify the browser account before changing the running daemon. "
@@ -552,18 +535,15 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
       extraHighAvailable = login.extraHighAvailable;
-      proAvailable = login.proAvailable;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
       extraHighAvailable = inspected.extraHighAvailable;
-      proAvailable = inspected.proAvailable;
     }
   }
   config.solAvailable = solAvailable === true;
   config.extraHighAvailable = config.solAvailable && extraHighAvailable === true;
-  config.proAvailable = config.solAvailable && proAvailable === true;
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -679,7 +659,6 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     );
     config.solAvailable = capabilities.solAvailable;
     config.extraHighAvailable = capabilities.solAvailable && capabilities.extraHighAvailable;
-    config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
   }
 
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);

@@ -393,7 +393,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   } else if (!absolutePath(config.brokerSocketPath, platform) || windowsPipeEndpoint(config.brokerSocketPath)) {
     throw new Error("Runtime configuration has an invalid Unix broker socket");
   }
-  for (const key of ["headed", "solAvailable", "proAvailable", "autoApproveToolCalls"]) {
+  for (const key of ["headed", "solAvailable", "autoApproveToolCalls"]) {
     if (typeof config[key] !== "boolean") {
       throw new Error(`Runtime configuration has an invalid ${key}`);
     }
@@ -411,9 +411,6 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   if (config.stallTimeoutSec !== undefined
     && (!Number.isFinite(config.stallTimeoutSec) || config.stallTimeoutSec <= 0)) {
     throw new Error("Runtime configuration has an invalid stallTimeoutSec");
-  }
-  if (config.proAvailable && !config.solAvailable) {
-    throw new Error("Runtime configuration cannot enable Pro without Sol");
   }
   if (!Array.isArray(config.runtimeCommand)
     || config.runtimeCommand.length === 0

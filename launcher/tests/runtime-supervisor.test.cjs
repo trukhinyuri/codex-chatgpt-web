@@ -112,7 +112,7 @@ function launcherConfig(descriptorPath, overrides = {}) {
       ? "\\\\.\\pipe\\codex-chatgpt-web-runtime-supervisor-test"
       : path.join(root, "turn-broker.sock"),
     headed: true,
-    extraHighAvailable: true, proAvailable: true,
+    extraHighAvailable: true,
     autoApproveToolCalls: false,
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
@@ -302,7 +302,7 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
     brokerSocketPath: "\\\\.\\pipe\\codex-chatgpt-web-runtime-supervisor-test",
     headed: true,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
+    extraHighAvailable: true,
     autoApproveToolCalls: false,
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: ["C:\\Users\\Example\\.codex-chatgpt-web\\runtime\\bun.exe"],

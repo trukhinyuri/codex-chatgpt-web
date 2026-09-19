@@ -5,7 +5,6 @@ import {
   CHATGPT_WEB_LUNA_MODEL_ROUTES,
   CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-  CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
@@ -52,7 +51,7 @@ describe("native /models augmentation", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "native";
     config.extraHighAvailable = true;
-    config.proAvailable = true;
+    config.extraHighAvailable = true;
     const result = augmentNativeModelCatalog(native, config);
     const models = result.models as Array<Record<string, unknown>>;
     const originalModels = nativeSnapshot.models as Array<Record<string, unknown>>;
@@ -89,19 +88,19 @@ describe("native /models augmentation", () => {
   test("publishes Bigger Context limits in the Codex model catalog", () => {
     const config = defaultConfig("full");
     config.extraHighAvailable = true;
-    config.proAvailable = true;
+    config.extraHighAvailable = true;
     config.experimentalBiggerContext = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
-    const pro = models.find(model => model.slug === "chatgpt-web/pro")!;
-    expect(pro.context_window).toBe(336_579);
-    expect(pro.auto_compact_token_limit).toBe(285_000);
+    const top = models.find(model => model.slug === "chatgpt-web/extra-high")!;
+    expect(top.context_window).toBe(270_000);
+    expect(top.auto_compact_token_limit).toBe(240_000);
   });
 
   test("keeps native Sol selectable in the bounded Compatibility V1 registry", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "compatibility-v1";
     config.extraHighAvailable = true;
-    config.proAvailable = true;
+    config.extraHighAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const parent = models.find(model => model.slug === "gpt-5.6-sol")!;
     expect(parent.multi_agent_version).toBe("v1");
@@ -119,6 +118,7 @@ describe("native /models augmentation", () => {
     expect(spawnOverrides).toEqual([
       "gpt-5.6-sol",
       ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+      "chatgpt-web/light",
     ]);
     expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
   });
@@ -140,7 +140,7 @@ describe("native /models augmentation", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "native";
     config.extraHighAvailable = true;
-    config.proAvailable = true;
+    config.extraHighAvailable = true;
 
     const models = augmentNativeModelCatalog(native, config).models as Array<Record<string, unknown>>;
     expect(models.slice(0, nativeModels.length)).toEqual(nativeModels);
@@ -154,10 +154,10 @@ describe("native /models augmentation", () => {
     expect(spawnOverrides).toContain("gpt-5.6-sol");
   });
 
-  test("owns only its namespace, is idempotent, and omits Pro-only modes when unavailable", () => {
+  test("owns only its namespace, is idempotent, and never republishes the retired Pro row", () => {
     const config = defaultConfig("browser-only");
     config.subagentProtocol = "native";
-    config.proAvailable = false;
+    config.extraHighAvailable = true;
     config.extraHighAvailable = true;
     const polluted = source();
     (polluted.models as unknown[]).push(
@@ -208,7 +208,7 @@ describe("native /models augmentation", () => {
     const config = defaultConfig("full");
     config.browserInteractionMode = "manual";
     config.solAvailable = false;
-    config.proAvailable = false;
+    config.extraHighAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
 
@@ -226,17 +226,10 @@ describe("native /models augmentation", () => {
       auto_compact_token_limit: 96_000,
     });
 
-    config.zeroRiskProEnabled = true;
-    const proModels = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
-    const proWeb = proModels.filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(proWeb).toHaveLength(2);
-    expect(proWeb[1]).toMatchObject({
-      slug: CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE.slug,
-      display_name: CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE.displayName,
-      input_modalities: ["text"],
-      context_window: 336_579,
-      auto_compact_token_limit: 285_000,
-    });
+    // The retired Zero Risk Pro row is never published, whatever a saved configuration asks for.
+    const againModels = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+    const againWeb = againModels.filter(model => String(model.slug).startsWith("chatgpt-web/"));
+    expect(againWeb.map(model => model.slug)).toEqual([CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE.slug]);
   });
 
   test("raises only native maximum windows for an explicit Codex context override", () => {
