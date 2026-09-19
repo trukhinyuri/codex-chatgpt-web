@@ -37,6 +37,17 @@ test("update failures map to fixed codes; the lock of another install is not a p
   assert.equal(classifyUpdateFailure("the new launcher exited during startup"), "exited-during-startup");
   assert.equal(classifyUpdateFailure("no healthy start within 360 s"), "startup-timeout");
   assert.equal(classifyUpdateFailure("The staged application is 3333, not 2222"), "stage-failed");
+  // macOS refusing to let the app replace its own bundle (the "App Management" permission) is not a
+  // broken commit: it must never look like one, whichever step reports it.
+  assert.equal(
+    classifyUpdateFailure("The launcher could not replace its own application bundle (EPERM); the update stays ready"),
+    "bundle-not-writable",
+  );
+  assert.equal(
+    classifyUpdateFailure("Could not stage the new application: ditto: ...: Operation not permitted"),
+    "bundle-not-writable",
+  );
+  assert.equal(classifyUpdateFailure("EACCES: permission denied, rename '/Applications/Codex Web GPT.app'"), "bundle-not-writable");
   assert.equal(classifyUpdateFailure("something /Users/alice/private happened"), "other");
   assert.equal(classifyUpdateFailure("Another source update or install is running (PID 7)"), null);
 });

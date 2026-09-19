@@ -1164,7 +1164,9 @@ function registerIpc({ logger, stateStore }) {
       try {
         await quitWhenIdleForUpdate(prepared, logger);
       } catch (error) {
-        updateController.cancelInstall(prepared);
+        // A refusal to replace the bundle keeps the verified build for the next window (nothing is
+        // wrong with the commit); anything else throws the stage away.
+        if (error?.keepStaged !== true) updateController.cancelInstall(prepared);
         throw error;
       }
     } finally {
@@ -1294,7 +1296,7 @@ async function installAutomaticUpdate({ logger, stateStore }) {
     try {
       await quitWhenIdleForUpdate(prepared, logger, AUTOMATIC_UPDATE_IDLE_QUIET_MS);
     } catch (error) {
-      updateController.cancelInstall(prepared);
+      if (error?.keepStaged !== true) updateController.cancelInstall(prepared);
       throw error;
     }
   } catch (error) {
