@@ -26,6 +26,7 @@ import {
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
+  chatGptEffortDegradedMessage,
   resolveChatGptWebModelMode,
   type ChatGptWebCapabilities,
   type ChatGptWebModelMode,
@@ -64,6 +65,7 @@ import {
   type ChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
+import { OPENAI_TUNNELS_SETTINGS_URL } from "../../tunnel-registry";
 import {
   connectLauncherBrowserHost,
   LauncherBrowserTurnCancelledError,
@@ -72,6 +74,7 @@ import {
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
   requestLauncherConnectorTunnel,
+  type LauncherConnectorTunnelRegistry,
   type LauncherConnectorTunnelRequest,
   type LauncherConnectorTunnelStatus,
   type LauncherTunnelContactStatus,
@@ -306,6 +309,12 @@ interface ChatGptConnectorAttemptBudget {
  */
 export type ChatGptConnectorFailureKind =
   | "tunnel_unavailable"
+  /** OpenAI does not have this tunnel any more, so no connector can point at it. */
+  | "tunnel_missing"
+  /** The tunnel exists but reaches no workspace, which is ChatGPT's "No tunnels yet". */
+  | "tunnel_not_shared"
+  /** ChatGPT is signed in to a workspace the tunnel is not shared with: the wrong account. */
+  | "wrong_workspace"
   | "never_contacted"
   | "not_listed"
   | "other_name"
@@ -396,6 +405,69 @@ function chatGptConnectorTunnelUnavailableError(appName: string): ChatGptWebAdap
     + ` within ${CHATGPT_CONNECTOR_TUNNEL_READY_WAIT_MS / 1_000} seconds; Codex Superpower keeps restarting it by itself,`
     + " so send the task again when its MCP panel shows the tunnel as ready",
     "tunnel_unavailable",
+  );
+}
+
+/**
+ * The tunnel was deleted in OpenAI (or recreated under another id). Every local check stays green
+ * in that state, so only the registry can name it.
+ */
+function chatGptConnectorTunnelMissingError(appName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `OpenAI no longer has the MCP tunnel that ChatGPT connector ${JSON.stringify(appName)} uses;`
+    + ` create a tunnel at ${OPENAI_TUNNELS_SETTINGS_URL} and press Connect harness in Codex Superpower`,
+    "tunnel_missing",
+  );
+}
+
+/**
+ * The tunnel exists but is shared with no workspace: ChatGPT's New Plugin → Tunnel dialog then says
+ * "No tunnels yet", and a connector that used to point at it disappears. Observed on 18.09.2026
+ * after a ChatGPT password change.
+ */
+function chatGptConnectorTunnelNotSharedError(appName: string, tunnelName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `The MCP tunnel that ChatGPT connector ${JSON.stringify(appName)} uses is shared with no workspace,`
+    + ` so this ChatGPT workspace cannot see it; share tunnel ${JSON.stringify(tunnelName)}`
+    + ` with this ChatGPT workspace at ${OPENAI_TUNNELS_SETTINGS_URL}`,
+    "tunnel_not_shared",
+  );
+}
+
+/**
+ * What OpenAI's tunnel registry proves before a turn starts waiting on ChatGPT's connector menu.
+ * Only a proven absence ends the turn, and it ends it at once, with one action: waiting minutes for
+ * a connector that cannot exist is what the 18.09 incident cost. Anything unproven (no network, an
+ * unexpected answer, a key OpenAI would not judge) changes nothing.
+ */
+export function chatGptConnectorRegistryFailure(
+  appName: string,
+  registry: LauncherConnectorTunnelRegistry | undefined,
+): ChatGptWebAdapterError | undefined {
+  if (!registry) return undefined;
+  if (registry.status === "missing") return chatGptConnectorTunnelMissingError(appName);
+  if (registry.status === "ok" && registry.sharing === "not-shared") {
+    return chatGptConnectorTunnelNotSharedError(appName, registry.tunnelName ?? "codex-web");
+  }
+  if (registry.workspaceMatch === "mismatch") {
+    return chatGptConnectorWrongWorkspaceError(appName, registry.tunnelName ?? "codex-web");
+  }
+  return undefined;
+}
+
+/**
+ * ChatGPT is signed in to a workspace this tunnel is not shared with. Two accounts signed in at
+ * once is normal (ChatGPT Web switches between them; upstream feature request #563), and on
+ * 19.09.2026 the connector and the tunnel belonged to one of them while every turn went to the
+ * other and nothing said so.
+ */
+function chatGptConnectorWrongWorkspaceError(appName: string, tunnelName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `ChatGPT is signed in to a workspace that tunnel ${JSON.stringify(tunnelName)} is not shared with,`
+    + ` so connector ${JSON.stringify(appName)} cannot exist there; switch ChatGPT back to the workspace`
+    + ` this computer's tunnel belongs to, or share that tunnel with the workspace in use at`
+    + ` ${OPENAI_TUNNELS_SETTINGS_URL}`,
+    "wrong_workspace",
   );
 }
 
@@ -4138,6 +4210,18 @@ export class ChatGptBrowserWorker {
         await capture("connector-tunnel-unavailable");
         throw chatGptConnectorTunnelUnavailableError(appName);
       }
+      // Before spending minutes on ChatGPT's catalog, use what the launcher already asked OpenAI:
+      // does the tunnel this connector must point at still exist, and does it reach a workspace at
+      // all? A tunnel that reaches none is ChatGPT's "No tunnels yet", and no wait can fix it.
+      console.info(
+        `[chatgpt-web] browser turn ${turn.traceId} connector tunnel registry=${status?.registry?.status ?? "none"}`
+        + ` sharing=${status?.registry?.sharing ?? "none"}`,
+      );
+      const registryFailure = chatGptConnectorRegistryFailure(appName, status?.registry);
+      if (registryFailure) {
+        await capture(`connector-${registryFailure.code ?? "registry"}`);
+        throw registryFailure;
+      }
       ladder.contact = status?.contact.status ?? "unknown";
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} connector ladder contact=${ladder.contact} readyz=${String(status?.readyz ?? null)}`,
@@ -5615,6 +5699,10 @@ export class ChatGptBrowserWorker {
         )
       ));
       await diagnostics.capture(page, "effort-selection-complete");
+      // An effort level the account does not have cannot be selected however often a turn is
+      // retried (upstream issue #564), so the turn runs at High and says which level it lost.
+      const degraded = chatGptEffortDegradedMessage(mode);
+      if (degraded) console.info(`[chatgpt-web] browser turn ${turn.traceId} ${degraded}`);
 
       let finalPrompt = prepared.text;
       const sendContext = { traceId: turn.traceId, cancelSignal: turn.abortSignal };

@@ -20,6 +20,35 @@ export interface ChatGptWebModelMode {
   uiEffortIndex: 0 | 1 | 2 | 3 | null;
   thinkEnabled: boolean;
   localTools: boolean;
+  /**
+   * The effort Codex asked for when the account does not offer it and High was used instead.
+   * A level the account does not have cannot be selected however often a turn is retried
+   * (upstream codex-chatgpt-web issue #564: Extra High failed at every prompt attachment on a
+   * Plus account while High worked), so the turn runs at High and says so instead of failing.
+   */
+  degradedFrom?: "xhigh";
+}
+
+/** The level the account does have, when the one Codex asked for is missing. */
+function chatGptEffortDegradedToHigh(
+  modelId: string,
+  capabilities: ChatGptWebCapabilities,
+): ChatGptWebModelMode {
+  return {
+    modelId,
+    effort: "high",
+    displayLabel: "High",
+    uiEffortIndex: 2,
+    thinkEnabled: false,
+    localTools: capabilities.localToolsEnabled,
+    degradedFrom: "xhigh",
+  };
+}
+
+/** What a person is told about a degraded level: one sentence, no action needed from them. */
+export function chatGptEffortDegradedMessage(mode: ChatGptWebModelMode): string | undefined {
+  if (!mode.degradedFrom) return undefined;
+  return "This ChatGPT account does not offer Extra High; the task runs at High.";
 }
 
 export function resolveChatGptWebModelMode(
@@ -60,7 +89,7 @@ export function resolveChatGptWebModelMode(
     case "high":
       return { modelId, effort, displayLabel: "High", uiEffortIndex: 2, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
     case "xhigh":
-      if (!capabilities.extraHighAvailable) throw new Error("ChatGPT Extra High effort is not available for this account");
+      if (!capabilities.extraHighAvailable) return chatGptEffortDegradedToHigh(modelId, capabilities);
       return { modelId, effort, displayLabel: "Extra High", uiEffortIndex: 3, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
     case "max":
     case "ultra":

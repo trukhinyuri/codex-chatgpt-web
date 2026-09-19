@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  CONNECTOR_FAILURE_KINDS,
+  chatGptWorkspaceMatch,
   CONNECTOR_PAIRING_RESTART_DEFERRAL_MS,
   FIRST_CHECK_DELAY_MS,
   connectorCheckDelayMs,
@@ -261,7 +263,7 @@ test("non-urgent restarts wait only while a new connector is being paired, and a
   assert.equal(monitor.restartDeferralActive(), false);
 });
 
-function tunnelSupervisor({ mode = "full", baseUrl = "http://127.0.0.1:43210", readyz = true, health = { active_tool_calls: 0 }, contact = { status: "observed", at: "2026-09-18T08:27:03.000Z" } } = {}) {
+function tunnelSupervisor({ mode = "full", baseUrl = "http://127.0.0.1:43210", readyz = true, health = { active_tool_calls: 0 }, contact = { status: "observed", at: "2026-09-18T08:27:03.000Z" }, registry = { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceIds: [] } } = {}) {
   const calls = { recovery: [], discover: 0 };
   return {
     calls,
@@ -279,6 +281,12 @@ function tunnelSupervisor({ mode = "full", baseUrl = "http://127.0.0.1:43210", r
       calls.recovery.push(reason);
       return { requested: true };
     },
+    probeTunnelRegistry: async () => {
+      calls.registry = (calls.registry ?? 0) + 1;
+      if (registry instanceof Error) throw registry;
+      return registry;
+    },
+    workspaceIds: undefined,
   };
 }
 
@@ -307,6 +315,7 @@ test("the tunnel answers /readyz: a turn's restart request is not needed", async
     tunnelReady: true,
     readyz: true,
     contact: { status: "observed", at: "2026-09-18T08:27:03.000Z" },
+    registry: { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "unknown" },
     restart: "not-needed",
   });
   assert.deepEqual(supervisor.calls.recovery, []);
@@ -343,7 +352,7 @@ test("an unknown tunnel health URL is unknown readiness, never a reason to resta
   assert.deepEqual(supervisor.calls.recovery, []);
 
   const browserOnly = await createConnectorTunnelService({ supervisor: tunnelSupervisor({ mode: "browser-only" }) })({ restart: true });
-  assert.deepEqual(browserOnly, { tunnelReady: null, readyz: null, contact: { status: "unknown", at: null }, restart: "not-configured" });
+  assert.deepEqual(browserOnly, { tunnelReady: null, readyz: null, contact: { status: "unknown", at: null }, registry: { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" }, restart: "not-configured" });
 });
 
 test("a waiting turn's progress and tunnel observations reach the launcher checklist", async () => {
@@ -356,4 +365,80 @@ test("a waiting turn's progress and tunnel observations reach the launcher check
   assert.deepEqual(snapshot.contact, { status: "observed", at: "2026-09-18T08:27:03.000Z" });
   monitor.noteTurnEnded();
   assert.equal(monitor.snapshot().waitingTurn, null);
+});
+
+// A turn that waits on the connector has to learn, before waiting, whether OpenAI still has this
+// tunnel and whether it reaches a workspace at all: neither can be healed by waiting (18.09.2026).
+test("a turn's tunnel status carries what OpenAI says about the tunnel", async () => {
+  const shared = tunnelSupervisor();
+  assert.deepEqual((await createConnectorTunnelService({ supervisor: shared })({})).registry,
+    { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "unknown" });
+
+  const unshared = tunnelSupervisor({ registry: { status: "ok", sharing: "not-shared", tunnelName: "codex-web", workspaceIds: [] } });
+  assert.deepEqual((await createConnectorTunnelService({ supervisor: unshared })({})).registry,
+    { status: "ok", sharing: "not-shared", tunnelName: "codex-web", workspaceMatch: "unknown" });
+
+  // A registry probe that throws never fails the status; it only proves nothing.
+  const broken = tunnelSupervisor({ registry: new Error("no network") });
+  assert.deepEqual((await createConnectorTunnelService({ supervisor: broken })({})).registry,
+    { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" });
+
+  const browserOnly = tunnelSupervisor({ mode: "browser-only" });
+  const answer = await createConnectorTunnelService({ supervisor: browserOnly })({});
+  assert.deepEqual(answer.registry, { status: "unproven", sharing: "unknown", tunnelName: null, workspaceMatch: "unknown" });
+  assert.equal(answer.restart, "not-configured");
+  assert.equal(browserOnly.calls.registry, undefined, "a harness without a tunnel never asks OpenAI");
+});
+
+test("a turn that cannot reach the tunnel still names the two kinds only the registry can prove", () => {
+  assert.equal(CONNECTOR_FAILURE_KINDS.includes("tunnel_missing"), true);
+  assert.equal(CONNECTOR_FAILURE_KINDS.includes("tunnel_not_shared"), true);
+  assert.equal(connectorFailureKind("connector_not_found:tunnel_not_shared"), "tunnel_not_shared");
+  assert.equal(isConnectorFailureCode("connector_not_found:tunnel_missing"), true);
+});
+
+// 19.09.2026: two ChatGPT accounts were signed in to the embedded browser at once. The connector
+// and the tunnel belonged to the account that was not active, and every turn kept going to the
+// active one, where no connector exists. ChatGPT Web supports switching accounts (upstream #563),
+// so the product has to compare the workspace in use with the tunnel's own workspaces.
+test("the workspace in use is compared with the tunnel's, and a mismatch is claimed only when both are known", () => {
+  const mine = "45285260-1111-4222-8333-444455556666";
+  const other = "99999999-1111-4222-8333-444455556666";
+  const shared = { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceIds: [mine] };
+  assert.equal(chatGptWorkspaceMatch(shared, mine), "match");
+  assert.equal(chatGptWorkspaceMatch(shared, other), "mismatch");
+  // Nothing is claimed without both sides: an unreadable selector, a tunnel with no workspaces, or
+  // a registry answer that proved nothing.
+  assert.equal(chatGptWorkspaceMatch(shared, null), "unknown");
+  assert.equal(chatGptWorkspaceMatch(shared, ""), "unknown");
+  assert.equal(chatGptWorkspaceMatch({ ...shared, workspaceIds: [] }, mine), "unknown");
+  assert.equal(chatGptWorkspaceMatch({ status: "unproven", workspaceIds: [mine] }, other), "unknown");
+  assert.equal(chatGptWorkspaceMatch(null, mine), "unknown");
+});
+
+test("a turn's tunnel status carries the workspace verdict and never a workspace id", async () => {
+  const mine = "45285260-1111-4222-8333-444455556666";
+  const supervisor = tunnelSupervisor({
+    registry: { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceIds: [mine] },
+  });
+  const matched = await createConnectorTunnelService({ supervisor, activeWorkspaceId: async () => mine })({});
+  assert.deepEqual(matched.registry, { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceMatch: "match" });
+
+  const warnings = [];
+  const mismatched = await createConnectorTunnelService({
+    supervisor,
+    logger: { info() {}, warn: (event) => warnings.push(event) },
+    activeWorkspaceId: async () => "99999999-1111-4222-8333-444455556666",
+  })({});
+  assert.equal(mismatched.registry.workspaceMatch, "mismatch");
+  assert.deepEqual(warnings, ["connector.chatgpt_workspace_mismatch"]);
+  assert.equal(JSON.stringify(mismatched).includes(mine), false, "workspace ids stay in the launcher");
+
+  // A reader that throws, or no reader at all, proves nothing instead of failing the status.
+  const broken = await createConnectorTunnelService({
+    supervisor,
+    activeWorkspaceId: async () => { throw new Error("no browser"); },
+  })({});
+  assert.equal(broken.registry.workspaceMatch, "unknown");
+  assert.equal((await createConnectorTunnelService({ supervisor })({})).registry.workspaceMatch, "unknown");
 });

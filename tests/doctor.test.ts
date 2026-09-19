@@ -10,10 +10,14 @@ import {
   modelCatalogDoctorCheck,
   readCatalogRequestCount,
   readCodexCatalogRouting,
+  readConnectorReadinessRecord,
   readTunnelContactRecord,
   tunnelContactStatus,
   tunnelFingerprint,
+  tunnelRegistryDoctorCheck,
+  tunnelWorkspaceDoctorCheck,
 } from "../src/doctor";
+import { tunnelWorkspaceSharing, type TunnelRegistryResult } from "../src/tunnel-registry";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
@@ -319,5 +323,212 @@ describe("connector evidence from the tunnel's own counters", () => {
       expect("at" in doctor ? doctor.at : null).toBe(expected.at);
     }
     expect(createHash("sha256").update(config.tunnel.tunnelId).digest("hex")).toBe(base.tunnel);
+  });
+});
+
+// The 18.09.2026 incident: after a ChatGPT password change the connector "Codex Native2" was gone
+// from the account and the tunnel had lost its workspace, yet every local check stayed green and
+// `doctor` could only say "Local checks cannot prove ...". These checks ask OpenAI and the
+// launcher's own connector reading instead, and every failure names exactly one action.
+describe("live proof about the tunnel and the connector", () => {
+  const config = {
+    ...defaultConfig("full"),
+    appName: "Codex Native2",
+    tunnel: {
+      binaryPath: "/bin/tunnel-client",
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: "/secrets/runtime.key",
+      profileDir: "/profiles",
+      profileName: "codex-chatgpt-web",
+      alias: "codex-chatgpt-web",
+    },
+  };
+  const shared: TunnelRegistryResult = {
+    status: "ok",
+    record: { id: config.tunnel.tunnelId, name: "codex-web", organizationIds: ["org-a"], workspaceIds: ["ws-1"] },
+  };
+  const unshared: TunnelRegistryResult = {
+    status: "ok",
+    record: { id: config.tunnel.tunnelId, name: "codex-web", organizationIds: ["org-a"], workspaceIds: [] },
+  };
+
+  test("the registry check answers exists / deleted / key refused / not proven", () => {
+    expect(tunnelRegistryDoctorCheck(shared)).toMatchObject({
+      id: "tunnel-registry",
+      status: "ok",
+      message: 'Tunnel "codex-web" exists in OpenAI and this computer\'s runtime key opens it',
+    });
+    const missing = tunnelRegistryDoctorCheck({ status: "missing" });
+    expect(missing).toMatchObject({ id: "tunnel-registry", status: "error" });
+    expect(missing.detail).toContain("platform.openai.com/settings/organization/tunnels");
+    const refused = tunnelRegistryDoctorCheck({ status: "unauthorized", httpStatus: 401 });
+    expect(refused).toMatchObject({ status: "error" });
+    expect(refused.detail).toContain("Connect harness");
+    expect(tunnelRegistryDoctorCheck({ status: "unproven", detail: "no network" })).toMatchObject({
+      status: "warning",
+      unprovenLocally: true,
+      detail: "no network",
+    });
+  });
+
+  test("a tunnel shared with no workspace is an error with the one action that fixes it", () => {
+    const check = tunnelWorkspaceDoctorCheck(config, unshared, { status: "unknown" });
+    expect(check).toMatchObject({ id: "tunnel-workspace", status: "error" });
+    expect(check?.message).toContain("shared with no workspace");
+    expect(check?.detail).toBe('Share tunnel "codex-web" with this ChatGPT workspace at https://platform.openai.com/settings/organization/tunnels.');
+  });
+
+  test("ChatGPT reaching the tunnel proves the sharing this computer cannot read", () => {
+    expect(tunnelWorkspaceDoctorCheck(config, shared, { status: "observed", at: "2026-09-18T08:27:03.000Z" }))
+      .toMatchObject({ id: "tunnel-workspace", status: "ok" });
+    const unproven = tunnelWorkspaceDoctorCheck(config, shared, { status: "not-observed", at: null });
+    expect(unproven).toMatchObject({ status: "warning", unprovenLocally: true });
+    expect(unproven?.detail).toContain("No tunnels yet");
+    // Nothing is claimed while the registry itself is unproven; that check reports it alone.
+    expect(tunnelWorkspaceDoctorCheck(config, { status: "unproven", detail: "x" }, { status: "unknown" })).toBeUndefined();
+    expect(tunnelWorkspaceDoctorCheck(config, { status: "missing" }, { status: "unknown" })).toBeUndefined();
+  });
+
+  test("the launcher's connector reading decides the connector check, with one action on failure", () => {
+    const listed = connectorDoctorCheck(config, undefined, Date.now(), {
+      version: 1,
+      tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+      connectorListed: true,
+      lastCheckedAt: "2026-09-18T08:45:00.000Z",
+      verifiedAt: "2026-09-18T08:45:00.000Z",
+      lastFailureKind: null,
+    }, shared);
+    expect(listed).toMatchObject({ id: "connector", status: "ok", message: 'ChatGPT lists connector "Codex Native2"' });
+    expect(listed.unprovenLocally).toBeUndefined();
+
+    const pending = {
+      version: 1 as const,
+      tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+      connectorListed: false,
+      lastCheckedAt: "2026-09-18T08:45:00.000Z",
+      verifiedAt: null,
+      lastFailureKind: "not_listed",
+    };
+    const create = connectorDoctorCheck(config, undefined, Date.now(), pending, shared);
+    expect(create).toMatchObject({
+      id: "connector",
+      status: "error",
+      message: 'ChatGPT does not list connector "Codex Native2" (checked at 2026-09-18T08:45:00.000Z)',
+    });
+    expect(create.detail).toBe('Create connector "Codex Native2" in ChatGPT (Developer Mode on, Tunnel "codex-web", Authentication: None, Allow all actions).');
+
+    // The same missing connector, but the tunnel reaches no workspace: sharing it is the one action.
+    expect(connectorDoctorCheck(config, undefined, Date.now(), pending, unshared).detail)
+      .toBe('Share tunnel "codex-web" with this ChatGPT workspace at https://platform.openai.com/settings/organization/tunnels.');
+    expect(connectorDoctorCheck(config, undefined, Date.now(), pending, { status: "missing" }).detail)
+      .toBe("Create a tunnel at https://platform.openai.com/settings/organization/tunnels and press Connect harness in Codex Superpower.");
+  });
+
+  test("without a connector reading the check falls back to the tunnel's counters, as before", () => {
+    const check = connectorDoctorCheck(config, undefined, Date.now(), undefined, shared);
+    expect(check).toMatchObject({ status: "warning", unprovenLocally: true });
+    expect(check.message).toBe('Local checks cannot prove that ChatGPT connector "Codex Native2" is attached to this tunnel');
+  });
+
+  test("the connector reading is accepted only for the configured tunnel and only when it is well formed", () => {
+    const { root } = fixture();
+    const path = join(root, "connector-readiness.json");
+    const record = {
+      version: 1 as const,
+      tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+      connectorListed: false,
+      lastCheckedAt: "2026-09-18T08:45:00.000Z",
+      verifiedAt: null,
+      lastFailureKind: "not_listed",
+    };
+    writeFileSync(path, JSON.stringify(record));
+    expect(readConnectorReadinessRecord(config, path)).toEqual(record);
+    writeFileSync(path, JSON.stringify({ ...record, connectorListed: "maybe" }));
+    expect(readConnectorReadinessRecord(config, path)).toBeUndefined();
+    writeFileSync(path, JSON.stringify({ ...record, tunnel: tunnelFingerprint("tunnel_ffffffffffffffffffffffffffffffff") }));
+    expect(readConnectorReadinessRecord(config, path)).toBeUndefined();
+    writeFileSync(path, "not json");
+    expect(readConnectorReadinessRecord(config, path)).toBeUndefined();
+    expect(readConnectorReadinessRecord(defaultConfig("browser-only"), path)).toBeUndefined();
+  });
+
+  test("the launcher classifies a tunnel's sharing exactly as the doctor does", () => {
+    const load = createRequire(import.meta.url);
+    const { tunnelRegistrySharing } = load("../launcher/electron/runtime-supervisor.cjs");
+    for (const body of [
+      { organization_ids: ["org-a"], workspace_ids: ["ws-1"] },
+      { organization_ids: ["org-a"], workspace_ids: [] },
+      { organization_ids: [], workspace_ids: [] },
+      { organization_ids: ["org-a"], workspace_ids: [3, ""] },
+      {},
+    ]) {
+      const list = (value: unknown) => (Array.isArray(value) ? value.filter(entry => typeof entry === "string" && entry) : []);
+      expect(tunnelRegistrySharing(body)).toBe(tunnelWorkspaceSharing({
+        id: config.tunnel.tunnelId,
+        name: null,
+        organizationIds: list((body as Record<string, unknown>).organization_ids) as string[],
+        workspaceIds: list((body as Record<string, unknown>).workspace_ids) as string[],
+      }).status);
+    }
+  });
+});
+
+// 19.09.2026: two ChatGPT accounts were signed in to the launcher's browser, the tunnel and the
+// connector belonged to the one that was not active, and every turn went to the other. The
+// launcher reads which workspace is in use (ChatGPT Web switches between accounts, upstream #563)
+// and doctor reports it with the one action that fixes it.
+describe("the ChatGPT workspace in use against the tunnel's own", () => {
+  const config = {
+    ...defaultConfig("full"),
+    appName: "Codex Native2",
+    tunnel: {
+      binaryPath: "/bin/tunnel-client",
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: "/secrets/runtime.key",
+      profileDir: "/profiles",
+      profileName: "codex-chatgpt-web",
+      alias: "codex-chatgpt-web",
+    },
+  };
+  const shared: TunnelRegistryResult = {
+    status: "ok",
+    record: { id: config.tunnel.tunnelId, name: "codex-web", organizationIds: ["org-a"], workspaceIds: ["45285260-1111-4222-8333-444455556666"] },
+  };
+  const readiness = (workspaceMatch: "match" | "mismatch" | "unknown") => ({
+    version: 1 as const,
+    tunnel: tunnelFingerprint(config.tunnel.tunnelId),
+    connectorListed: false,
+    lastCheckedAt: "2026-09-19T08:45:00.000Z",
+    verifiedAt: null,
+    lastFailureKind: "not_listed",
+    workspaceMatch,
+  });
+
+  test("a workspace the tunnel is not shared with is an error with one action", () => {
+    const check = tunnelWorkspaceDoctorCheck(config, shared, { status: "unknown" }, readiness("mismatch"));
+    expect(check).toMatchObject({ id: "tunnel-workspace", status: "error" });
+    expect(check?.message).toBe('ChatGPT is signed in to a workspace that tunnel "codex-web" is not shared with');
+    expect(check?.detail).toContain("Switch ChatGPT back to the workspace");
+    expect(check?.detail).toContain("https://platform.openai.com/settings/organization/tunnels");
+  });
+
+  test("a matching workspace is proof, and an unreadable one leaves the previous evidence in charge", () => {
+    expect(tunnelWorkspaceDoctorCheck(config, shared, { status: "unknown" }, readiness("match")))
+      .toMatchObject({ id: "tunnel-workspace", status: "ok" });
+    const unknown = tunnelWorkspaceDoctorCheck(config, shared, { status: "unknown" }, readiness("unknown"));
+    expect(unknown).toMatchObject({ status: "warning", unprovenLocally: true });
+    expect(tunnelWorkspaceDoctorCheck(config, shared, { status: "observed", at: "2026-09-19T08:27:03.000Z" }, readiness("unknown")))
+      .toMatchObject({ status: "ok" });
+  });
+
+  test("the record doctor reads carries the verdict the launcher writes", () => {
+    const { root } = fixture();
+    const path = join(root, "connector-readiness.json");
+    writeFileSync(path, JSON.stringify(readiness("mismatch")));
+    expect(readConnectorReadinessRecord(config, path)?.workspaceMatch).toBe("mismatch");
+    // A record from a launcher that did not write the field is still valid; it proves nothing.
+    const { workspaceMatch: _omitted, ...older } = readiness("match");
+    writeFileSync(path, JSON.stringify(older));
+    expect(readConnectorReadinessRecord(config, path)?.workspaceMatch).toBeUndefined();
   });
 });

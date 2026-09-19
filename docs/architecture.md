@@ -244,3 +244,33 @@ launcher error.
 - Do not retry or switch modes to evade product usage limits.
 
 See the complete [security model](security-model.md).
+
+## Live proof about the tunnel, the workspace and the connector
+
+Everything this computer can see about the MCP tunnel — the pinned binary, the runtime key file, the
+running process, its `/healthz` and `/readyz` — stays healthy after the tunnel is deleted, its key is
+revoked, or it is unshared in the OpenAI account. On 18.09.2026 a ChatGPT password change left exactly
+that state: the connector "Codex Native2" was gone, ChatGPT's New Plugin → Tunnel said "No tunnels
+yet", and every check could only report that local evidence proves nothing while turns failed with
+"Something went wrong". On 19.09.2026 the same harness had two ChatGPT accounts signed in at once and
+sent every turn to the active one, where the connector does not exist.
+
+Three sources answer that, and each is read where it is available:
+
+| Question | Source | Where |
+| --- | --- | --- |
+| Does the tunnel still exist, and does this computer's runtime key still open it? | `GET https://api.openai.com/v1/tunnels/{id}` with the runtime key, read from its file for the request and never stored | `src/tunnel-registry.ts` for `doctor`; `RuntimeSupervisor.probeTunnelRegistry` for the launcher, cached for a minute |
+| Does the tunnel reach any workspace, and the one ChatGPT is signed in to? | the registry record's `workspace_ids` against ChatGPT's own workspace selector cookie | `launcher/electron/browser-host.cjs` reads the cookie; `chatGptWorkspaceMatch` compares |
+| Does ChatGPT list the connector? | the launcher's background connector monitor, which types `@codex` into its own surface and sends nothing | `launcher/electron/connector-readiness.cjs`; the verdict is written to `<core home>/runtime/connector-readiness.json` for `doctor` |
+
+Two rules hold everywhere here. Only a **proven** absence acts: no network, an unreadable key, an
+unexpected answer, a workspace selector that is missing or not shaped like a workspace id — all leave
+the previous behaviour untouched and report "not proven", never "no". And nothing that identifies the
+account leaves the launcher: the tunnel's workspace ids are compared in process, records identify
+their tunnel by a SHA-256 fingerprint, and what reaches a turn is a verdict plus the tunnel's name
+(R7.1, R7.2).
+
+A turn in a tool-capable mode consults all three before it waits for ChatGPT's connector menu, and a
+proven absence ends it at once with `connector_not_found:tunnel_missing`, `:tunnel_not_shared` or
+`:wrong_workspace` — non-retryable, with one action — instead of spending about four minutes on a
+connector that cannot appear.

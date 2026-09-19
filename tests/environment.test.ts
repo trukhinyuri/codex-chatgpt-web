@@ -830,6 +830,122 @@ describe("trusted Codex task environment continuity", () => {
     }
   });
 
+  // Ported from upstream codex-chatgpt-web PR #568. Codex appends an <environment_context> delta to
+  // the END of the input when the calendar date or timezone changes while a turn is already
+  // running, after that turn's tool rounds, and the delta omits <cwd> and <shell>. Compaction can
+  // leave the same shape behind. A delta that names no filesystem path cannot move, widen or lower
+  // authority, so the thread's own trusted authority answers it instead of failing the turn.
+  function midnightDeltaWire(turnId: string, envelopeXml: string): CodexParsedRequest {
+    const request = currentWire();
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          thread_id: "thread_current",
+          turn_id: turnId,
+          sandbox: "none",
+          workspaces: { [root]: { has_changes: true } },
+        }),
+      },
+      input: [
+        {
+          type: "message",
+          id: "msg_context",
+          role: "user",
+          content: [{ type: "input_text", text: environmentXml }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+        },
+        {
+          type: "message",
+          id: "msg_active",
+          role: "user",
+          content: [{ type: "input_text", text: "Inspect the workspace" }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+        },
+        { type: "reasoning", id: `rs_${turnId}`, summary: [], internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        { type: "function_call", id: `fc_${turnId}`, name: "exec_command", arguments: "{}", call_id: `call_${turnId}`, internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        { type: "function_call_output", id: `fco_${turnId}`, call_id: `call_${turnId}`, output: "done", internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        {
+          type: "message",
+          id: "msg_midnight_delta",
+          role: "user",
+          content: [{ type: "input_text", text: envelopeXml }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        },
+      ],
+    };
+    return request;
+  }
+
+  function threadStore(prefix: string): ChatGptThreadEnvironmentStore {
+    const stateRoot = mkdtempSync(join(tmpdir(), prefix));
+    temporaryRoots.push(stateRoot);
+    return new ChatGptThreadEnvironmentStore(join(stateRoot, "thread-environments.json"));
+  }
+
+  test("a date-rollover delta appended mid-turn keeps the thread's trusted authority", () => {
+    const store = threadStore("codex-chatgpt-date-rollover-");
+    store.resolve(currentWire());
+    const rollover = midnightDeltaWire("turn_midnight", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`);
+    const rolloverTools: CodexTool[] = [{ name: "rollover_tool", description: "d", parameters: { type: "object" } }];
+    rollover.context.tools = rolloverTools;
+    expect(store.resolve(rollover)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: rolloverTools,
+    });
+  });
+
+  test("a path-less mid-turn delta is answered from the thread's cached authority", () => {
+    const store = threadStore("codex-chatgpt-pathless-delta-");
+    store.resolve(currentWire());
+    const pathless = midnightDeltaWire("turn_pathless", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
+  <filesystem><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`);
+    const pathlessTools: CodexTool[] = [{ name: "pathless_tool", description: "d", parameters: { type: "object" } }];
+    pathless.context.tools = pathlessTools;
+    expect(store.resolve(pathless)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: pathlessTools,
+    });
+  });
+
+  test("a path-less delta proves nothing on its own and never lowers or contradicts authority", () => {
+    const pathlessXml = `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <filesystem><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`;
+    // Without a trusted authority for this thread, the delta cannot create one.
+    expect(() => threadStore("codex-chatgpt-pathless-uncached-").resolve(midnightDeltaWire("turn_a", pathlessXml)))
+      .toThrow("missing cwd");
+
+    // A delta that declares a different sandbox than the thread holds still fails closed.
+    const store = threadStore("codex-chatgpt-pathless-sandbox-");
+    store.resolve(currentWire());
+    expect(() => store.resolve(midnightDeltaWire("turn_b", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <filesystem><permission_profile type="managed"><file_system type="restricted"><entry access="read"><special>:root</special></entry></file_system></permission_profile></filesystem>
+</environment_context>`))).toThrow("missing cwd");
+
+    // A delta that does name a path, even malformed, stays with the existing fail-closed handling.
+    for (const named of [
+      "<environment_context><cwd/></environment_context>",
+      `<environment_context><filesystem><workspace_roots><root>${resolve(root, "elsewhere")}</root></workspace_roots></filesystem></environment_context>`,
+    ]) {
+      expect(() => store.resolve(midnightDeltaWire("turn_c", named))).toThrow();
+    }
+  });
+
   test("inherits authority only through canonical Codex thread-spawn lineage", () => {
     const store = new ChatGptThreadEnvironmentStore();
     const parent = currentWire();

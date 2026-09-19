@@ -8,9 +8,11 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
 const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
+const crypto = require("node:crypto");
 const {
   MAX_RESTARTS_PER_WINDOW,
   RuntimeSupervisor,
+  TUNNEL_REGISTRY_CACHE_MS,
   childOutputLevel,
   managedTunnelConnectArgs,
   validateConfig,
@@ -2083,6 +2085,143 @@ server.listen(config.port, config.host);
   } finally {
     await supervisor.stopForSetup().catch(() => {});
     if (stale.exitCode === null) stale.kill("SIGTERM");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The 18.09.2026 incident: after a ChatGPT password change the connector was gone and the tunnel
+// had lost its workspace, while every local check stayed green. Only OpenAI's own record of the
+// tunnel can name that, and only its own connector reading can tell `doctor` what ChatGPT lists.
+function registryFixture(root, { tunnelId = "tunnel_0123456789abcdef0123456789abcdef", logs = [] } = {}) {
+  const keyFile = path.join(root, "runtime.key");
+  fs.writeFileSync(keyFile, "runtime-key-value\n", { mode: 0o600 });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn: (event, detail) => logs.push([event, detail]), error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = { mode: "full", tunnel: { tunnelId, runtimeKeyFile: keyFile, binaryPath: path.join(root, "tunnel-client") } };
+  return { supervisor, config, tunnelId };
+}
+
+test("the tunnel registry answers exists / deleted / key refused / not proven, and caches the answer", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-registry-"));
+  try {
+    const { supervisor, config, tunnelId } = registryFixture(root);
+    const seen = [];
+    const respond = (status, body) => async (url, init) => {
+      seen.push({ url: String(url), authorization: new Headers(init.headers).get("authorization") });
+      return new Response(body === undefined ? "" : JSON.stringify(body), { status });
+    };
+
+    assert.deepEqual(
+      await supervisor.probeTunnelRegistry(config, {
+        now: 1_000,
+        fetchImpl: respond(200, { id: tunnelId, name: "codex-web", organization_ids: ["org-a"], workspace_ids: ["ws-1"] }),
+      }),
+      { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceIds: ["ws-1"] },
+    );
+    assert.deepEqual(seen, [{
+      url: `https://api.openai.com/v1/tunnels/${tunnelId}`,
+      authorization: "Bearer runtime-key-value",
+    }]);
+
+    // Within the cache window the answer is reused instead of asking OpenAI again.
+    assert.deepEqual(
+      await supervisor.probeTunnelRegistry(config, { now: 1_000 + 30_000, fetchImpl: async () => { throw new Error("must not ask again"); } }),
+      { status: "ok", sharing: "shared", tunnelName: "codex-web", workspaceIds: ["ws-1"] },
+    );
+
+    const later = 1_000 + TUNNEL_REGISTRY_CACHE_MS + 1;
+    assert.deepEqual(
+      await supervisor.probeTunnelRegistry(config, {
+        now: later,
+        fetchImpl: respond(200, { id: tunnelId, name: "codex-web", organization_ids: ["org-a"], workspace_ids: [] }),
+      }),
+      { status: "ok", sharing: "not-shared", tunnelName: "codex-web", workspaceIds: [] },
+    );
+    assert.deepEqual(
+      await supervisor.probeTunnelRegistry(config, { now: later * 2, fetchImpl: respond(404, {}) }),
+      { status: "missing", sharing: "unknown", tunnelName: null, workspaceIds: [] },
+    );
+    for (const status of [401, 403]) {
+      assert.deepEqual(
+        await supervisor.probeTunnelRegistry(config, { now: later * 3 + status, fetchImpl: respond(status, {}) }),
+        { status: "unauthorized", sharing: "unknown", tunnelName: null, workspaceIds: [] },
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a tunnel registry that cannot be reached proves nothing and never logs the runtime key", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-registry-unproven-"));
+  try {
+    const logs = [];
+    const { supervisor, config, tunnelId } = registryFixture(root, { logs });
+    const unproven = { status: "unproven", sharing: "unknown", tunnelName: null, workspaceIds: [] };
+    const cases = [
+      async () => { throw new Error("connect ECONNREFUSED with Bearer runtime-key-value"); },
+      async () => new Response("", { status: 500 }),
+      async () => new Response("not json", { status: 200 }),
+      async () => new Response(JSON.stringify({ id: "tunnel_ffffffffffffffffffffffffffffffff" }), { status: 200 }),
+    ];
+    let now = 0;
+    for (const fetchImpl of cases) {
+      now += TUNNEL_REGISTRY_CACHE_MS + 1;
+      assert.deepEqual(await supervisor.probeTunnelRegistry(config, { now, fetchImpl }), unproven);
+    }
+    // No tunnel, no key file and an empty key file are all "not proven", never "missing".
+    assert.deepEqual(await supervisor.probeTunnelRegistry({ mode: "browser-only" }, { now: ++now }), unproven);
+    fs.writeFileSync(path.join(root, "runtime.key"), "   ");
+    assert.deepEqual(await supervisor.probeTunnelRegistry(config, { now: now + 10 * TUNNEL_REGISTRY_CACHE_MS }), unproven);
+    fs.rmSync(path.join(root, "runtime.key"));
+    assert.deepEqual(await supervisor.probeTunnelRegistry(config, { now: now + 20 * TUNNEL_REGISTRY_CACHE_MS }), unproven);
+    assert.equal(JSON.stringify(logs).includes("runtime-key-value"), false);
+    assert.equal(JSON.stringify(logs).includes(tunnelId), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("what the connector monitor saw is written where doctor reads it, for the configured tunnel only", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-connector-readiness-"));
+  try {
+    const { supervisor, config, tunnelId } = registryFixture(root);
+    const written = supervisor.writeConnectorReadiness(config, {
+      connectorListed: false,
+      lastCheckedAt: "2026-09-18T08:45:00.000Z",
+      verifiedAt: null,
+      lastFailureKind: "not_listed",
+      workspaceMatch: "mismatch",
+      status: "waiting",
+    });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(root, "runtime", "connector-readiness.json"), "utf8"));
+    assert.deepEqual(onDisk, written);
+    assert.equal(onDisk.version, 1);
+    assert.equal(onDisk.connectorListed, false);
+    assert.equal(onDisk.lastFailureKind, "not_listed");
+    assert.equal(onDisk.workspaceMatch, "mismatch");
+    // The record identifies its tunnel by fingerprint, never by the tunnel id itself.
+    assert.equal(onDisk.tunnel, crypto.createHash("sha256").update(tunnelId).digest("hex"));
+    assert.equal(JSON.stringify(onDisk).includes(tunnelId), false);
+
+    // Values doctor would not accept are normalized, not passed on.
+    const odd = supervisor.writeConnectorReadiness(config, {
+      connectorListed: "maybe",
+      lastCheckedAt: "never",
+      verifiedAt: 7,
+      lastFailureKind: { kind: "x" },
+    });
+    assert.deepEqual(
+      { ...odd, tunnel: undefined },
+      { version: 1, tunnel: undefined, connectorListed: null, lastCheckedAt: null, verifiedAt: null, lastFailureKind: null, workspaceMatch: "unknown" },
+    );
+    assert.equal(supervisor.writeConnectorReadiness({ mode: "browser-only" }, { connectorListed: true }), null);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

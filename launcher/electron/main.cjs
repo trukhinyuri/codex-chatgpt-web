@@ -50,6 +50,7 @@ const {
   createConnectorReadinessMonitor,
   createConnectorTunnelService,
   isConnectorFailureCode,
+  chatGptWorkspaceMatch,
 } = require("./connector-readiness.cjs");
 // Packaged builds of this fork carry the commit they were built from (launcher/scripts/package.cjs).
 const LAUNCHER_MANIFEST = require("../package.json");
@@ -284,12 +285,37 @@ async function connectorCheckIdle() {
 
 async function connectorObservation() {
   const config = runtimeSupervisor.readConfig();
-  if (!config || config.mode !== "full") return { tunnelReady: null, contact: { status: "unknown", at: null } };
+  if (!config || config.mode !== "full") {
+    return { tunnelReady: null, contact: { status: "unknown", at: null }, workspaceMatch: "unknown" };
+  }
   const local = await runtimeSupervisor.readLocalTunnelHealth();
+  // Is the ChatGPT workspace in use one this tunnel is shared with? A mismatch means the connector
+  // cannot exist in the account the turns go to, however long anyone waits.
+  let workspaceMatch = "unknown";
+  try {
+    workspaceMatch = chatGptWorkspaceMatch(
+      await runtimeSupervisor.probeTunnelRegistry(config),
+      await browserHost?.activeChatGptWorkspaceId?.(),
+    );
+  } catch {
+    workspaceMatch = "unknown";
+  }
   return {
     tunnelReady: local.statusKnown ? local.ready === true : null,
     contact: runtimeSupervisor.tunnelContact(config),
+    workspaceMatch,
   };
+}
+
+/** Let `doctor` in its own process report the same connector evidence the launcher just saw. */
+function persistConnectorReadiness(snapshot) {
+  if (!runtimeSupervisor) return;
+  try {
+    const config = runtimeSupervisor.readConfig();
+    if (config) runtimeSupervisor.writeConnectorReadiness(config, snapshot);
+  } catch {
+    // A configuration that cannot be read is already reported elsewhere; never fail a check for it.
+  }
 }
 
 function createConnectorMonitor({ logger, stateStore }) {
@@ -301,6 +327,7 @@ function createConnectorMonitor({ logger, stateStore }) {
     verify: () => browserHost.verifyConnectorInBackground(runtimeHost.mcpConnectorName()),
     observe: connectorObservation,
     onVerified: (snapshot) => {
+      persistConnectorReadiness(snapshot);
       const state = stateStore.update({
         mcpSetupComplete: true,
         connectorVerifiedAt: snapshot.verifiedAt,
@@ -310,6 +337,7 @@ function createConnectorMonitor({ logger, stateStore }) {
       send("launcher:state-changed", state);
     },
     onChange: (snapshot) => {
+      persistConnectorReadiness(snapshot);
       send("launcher:connector-readiness", snapshot);
       const saved = stateStore.read();
       if (snapshot.lastCheckedAt
@@ -1620,6 +1648,9 @@ async function start() {
     supervisor: runtimeSupervisor,
     monitor: connectorMonitor,
     logger,
+    // Which ChatGPT workspace the embedded browser is signed in to right now, so a turn can tell
+    // "the connector is not there yet" from "this is the wrong ChatGPT account".
+    activeWorkspaceId: () => browserHost?.activeChatGptWorkspaceId?.() ?? null,
   });
   const updaterRuntimeRoot = runtimeRootProvider();
   // This fork updates from its own GitHub main branch after the full test suite passes; it never
