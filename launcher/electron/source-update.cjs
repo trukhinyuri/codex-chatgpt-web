@@ -2,12 +2,15 @@ const fs = require("node:fs");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { classifyUpdateFailure } = require("./problem-report.cjs");
 
 // This fork ships from source: the launcher updates itself from the main branch of the fork's
 // GitHub repository and installs a new build only after the complete verification suite passes.
+// A commit also arrives through a staged rollout governed by update-rollout.json in the repository,
+// which doubles as the kill switch: the maintainer edits that one file to halt a release.
 const SOURCE_REPOSITORY = "trukhinyuri/codex-superpower";
 const SOURCE_BRANCH = "main";
 const SOURCE_CLONE_URL = `https://github.com/${SOURCE_REPOSITORY}.git`;
@@ -15,6 +18,10 @@ const SOURCE_CLONE_URL = `https://github.com/${SOURCE_REPOSITORY}.git`;
 const LEGACY_SOURCE_CLONE_URLS = ["https://github.com/trukhinyuri/codex-chatgpt-web.git"];
 const SOURCE_API_ROOT = `https://api.github.com/repos/${SOURCE_REPOSITORY}`;
 const SOURCE_COMMIT_API_URL = `${SOURCE_API_ROOT}/commits/${SOURCE_BRANCH}`;
+// The rollout policy lives in the repository root, so the maintainer halts or widens a release by
+// editing that file; installations read it on every check.
+const ROLLOUT_POLICY_FILE = "update-rollout.json";
+const SOURCE_ROLLOUT_POLICY_API_URL = `${SOURCE_API_ROOT}/contents/${ROLLOUT_POLICY_FILE}?ref=${SOURCE_BRANCH}`;
 const SOURCE_CHECK_INTERVAL_MS = 60 * 60_000;
 const SOURCE_STEP_TIMEOUT_MS = 45 * 60_000;
 // The new launcher must report a healthy start within this window, or the worker restores the previous app.
@@ -33,6 +40,17 @@ const WORKER_HANDSHAKE_TIMEOUT_MS = 15_000;
 const USER_AGENT = "codex-web-gpt-launcher-source-updater";
 const MAX_REDIRECTS = 5;
 const COMMIT = /^[0-9a-f]{40}$/;
+// The built-in rollout policy: a fresh commit reaches a tenth of the installations, half after six
+// hours, everyone after a day. Used whenever the repository's file is missing, broken or unreachable.
+const DEFAULT_ROLLOUT_POLICY = Object.freeze({
+  haltAll: false,
+  haltedCommits: Object.freeze([]),
+  stages: Object.freeze([
+    Object.freeze({ ageHours: 0, percent: 10 }),
+    Object.freeze({ ageHours: 6, percent: 50 }),
+    Object.freeze({ ageHours: 24, percent: 100 }),
+  ]),
+});
 
 /** The managed checkout shared with scripts/install-fork-macos.sh. No spaces: build tools stay simple. */
 function defaultSourceRoot(home = os.homedir()) {
@@ -78,6 +96,57 @@ function classifyComparison(payload) {
 }
 
 /**
+ * A rollout policy exactly as this updater understands it, or null when the payload is not one. The
+ * whole file is rejected — not repaired — when any part has the wrong shape, so a policy the
+ * maintainer broke never widens the rollout by accident: the built-in default applies instead.
+ */
+function normalizeRolloutPolicy(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const { haltAll, haltedCommits, stages } = payload;
+  if (haltAll !== undefined && typeof haltAll !== "boolean") return null;
+  if (haltedCommits !== undefined
+    && !(Array.isArray(haltedCommits) && haltedCommits.every(commit => typeof commit === "string"))) return null;
+  if (!Array.isArray(stages) || stages.length === 0) return null;
+  const normalized = [];
+  for (const stage of stages) {
+    if (!stage || typeof stage !== "object") return null;
+    if (!Number.isFinite(stage.ageHours) || stage.ageHours < 0) return null;
+    if (!Number.isFinite(stage.percent) || stage.percent < 0 || stage.percent > 100) return null;
+    normalized.push({ ageHours: stage.ageHours, percent: stage.percent });
+  }
+  normalized.sort((left, right) => left.ageHours - right.ageHours);
+  return { haltAll: haltAll === true, haltedCommits: haltedCommits ?? [], stages: normalized };
+}
+
+/** The share of installations that may take a commit of this age: the widest stage old enough for it. */
+function rolloutShare({ stages, ageHours }) {
+  let percent = 0;
+  for (const stage of stages) {
+    if (stage.ageHours <= ageHours) percent = Math.max(percent, stage.percent);
+  }
+  return percent;
+}
+
+/**
+ * Why the staged rollout holds a commit back from this installation, or null. The kill switch comes
+ * first: a halt stops every installation whatever its bucket. A commit whose age is unknown (a
+ * damaged commits/main payload) is never held back by staging — the next check gets a good payload.
+ */
+function rolloutUpdateBlocker({ policy, commit, ageHours, bucket }) {
+  if (policy.haltAll === true || policy.haltedCommits.includes(commit)) return "rollout-halted";
+  if (!Number.isFinite(ageHours)) return null;
+  return bucket < rolloutShare({ stages: policy.stages, ageHours }) ? null : "rollout-staging";
+}
+
+/** Decode update-rollout.json from a GitHub contents-API payload; throws when it is not a base64 file. */
+function parseRolloutPolicyFile(payload) {
+  if (!payload || typeof payload !== "object" || payload.encoding !== "base64" || typeof payload.content !== "string") {
+    throw new Error(`${ROLLOUT_POLICY_FILE} did not come back as a readable base64 file`);
+  }
+  return JSON.parse(Buffer.from(payload.content, "base64").toString("utf8"));
+}
+
+/**
  * Why an available commit must not install by itself, or null. Automatic updates only fast-forward a
  * clean build of main to a commit that has not failed here before and whose CI (if any) passed.
  */
@@ -93,7 +162,11 @@ function emptyUpdateState() {
   return { version: 1, failedCommits: {}, lastResult: null };
 }
 
-/** Shared with the update worker and the rollback script: which commits failed here, and the last outcome. */
+/**
+ * Shared with the update worker and the rollback script: which commits failed here, and the last
+ * outcome. Fields this updater adds later (bucket, lastRolloutPolicy) pass through their writes
+ * untouched, so every updater generation keeps one state file.
+ */
 function readUpdateState(filePath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -102,6 +175,31 @@ function readUpdateState(filePath) {
     }
   } catch {}
   return emptyUpdateState();
+}
+
+/**
+ * This installation's stable share of the staged rollout: a number 0-99 chosen once, kept in the
+ * update state, and compared against the policy's percent. A local number, not an identity — it
+ * says when this machine's turn is, and nothing else (R7).
+ */
+function ensureRolloutBucket(filePath) {
+  const state = readUpdateState(filePath);
+  if (Number.isInteger(state.bucket) && state.bucket >= 0 && state.bucket < 100) return state.bucket;
+  const bucket = crypto.randomInt(0, 100);
+  writePrivateFileAtomic(filePath, `${JSON.stringify({ ...state, bucket }, null, 2)}\n`);
+  return bucket;
+}
+
+/** Record in the update state which rollout policy a check used, so a fallback is visible later. */
+function noteRolloutPolicySource(filePath, source, reason) {
+  try {
+    const state = readUpdateState(filePath);
+    if (state.lastRolloutPolicy?.source === source && state.lastRolloutPolicy?.reason === (reason ?? null)) return;
+    writePrivateFileAtomic(filePath, `${JSON.stringify({
+      ...state,
+      lastRolloutPolicy: { source, reason: reason ?? null, at: new Date().toISOString() },
+    }, null, 2)}\n`);
+  } catch {}
 }
 
 function recordFailedCommit(filePath, commit, { stage, reason, at = new Date().toISOString() }) {
@@ -502,9 +600,13 @@ function findMacApplication(root) {
 
 function defaultDependencies() {
   return {
-    fetchLatestCommit: async () => (await requestJson(SOURCE_COMMIT_API_URL))?.sha,
+    fetchLatestCommit: async () => {
+      const payload = await requestJson(SOURCE_COMMIT_API_URL);
+      return { sha: payload?.sha, committedAt: payload?.commit?.committer?.date ?? null };
+    },
     fetchComparison: async (base, head) => requestJson(`${SOURCE_API_ROOT}/compare/${base}...${head}`),
     fetchCheckRuns: async commit => requestJson(`${SOURCE_API_ROOT}/commits/${commit}/check-runs?per_page=100`),
+    fetchRolloutPolicy: async () => parseRolloutPolicyFile(await requestJson(SOURCE_ROLLOUT_POLICY_API_URL)),
     readLoginShellPath,
     acquireLock,
     releaseLock,
@@ -663,7 +765,8 @@ function createSourceUpdateController({
     checking = (async () => {
       transition({ status: "checking" });
       try {
-        const commit = await deps.fetchLatestCommit();
+        const latest = await deps.fetchLatestCommit();
+        const commit = latest?.sha;
         if (!COMMIT.test(String(commit || ""))) throw new Error(`GitHub returned an invalid ${SOURCE_BRANCH} commit`);
         if (commit === currentCommit && currentSourceState === "clean") {
           candidate = null;
@@ -681,9 +784,41 @@ function createSourceUpdateController({
         }
         const ci = await deps.fetchCheckRuns(commit).then(classifyCheckRuns, () => "unknown");
         const failedBefore = Boolean(readUpdateState(statePath).failedCommits[commit]);
-        const blocked = automaticUpdateBlocker({ sourceState: currentSourceState, relation, ci, failedBefore });
+        let blocked = automaticUpdateBlocker({ sourceState: currentSourceState, relation, ci, failedBefore });
+        let rollout = null;
+        if (blocked === null) {
+          // The safety checks passed; the staged rollout decides whether it is this installation's
+          // turn yet. A missing, broken or unreachable policy file falls back to the built-in
+          // default (R4.3: a transient failure never blocks updates by itself).
+          let bucket;
+          try {
+            bucket = ensureRolloutBucket(statePath);
+          } catch {
+            bucket = crypto.randomInt(0, 100);
+          }
+          const committedAtMs = Date.parse(String(latest?.committedAt || ""));
+          const ageHours = Number.isFinite(committedAtMs)
+            ? Math.max(0, (deps.now() - committedAtMs) / 3_600_000)
+            : null;
+          const loaded = await deps.fetchRolloutPolicy().then(
+            payload => {
+              const normalized = normalizeRolloutPolicy(payload);
+              return normalized
+                ? { policy: normalized, source: "repository", reason: null }
+                : { policy: DEFAULT_ROLLOUT_POLICY, source: "default", reason: `${ROLLOUT_POLICY_FILE} is not a valid rollout policy` };
+            },
+            error => ({ policy: DEFAULT_ROLLOUT_POLICY, source: "default", reason: errorMessage(error) }),
+          );
+          noteRolloutPolicySource(statePath, loaded.source, loaded.reason);
+          blocked = rolloutUpdateBlocker({ policy: loaded.policy, commit, ageHours, bucket });
+          rollout = { bucket, ageHours, policy: loaded.source, ...(loaded.reason ? { reason: loaded.reason } : {}) };
+        }
         candidate = { commit, version: sourceUpdateVersion(currentVersion, commit), automatic: blocked === null, blocked };
-        logger?.info("launcher.update_available", { currentCommit, commit, relation, ci, blocked, channel: "source" });
+        logger?.info("launcher.update_available", {
+          currentCommit, commit, relation, ci, blocked,
+          ...(rollout ? { rollout } : {}),
+          channel: "source",
+        });
         return transition({
           status: "available",
           version: candidate.version,
@@ -912,9 +1047,11 @@ function createSourceUpdateController({
 
 module.exports = {
   COMMIT,
+  DEFAULT_ROLLOUT_POLICY,
   LEGACY_SOURCE_CLONE_URLS,
   ROLLBACK_DIRECTORY,
   ROLLBACK_KEEP,
+  ROLLOUT_POLICY_FILE,
   SOURCE_API_ROOT,
   SOURCE_BRANCH,
   SOURCE_CHECK_INTERVAL_MS,
@@ -922,6 +1059,7 @@ module.exports = {
   SOURCE_COMMIT_API_URL,
   SOURCE_HEALTH_TIMEOUT_MS,
   SOURCE_REPOSITORY,
+  SOURCE_ROLLOUT_POLICY_API_URL,
   STARTUP_HEALTH_FILE,
   UPDATE_STATE_FILE,
   acquireLock,
@@ -930,7 +1068,10 @@ module.exports = {
   classifyCheckRuns,
   classifyComparison,
   createSourceUpdateController,
+  ensureRolloutBucket,
   isTransientBuildFailure,
+  normalizeRolloutPolicy,
+  parseRolloutPolicyFile,
   prepareBuildHome,
   sourceBuildEnvironment,
   sourceBuildHome,
@@ -942,6 +1083,8 @@ module.exports = {
   readUpdateState,
   recordFailedCommit,
   releaseLock,
+  rolloutShare,
+  rolloutUpdateBlocker,
   sourceBuildPath,
   sourceBuildSteps,
   sourceUpdateVersion,

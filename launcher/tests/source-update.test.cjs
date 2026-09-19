@@ -13,10 +13,13 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const {
+  DEFAULT_ROLLOUT_POLICY,
+  ROLLOUT_POLICY_FILE,
   LEGACY_SOURCE_CLONE_URLS,
   SOURCE_BRANCH,
   SOURCE_CLONE_URL,
   SOURCE_COMMIT_API_URL,
+  SOURCE_ROLLOUT_POLICY_API_URL,
   acquireLock,
   applicationBundle,
   automaticUpdateBlocker,
@@ -24,7 +27,10 @@ const {
   classifyComparison,
   createSourceUpdateController,
   defaultSourceRoot,
+  ensureRolloutBucket,
   lowPriorityCommand,
+  normalizeRolloutPolicy,
+  parseRolloutPolicyFile,
   prepareCheckout,
   probeBundleWritable,
   updateWorkerCommand,
@@ -35,6 +41,8 @@ const {
   readUpdateState,
   recordFailedCommit,
   releaseLock,
+  rolloutShare,
+  rolloutUpdateBlocker,
   sourceBuildPath,
   sourceBuildSteps,
   sourceUpdateVersion,
@@ -76,9 +84,12 @@ function controller(overrides = {}, dependencies = {}) {
     ...overrides,
     dependencies: {
       stagingParent: logs,
-      fetchLatestCommit: async () => MAIN,
+      fetchLatestCommit: async () => ({ sha: MAIN, committedAt: null }),
       fetchComparison: async () => ({ status: "ahead" }),
       fetchCheckRuns: async () => ({ total_count: 0, check_runs: [] }),
+      // The rollout tests below provide a policy; a check that reaches the rollout gate without one
+      // must fall back to the built-in default instead of reaching the network.
+      fetchRolloutPolicy: async () => { throw new Error("offline"); },
       readLoginShellPath: async () => "/opt/homebrew/bin:/usr/bin",
       acquireLock: lockPath => { calls.push(["lock", lockPath]); return lockPath; },
       releaseLock: lockPath => calls.push(["unlock", lockPath]),
@@ -167,10 +178,10 @@ test("source updates stay disabled outside a stamped packaged macOS build", asyn
 });
 
 test("a check announces main only when it differs from the installed build", async () => {
-  const current = controller({}, { fetchLatestCommit: async () => INSTALLED });
+  const current = controller({}, { fetchLatestCommit: async () => ({ sha: INSTALLED, committedAt: null }) });
   assert.deepEqual(await current.instance.checkOnce(), { status: "up-to-date" });
 
-  const dirty = controller({ currentSourceState: "dirty" }, { fetchLatestCommit: async () => INSTALLED });
+  const dirty = controller({ currentSourceState: "dirty" }, { fetchLatestCommit: async () => ({ sha: INSTALLED, committedAt: null }) });
   assert.deepEqual(await dirty.instance.checkOnce(), {
     status: "available", version: "5.0.8+1111111", automatic: false, blocked: "local-build",
   });
@@ -185,7 +196,7 @@ test("a failed check reports the error but keeps an update that was already foun
   const { instance } = controller({}, {
     fetchLatestCommit: async () => {
       if (fail) throw new Error("offline");
-      return MAIN;
+      return { sha: MAIN, committedAt: null };
     },
   });
   assert.equal((await instance.checkOnce()).status, "available");
@@ -194,7 +205,7 @@ test("a failed check reports the error but keeps an update that was already foun
 
   const fresh = controller({}, { fetchLatestCommit: async () => { throw new Error("offline"); } });
   assert.deepEqual(await fresh.instance.checkOnce(), { status: "error", message: "offline" });
-  const invalid = controller({}, { fetchLatestCommit: async () => "main" });
+  const invalid = controller({}, { fetchLatestCommit: async () => ({ sha: "main" }) });
   assert.equal((await invalid.instance.checkOnce()).status, "error");
 });
 
@@ -778,6 +789,210 @@ test("a build newer than main is never downgraded, and doubtful updates wait for
   const green = controller({}, { fetchCheckRuns: async () => ({ check_runs: [{ name: "verify (macos-15)", status: "completed", conclusion: "success" }] }) });
   await green.instance.checkOnce();
   assert.equal(green.instance.automaticCandidate().commit, MAIN);
+});
+
+// The staged rollout: one stable bucket per installation, a policy file in the repository, and a
+// kill switch the maintainer operates by editing that file. The controller helper pins now() to 0,
+// so a commit "ageHours old" is one whose committer date is that many epoch hours in the past.
+const HOUR = 3_600_000;
+const ROLLOUT_STAGES = [
+  { ageHours: 0, percent: 10 },
+  { ageHours: 6, percent: 50 },
+  { ageHours: 24, percent: 100 },
+];
+
+function seedRolloutBucket(logs, bucket) {
+  fs.writeFileSync(path.join(logs, "source-update-state.json"), `${JSON.stringify({
+    version: 1, failedCommits: {}, lastResult: null, bucket,
+  }, null, 2)}\n`);
+}
+
+/** A controller whose next check sees a commit `hours` old and the given rollout policy. */
+function rolloutController({ logs, bucket, hours = 0, policy = { haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES } } = {}) {
+  const made = controller(
+    logs ? { logsDirectory: logs, userDataDirectory: logs } : {},
+    {
+      fetchLatestCommit: async () => ({ sha: MAIN, committedAt: new Date(-hours * HOUR).toISOString() }),
+      fetchRolloutPolicy: async () => policy,
+    },
+  );
+  // The controller helper returns its own temp folder when directories were overridden.
+  if (bucket !== undefined) seedRolloutBucket(logs ?? made.logs, bucket);
+  return made;
+}
+
+test("each installation picks one rollout bucket and keeps it across restarts and failures", async () => {
+  const file = path.join(tempDir("cwg-source-bucket-"), "source-update-state.json");
+  const picks = new Set([ensureRolloutBucket(file), ensureRolloutBucket(file), ensureRolloutBucket(file)]);
+  assert.equal(picks.size, 1, "the bucket is chosen once and read back afterwards");
+  const bucket = [...picks][0];
+  assert.ok(Number.isInteger(bucket) && bucket >= 0 && bucket < 100);
+  // The updater's other state writes must not lose it.
+  recordFailedCommit(file, MAIN, { stage: "build", reason: "x" });
+  assert.equal(readUpdateState(file).bucket, bucket);
+  fs.writeFileSync(file, JSON.stringify({ version: 1, failedCommits: {}, lastResult: null, bucket: 100 }));
+  assert.notEqual(ensureRolloutBucket(file), 100, "a value outside 0-99 is replaced");
+  fs.writeFileSync(file, JSON.stringify({ version: 1, failedCommits: {}, lastResult: null, bucket: 7 }));
+  assert.equal(ensureRolloutBucket(file), 7, "a valid bucket is never re-rolled");
+
+  // A launcher restarted on the same data checks with the same bucket.
+  const logs = tempDir("cwg-source-bucket-restart-");
+  const first = rolloutController({ logs, bucket: 42, hours: 0 });
+  await first.instance.checkOnce();
+  assert.equal(readUpdateState(path.join(logs, "source-update-state.json")).bucket, 42);
+  const second = rolloutController({ logs, hours: 0 });
+  await second.instance.checkOnce();
+  assert.equal(readUpdateState(path.join(logs, "source-update-state.json")).bucket, 42);
+});
+
+test("the rollout share widens with the commit's age, and the bucket is compared against it", () => {
+  assert.equal(ROLLOUT_POLICY_FILE, "update-rollout.json");
+  assert.equal(SOURCE_ROLLOUT_POLICY_API_URL, "https://api.github.com/repos/trukhinyuri/codex-superpower/contents/update-rollout.json?ref=main");
+  // Stages arrive in any order and are used oldest first.
+  const policy = normalizeRolloutPolicy({ stages: [...ROLLOUT_STAGES].reverse() });
+  assert.deepEqual(policy, { haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES });
+  assert.deepEqual(DEFAULT_ROLLOUT_POLICY, { haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES });
+  for (const [ageHours, share] of [[0, 10], [5.99, 10], [6, 50], [23.9, 50], [24, 100], [1000, 100]]) {
+    assert.equal(rolloutShare({ stages: policy.stages, ageHours }), share, `${ageHours}h`);
+  }
+  const decided = (ageHours, bucket) => rolloutUpdateBlocker({ policy, commit: MAIN, ageHours, bucket });
+  assert.equal(decided(0, 9), null, "bucket 9 is inside the first tenth");
+  assert.equal(decided(0, 10), "rollout-staging", "bucket 10 is not");
+  assert.equal(decided(6, 49), null);
+  assert.equal(decided(6, 50), "rollout-staging");
+  assert.equal(decided(24, 99), null, "after a day every bucket installs");
+});
+
+test("a damaged rollout policy is rejected whole, so the built-in default applies instead", () => {
+  assert.equal(normalizeRolloutPolicy(null), null);
+  assert.equal(normalizeRolloutPolicy("no"), null);
+  for (const broken of [
+    {},
+    { stages: [] },
+    { stages: [{ ageHours: 0 }] },
+    { stages: [{ ageHours: 0, percent: 101 }] },
+    { stages: [{ ageHours: -1, percent: 10 }] },
+    { stages: [{ ageHours: "0", percent: 10 }] },
+    { stages: [{ ageHours: 0, percent: 10 }, null] },
+    { haltAll: "yes", stages: [{ ageHours: 0, percent: 10 }] },
+    { haltedCommits: [7], stages: [{ ageHours: 0, percent: 10 }] },
+  ]) {
+    assert.equal(normalizeRolloutPolicy(broken), null, JSON.stringify(broken));
+  }
+  // GitHub's contents API returns the file as base64; that payload decodes into a policy.
+  const encoded = Buffer.from(JSON.stringify({ haltAll: false, haltedCommits: [MAIN], stages: ROLLOUT_STAGES }), "utf8").toString("base64");
+  assert.equal(parseRolloutPolicyFile({ content: encoded, encoding: "base64" }).haltedCommits[0], MAIN);
+  assert.throws(() => parseRolloutPolicyFile({ message: "Not Found" }), /did not come back as a readable base64 file/);
+  assert.throws(() => parseRolloutPolicyFile({ content: Buffer.from("{ no", "utf8").toString("base64"), encoding: "base64" }), SyntaxError);
+});
+
+test("an installation outside the current stage waits for its turn and can still install by hand", async () => {
+  const made = rolloutController({ bucket: 10, hours: 0 });
+  assert.deepEqual(await made.instance.checkOnce(), {
+    status: "available", version: "5.0.8+2222222", automatic: false, blocked: "rollout-staging",
+  });
+  assert.equal(made.instance.automaticCandidate(), null);
+  await assert.rejects(made.instance.beginInstall({ automatic: true }), /needs a manual install/);
+  const prepared = await made.instance.beginInstall();
+  assert.equal(prepared.commit, MAIN, "a click installs it without waiting for the stage");
+  made.instance.cancelInstall(prepared);
+});
+
+test("the stage boundaries decide automatic installs exactly at their edges", async () => {
+  for (const [bucket, hours, automatic] of [[9, 0, true], [10, 0, false], [49, 6, true], [50, 6, false], [99, 23.9, false], [99, 24, true]]) {
+    const made = rolloutController({ bucket, hours });
+    assert.deepEqual(await made.instance.checkOnce(), {
+      status: "available", version: "5.0.8+2222222", automatic,
+      ...(automatic ? {} : { blocked: "rollout-staging" }),
+    }, `bucket ${bucket} at ${hours}h`);
+  }
+});
+
+test("the repository can halt one commit or every release; a click still installs", async () => {
+  for (const policy of [
+    { haltAll: true, haltedCommits: [], stages: ROLLOUT_STAGES },
+    { haltAll: false, haltedCommits: [MAIN], stages: ROLLOUT_STAGES },
+    { haltAll: false, haltedCommits: [INSTALLED], stages: ROLLOUT_STAGES },
+  ]) {
+    const halted = policy.haltAll === true || policy.haltedCommits.includes(MAIN);
+    const made = rolloutController({ bucket: 0, hours: 24, policy });
+    assert.deepEqual(await made.instance.checkOnce(), {
+      status: "available", version: "5.0.8+2222222", automatic: !halted,
+      ...(halted ? { blocked: "rollout-halted" } : {}),
+    }, JSON.stringify(policy));
+    assert.equal(made.instance.automaticCandidate(), halted ? null : made.instance.automaticCandidate());
+    if (halted) {
+      await assert.rejects(made.instance.beginInstall({ automatic: true }), /needs a manual install/);
+      const prepared = await made.instance.beginInstall();
+      made.instance.cancelInstall(prepared);
+    }
+  }
+});
+
+test("a missing, broken or unreachable policy file falls back to the default without failing the check", async () => {
+  for (const [policy, pattern] of [
+    [new Error("GitHub update check failed with HTTP 404"), /HTTP 404/],
+    [{ stages: [] }, /not a valid rollout policy/],
+  ]) {
+    const made = controller({}, {
+      fetchLatestCommit: async () => ({ sha: MAIN, committedAt: new Date(-24 * HOUR).toISOString() }),
+      fetchRolloutPolicy: policy instanceof Error
+        ? async () => { throw policy; }
+        : async () => policy,
+    });
+    seedRolloutBucket(made.logs, 99);
+    // Only the default's 100 percent after a day lets bucket 99 through: the fallback is what ran.
+    assert.deepEqual(await made.instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: true });
+    const noted = readUpdateState(path.join(made.logs, "source-update-state.json")).lastRolloutPolicy;
+    assert.equal(noted.source, "default");
+    assert.match(noted.reason, pattern);
+    assert.ok(noted.at);
+  }
+
+  // A policy that does load is used as given, and the state says so.
+  const made = rolloutController({ bucket: 99, hours: 0, policy: { haltAll: false, haltedCommits: [], stages: [{ ageHours: 0, percent: 100 }] } });
+  assert.deepEqual(await made.instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: true });
+  const noted = readUpdateState(path.join(made.logs, "source-update-state.json")).lastRolloutPolicy;
+  assert.deepEqual(noted, { source: "repository", reason: null, at: noted.at });
+});
+
+test("a commit whose age cannot be known is never held back by staging, but a halt still stops it", async () => {
+  for (const committedAt of [null, "not a date"]) {
+    const made = controller({}, {
+      fetchLatestCommit: async () => ({ sha: MAIN, committedAt }),
+      fetchRolloutPolicy: async () => ({ haltAll: false, haltedCommits: [], stages: [{ ageHours: 0, percent: 0 }] }),
+    });
+    seedRolloutBucket(made.logs, 0);
+    assert.deepEqual(await made.instance.checkOnce(), {
+      status: "available", version: "5.0.8+2222222", automatic: true,
+    }, String(committedAt));
+  }
+
+  const halted = controller({}, {
+    fetchLatestCommit: async () => ({ sha: MAIN, committedAt: null }),
+    fetchRolloutPolicy: async () => ({ haltAll: true, haltedCommits: [], stages: [{ ageHours: 0, percent: 100 }] }),
+  });
+  seedRolloutBucket(halted.logs, 0);
+  assert.deepEqual(await halted.instance.checkOnce(), {
+    status: "available", version: "5.0.8+2222222", automatic: false, blocked: "rollout-halted",
+  });
+});
+
+test("a commit dated in the future counts as brand new, not as negative age", async () => {
+  const made = controller({}, {
+    fetchLatestCommit: async () => ({ sha: MAIN, committedAt: new Date(HOUR).toISOString() }),
+    fetchRolloutPolicy: async () => ({ haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES }),
+  });
+  seedRolloutBucket(made.logs, 9);
+  assert.deepEqual(await made.instance.checkOnce(), { status: "available", version: "5.0.8+2222222", automatic: true });
+  const later = controller({}, {
+    fetchLatestCommit: async () => ({ sha: MAIN, committedAt: new Date(HOUR).toISOString() }),
+    fetchRolloutPolicy: async () => ({ haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES }),
+  });
+  seedRolloutBucket(later.logs, 10);
+  assert.deepEqual(await later.instance.checkOnce(), {
+    status: "available", version: "5.0.8+2222222", automatic: false, blocked: "rollout-staging",
+  });
 });
 
 test("a commit that failed here before is offered only for a manual install", async () => {
