@@ -19,7 +19,6 @@ const DEFAULT_STATE = Object.freeze({
   browserInteractionMode: "automatic",
   experimentalBiggerContext: false,
   experimentalSkillAttachments: false,
-  zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
@@ -52,7 +51,6 @@ function readState(filePath) {
       "automaticUpdates",
       "experimentalBiggerContext",
       "experimentalSkillAttachments",
-      "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",
     ]) {
@@ -63,7 +61,6 @@ function readState(filePath) {
     }
     if (state.coreSetupComplete !== true) {
       if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";
-      state.zeroRiskProEnabled = false;
     }
     if (state.browserSmokeVersion !== null
       && (typeof state.browserSmokeVersion !== "string" || state.browserSmokeVersion.length > 128)) {

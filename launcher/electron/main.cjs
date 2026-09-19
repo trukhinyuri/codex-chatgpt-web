@@ -969,7 +969,6 @@ function registerIpc({ logger, stateStore }) {
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
-      zeroRiskProEnabled: false,
     });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
@@ -1003,7 +1002,6 @@ function registerIpc({ logger, stateStore }) {
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
         mcpSetupComplete: false,
@@ -1044,7 +1042,6 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({
       browserInteractionMode: interactionMode,
       ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE,
       mcpRuntimeInstalled: true,
@@ -1092,25 +1089,6 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setSkillAttachments(enabled === true);
     const state = stateStore.update({ experimentalSkillAttachments: result.enabled });
     send("launcher:state-changed", state);
-    return state;
-  });
-  handle("launcher:zero-risk-pro", async (_event, enabled) => {
-    const browserOperation = browserHost.currentOperation();
-    if (browserHost.activeTraceId || browserOperation) {
-      throw new Error(
-        browserHost.activeTraceId
-          ? "Finish or cancel active ChatGPT turns before changing Zero Risk model profiles"
-          : `Finish ${browserOperation} before changing Zero Risk model profiles`,
-      );
-    }
-    const result = await runtimeHost.setZeroRiskPro(enabled === true);
-    const state = stateStore.update({
-      zeroRiskProEnabled: result.enabled,
-      codexCatalogVerified: IS_DEV_PROFILE,
-      codexRestartRequired: !IS_DEV_PROFILE,
-    });
-    send("launcher:state-changed", state);
-    if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return state;
   });
   handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
@@ -1738,7 +1716,6 @@ async function start() {
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
-      zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
     });
     send("launcher:state-changed", state);
     logger.info("dev_profile.ready", {
@@ -1765,7 +1742,6 @@ async function start() {
         codexRestartRequired: true,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
-        zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
         ...(upgrade.mode === "full" ? {
           mcpRuntimeInstalled: true,
           mcpSetupComplete: false,
@@ -1788,12 +1764,10 @@ async function start() {
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
-      const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
-        || saved.experimentalBiggerContext !== enabled
-        || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, zeroRiskProEnabled });
+        || saved.experimentalBiggerContext !== enabled) {
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments });
         send("launcher:state-changed", state);
       }
     }
@@ -1822,7 +1796,6 @@ async function start() {
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
-        zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(runtime.bridgeRouteChanged ? {
           codexCatalogVerified: false,
           codexRestartRequired: true,

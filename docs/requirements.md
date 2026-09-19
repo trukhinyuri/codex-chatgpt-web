@@ -17,12 +17,14 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. A failure the product cannot heal is reported to the maintainer automatically ([problem reports](../README.md#problem-reports)), without any user data (see R7).
 3. Error text shown to users never tells them to edit files, check tabs, disable features, or retry by hand when the product could do that itself.
 4. The whole loop runs without people: a problem is detected, reported anonymously (no user data, no user identity), triaged and planned by agents, fixed, released gradually and verified, and the same happens when an operating system, a technology or a harness changes. Users are told only what affects them, in their language, and never need to act.
+5. A mode or control a provider stops offering an account degrades to the nearest one it still offers, with the change recorded; the product never repeats a request for a control that is not there.
+6. A provider's own account check is detected and obeyed, never retried. When ChatGPT holds an account — its suspicious-activity banner, or a model and effort menu that no longer carries this account's controls — the product stops automatic turns for that account until a person has secured it and signed in again, answers every waiting turn with one terminal error naming one action (secure the account and sign in), and writes only a structural diagnostic (see R7.1) and no repeats. See [incidents/2026-09-18-account-lock.md](incidents/2026-09-18-account-lock.md).
 
 ## R3. Work is never lost or interrupted
 
 1. No automatic action interrupts a running Codex turn: updates, restarts, rollbacks and repairs wait until no turn runs. Only an explicit choice of the user in a dialog may stop running work.
 2. Context is never truncated to make something fit. Large tasks work by splitting, staging and compaction that keeps the task; a request that cannot fit is reported, not silently shortened.
-3. Tasks of any size and any number of parallel sessions work; load is paced and queued, never answered with an error that a wait would have avoided.
+3. Tasks of any size and any number of parallel sessions work; load is paced and queued, never answered with an error that a wait would have avoided. Pacing is per account and shared by every session and harness on it: a minimum distance between sends, and after any failure ChatGPT itself ends a turn with, a pause that starts at 60 s and doubles per consecutive failure to a ceiling of 5 minutes, cleared by one clean turn.
 4. Provider limits (ChatGPT rate limits, usage caps, proxy quotas) are respected, never bypassed or disguised; the product waits for them to end and says so.
 5. Concurrency is always correct: any number of parallel sessions, subagents and Codex hosts share the bridge without lost, duplicated or cross-wired turns, with one ChatGPT account as with many.
 
@@ -53,7 +55,7 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 2. Secrets stay with the human: agents never type, read, print or store passwords, one-time codes, API keys or cookies.
 3. No OAuth client secrets or other credentials are committed; build inputs from outside the repository are pinned by version and SHA-256.
 4. The bridge listens only on loopback and rejects foreign origins.
-5. The product does not disguise what it is. It never spoofs a browser, hides its automation, or evades a provider's detection or protective measures; it reduces the risk of account restrictions by staying within limits and terms, not by concealment.
+5. The product does not disguise what it is. It never spoofs a browser, hides its automation, or evades a provider's detection or protective measures; it reduces the risk of account restrictions by staying within limits and terms, not by concealment. It also declines the shapes of traffic that get accounts restricted: **ChatGPT Web — Pro is excluded, and the highest mode the product offers is Extra High.**
 
 ## R8. Quality
 
@@ -71,7 +73,8 @@ These requirements come from the owner (Yuri Trukhin) and bind every change to t
 3. Work that depends on an account (a retained conversation, a continuation, a compaction) stays on that account or is moved safely, never mixed.
 4. With one account, everything works exactly as before; more accounts never change correctness, only capacity.
 5. The product scales horizontally to thousands of users and thousands of accounts, where every account is used by the person it belongs to (for example each employee's own Enterprise seat): no shared bottleneck, no single machine or service whose failure stops others, and optional coordination that degrades to local operation when unreachable.
-6. Accounts are used within their provider's terms. OpenAI's Terms of Use (updated 16 January 2026) forbid making an account available to anyone else and circumventing rate limits or restrictions. The product therefore never shares one person's ChatGPT account with other people and never multiplies accounts to get around a limit; capacity beyond an account's limits comes from the routes built for it (native OpenAI models on the user's plan or API, and CLIProxyAPI providers under their own terms).
+6. Capacity never comes from the ChatGPT Pro mode: it is retired from the catalog, the routes and setup, and Codex's `ultra` effort is never published. A thread still pinned to a retired Pro row gets one terminal error with one action (select Extra High).
+7. Accounts are used within their provider's terms. OpenAI's Terms of Use (updated 16 January 2026) forbid making an account available to anyone else and circumventing rate limits or restrictions. The product therefore never shares one person's ChatGPT account with other people and never multiplies accounts to get around a limit; capacity beyond an account's limits comes from the routes built for it (native OpenAI models on the user's plan or API, and CLIProxyAPI providers under their own terms).
 
 ## R10. Ahead of every alternative
 

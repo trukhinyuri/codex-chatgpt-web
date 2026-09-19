@@ -29,7 +29,7 @@ mkdirSync(tempRoot, { recursive: true });
 afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
 
 const START = new Date(2026, 8, 18, 14, 52, 18).getTime();
-const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true };
 let uniqueAccount = 0;
 
 function gate(clock: FakeGateClock): ChatGptAdmissionGate {

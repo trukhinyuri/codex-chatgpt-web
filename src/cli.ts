@@ -65,8 +65,6 @@ Setup options:
                                Send prompts and read ChatGPT state through browser automation (default)
   --zero-risk-browser-interaction
                                Full mode: select, paste, and send in the launcher yourself
-  --zero-risk-pro              Zero Risk: also install the explicit Pro-sized model row
-  --zero-risk-default          Zero Risk: install only the default model row
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome/Chromium executable used for account login
   --browser-host-descriptor PATH
@@ -312,12 +310,11 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
   if (skillAttachments || inlineSkills) options.experimentalSkillAttachments = skillAttachments;
-  const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
-  const zeroRiskDefault = takeFlag(args, "--zero-risk-default");
-  if (zeroRiskPro && zeroRiskDefault) {
-    throw new Error("Choose at most one Zero Risk model profile: --zero-risk-pro or --zero-risk-default");
-  }
-  if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
+  // ChatGPT Web — Pro is retired (docs/incidents/2026-09-18-account-lock.md). Both flags of the
+  // removed Zero Risk model profile are still accepted and ignored, so a launcher or script from an
+  // older build keeps working instead of failing setup.
+  takeFlag(args, "--zero-risk-pro");
+  takeFlag(args, "--zero-risk-default");
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
   options.restartService = takeFlag(args, "--restart-service");
   assertNoArgs(args);

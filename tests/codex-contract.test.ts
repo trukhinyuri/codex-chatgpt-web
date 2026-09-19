@@ -325,7 +325,7 @@ test("after 'did not confirm' Codex receives one terminal answer and no new brow
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://codex-contract-did-not-confirm-${nonce}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const originalRun = worker.run.bind(worker);

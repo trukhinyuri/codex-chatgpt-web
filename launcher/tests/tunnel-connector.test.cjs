@@ -60,7 +60,6 @@ function fullConfig(root, descriptorPath, overrides = {}, platform = process.pla
     headed: true,
     solAvailable: true,
     extraHighAvailable: true,
-    proAvailable: true,
     autoApproveToolCalls: false,
     controlToken: "tunnel-connector-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],

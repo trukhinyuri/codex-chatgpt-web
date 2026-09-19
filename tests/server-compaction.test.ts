@@ -95,19 +95,19 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
 test("compacts a Pro task with Pro effort", async () => {
   const config = defaultConfig("full");
   config.extraHighAvailable = true;
-  config.proAvailable = true;
+  config.extraHighAvailable = true;
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "chatgpt-web/pro",
+      model: "chatgpt-web/extra-high",
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect" }] }],
     }),
   }), config, () => ({
     name: "pro-compaction-effort-check",
     async runTurn(parsed, _incoming, emit) {
       expect(parsed._compactionRequest).toBe(true);
-      expect(parsed.options.reasoning).toBe("max");
+      expect(parsed.options.reasoning).toBe("xhigh");
       emit({ type: "text_delta", text: summary, phase: "final_answer" });
       emit({ type: "done", stopReason: "stop", endTurn: true });
     },
@@ -490,10 +490,9 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
   expect(body.error.message).toContain("rolling checkpoint");
 });
 
-test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
+test("rejects account-gated routed models before opening a browser", async () => {
   for (const [routedModel, label] of [
     ["chatgpt-web/extra-high", "Extra High"],
-    ["chatgpt-web/pro", "Pro"],
   ] as const) {
     const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
       method: "POST",

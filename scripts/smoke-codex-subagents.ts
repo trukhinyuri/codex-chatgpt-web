@@ -26,7 +26,7 @@ if (bundled.status !== 0) {
 const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
 const catalogConfig = defaultConfig("browser-only");
 catalogConfig.solAvailable = true;
-catalogConfig.proAvailable = true;
+catalogConfig.extraHighAvailable = true;
 catalogConfig.subagentProtocol = protocol === "v1" ? "compatibility-v1" : "native";
 const catalog = augmentNativeModelCatalog(sourceCatalog, catalogConfig);
 
@@ -278,7 +278,7 @@ const server = Bun.serve({
       }
       return new Response(bridgeToResponsesSSE(
         responseFor(role, step, body),
-        "chatgpt-web/pro",
+        "chatgpt-web/extra-high",
         collaborationMap,
       ), {
         headers: {
@@ -294,7 +294,7 @@ const server = Bun.serve({
 });
 
 writeFileSync(join(codexHome, "config.toml"), [
-  'model = "chatgpt-web/pro"',
+  'model = "chatgpt-web/extra-high"',
   'model_provider = "lifecycle"',
   `model_catalog_json = ${JSON.stringify(join(root, "models.json"))}`,
   "",
@@ -329,7 +329,7 @@ try {
     "--json",
     "--dangerously-bypass-approvals-and-sandbox",
     "--model",
-    "chatgpt-web/pro",
+    "chatgpt-web/extra-high",
     "ROOT_LIFECYCLE: complete the nested subagent lifecycle and the follow-up.",
   ], {
     cwd: root,

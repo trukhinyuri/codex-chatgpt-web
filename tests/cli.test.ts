@@ -96,7 +96,9 @@ test("setup browser-interaction flags are explicit and mutually exclusive", asyn
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Choose at most one browser interaction mode");
 
-    const profileConflict = await runCli([
+    // The retired Zero Risk Pro flags are accepted and ignored, so an older launcher or script
+    // keeps working; setup fails here only on the mode this command really cannot satisfy.
+    const retiredProfileFlags = await runCli([
       "setup",
       "--browser-only",
       "--zero-risk-browser-interaction",
@@ -108,8 +110,8 @@ test("setup browser-interaction flags are explicit and mutually exclusive", asyn
       CODEX_HOME: join(root, "codex"),
       CODEX_CHATGPT_WEB_HOME: join(root, "app"),
     });
-    expect(profileConflict.exitCode).toBe(1);
-    expect(profileConflict.stderr).toContain("Choose at most one Zero Risk model profile");
+    expect(retiredProfileFlags.stderr).not.toContain("Unknown arguments");
+    expect(retiredProfileFlags.stderr).toContain("Zero Risk requires --full");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -286,8 +288,7 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
       authenticated: true,
       temporary: true,
       solAvailable: true,
-      extraHighAvailable: false, proAvailable: false,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      extraHighAvailable: false, url: "https://chatgpt.com/?temporary-chat=true",
     }));
   });
   await new Promise<void>((resolveListen, rejectListen) => {
@@ -339,8 +340,7 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
       browserHost: "launcher",
       browserHostDescriptorPath: descriptorPath,
       solAvailable: true,
-      extraHighAvailable: false, proAvailable: false,
-    });
+      extraHighAvailable: false, });
     expect(existsSync(join(root, "production-codex", "config.toml"))).toBe(false);
     expect(existsSync(join(devHome, "codex-home", "config.toml"))).toBe(false);
   } finally {
@@ -498,8 +498,7 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
     storageStatePath: join(appHome, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(appHome),
     headed: true,
-    extraHighAvailable: false, proAvailable: false,
-    autoApproveToolCalls: false,
+    extraHighAvailable: false, autoApproveToolCalls: false,
     controlToken: "launcher-uninstall-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
   })}\n`);
@@ -561,8 +560,7 @@ test("authorized launcher uninstall does not re-probe an already stopped full ru
     storageStatePath: join(appHome, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(appHome),
     headed: true,
-    extraHighAvailable: false, proAvailable: false,
-    autoApproveToolCalls: false,
+    extraHighAvailable: false, autoApproveToolCalls: false,
     controlToken: "runtime-control-token-0123456789abcdef0123456789",
     runtimeCommand: [process.execPath],
     tunnel: {

@@ -6,7 +6,7 @@ import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartS
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
 
-const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true };
 
 function request(text: string): CodexParsedRequest {
   return {
@@ -25,7 +25,7 @@ test.each([
 }, 15_000);
 
 test("multipart selection accounts for whole-record and composer fit before submission", () => {
-  const plus = { ...capabilities, extraHighAvailable: false, proAvailable: false };
+  const plus = { ...capabilities, extraHighAvailable: false };
   for (const [contents, expected] of [
     [["small task"], undefined],
     [[50_000, 40_000, 50_000, 5_000].map(n => "word ".repeat(n)), 3],
@@ -56,11 +56,11 @@ test("Bigger Context compaction selects three parts before the legacy inline byt
 
 test("multipart planning leaves room for final attachments and execution instructions without losing history", () => {
   for (const scenario of [
-    { extraHighAvailable: false, proAvailable: false, images: 3, schema: false },
-    { extraHighAvailable: true, proAvailable: true, images: 10, schema: false },
-    { extraHighAvailable: false, proAvailable: false, images: 0, schema: true },
+    { extraHighAvailable: false, images: 3, schema: false },
+    { extraHighAvailable: true, images: 3, schema: false },
+    { extraHighAvailable: false, images: 0, schema: true },
   ]) {
-    const caps = { ...capabilities, proAvailable: scenario.proAvailable };
+    const caps = { ...capabilities, extraHighAvailable: scenario.extraHighAvailable };
     const parsed = request("");
     const texts = Array.from({ length: 36 }, (_, index) => `record ${index}: ${"word ".repeat(5_000)}`);
     parsed.context.messages = texts.map((content, index) => ({ role: "user", content, timestamp: index + 1 }));

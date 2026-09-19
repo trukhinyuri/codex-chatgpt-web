@@ -40,7 +40,7 @@ function paidConfig(): AppConfig {
   const config = defaultConfig("browser-only");
   config.solAvailable = true;
   config.extraHighAvailable = true;
-  config.proAvailable = true;
+  config.extraHighAvailable = true;
   return config;
 }
 
@@ -98,7 +98,7 @@ test("a transport failure after a success serves the last-good catalog rebuilt w
   expect(fresh.status).toBe(200);
   expect(fresh.headers.get("set-cookie")).toBeNull();
   expect(fresh.headers.get(MODEL_CATALOG_STALE_HEADER)).toBeNull();
-  expect(await webSlugs(fresh)).toContain("chatgpt-web/pro");
+  expect(await webSlugs(fresh)).toContain("chatgpt-web/extra-high");
 
   outcome = "reset";
   calls = 0;
@@ -110,7 +110,8 @@ test("a transport failure after a success serves the last-good catalog rebuilt w
   expect(served.headers.get("etag")).toMatch(/^W\/"[A-Za-z0-9_-]+"$/);
   const slugs = await webSlugs(served);
   expect(slugs).toContain("chatgpt-web/extra-high");
-  expect(slugs).toContain("chatgpt-web/pro");
+  // ChatGPT Web - Pro is retired: a saved catalog never brings its row back.
+  expect(slugs).not.toContain("chatgpt-web/pro");
   // One retry, then the fallback: never a third upstream request inside Codex's refresh budget.
   expect(calls).toBe(2);
   expect(failures).toEqual([]);
@@ -118,11 +119,11 @@ test("a transport failure after a success serves the last-good catalog rebuilt w
   expect(stale[0]!.failure).toEqual({ stage: "transport", code: "ECONNRESET", name: "TypeError", origin: "upstream_fetch" });
 
   // The rebuilt rows follow the configuration of the moment, not the one of the saved catalog.
-  config.proAvailable = false;
+  config.extraHighAvailable = false;
   const downgraded = await modelsRequest(catalogRequest({ account: "acct-1" }), config, upstream, undefined, undefined, undefined, options);
   expect(downgraded.headers.get(MODEL_CATALOG_STALE_HEADER)).toBe("stale");
   const downgradedSlugs = await webSlugs(downgraded);
-  expect(downgradedSlugs).toContain("chatgpt-web/extra-high");
+  expect(downgradedSlugs).not.toContain("chatgpt-web/extra-high");
   expect(downgradedSlugs).not.toContain("chatgpt-web/pro");
 });
 

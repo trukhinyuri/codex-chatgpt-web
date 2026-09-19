@@ -18,7 +18,6 @@ export interface LauncherState {
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
-  zeroRiskProEnabled: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
@@ -241,7 +240,6 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
-  setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
   setBrowserInteractionMode(mode: BrowserInteractionMode): Promise<{
     state: LauncherState;
     credentialsRequired: boolean;

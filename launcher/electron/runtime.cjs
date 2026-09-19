@@ -1128,41 +1128,6 @@ class RuntimeHost {
     return { ...result, enabled: enabled === true };
   }
 
-  async setZeroRiskPro(enabled) {
-    const current = this.runtimeConfigSnapshot();
-    if (!current.configured) {
-      throw new Error("Install the Codex integration before changing Zero Risk model profiles");
-    }
-    if (current.config?.browserInteractionMode !== "manual" || current.mode !== "full") {
-      throw new Error("Zero Risk Pro is available only while the Full Zero Risk harness is active");
-    }
-    const profileFlag = enabled === true ? "--zero-risk-pro" : "--zero-risk-default";
-    const args = [
-      ...(this.launcherProfile === "development" ? ["dev", "setup"] : ["setup"]),
-      "--full",
-      "--browser-host-descriptor",
-      this.browserDescriptorPath,
-      ...this.browserInteractionArgs({ mode: "manual" }),
-      "--acknowledge-unofficial",
-      "--standard-context",
-      profileFlag,
-      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
-    ];
-    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
-    const options = {
-      message: enabled ? "Installing the Zero Risk Pro model" : "Removing the Zero Risk Pro model",
-      successMessage: enabled
-        ? `Zero Risk Pro installed${this.launcherProfile === "production" ? "; restart Codex" : ""}`
-        : `Default Zero Risk model restored${this.launcherProfile === "production" ? "; restart Codex" : ""}`,
-      timeoutMs: CORE_SETUP_TIMEOUT_MS,
-      preserveTunnel: true,
-    };
-    const result = this.launcherProfile === "development"
-      ? await this.runDevSetup("zero-risk-pro", args, options)
-      : await this.runSetup("zero-risk-pro", args, options);
-    return { ...result, mode: current.mode, enabled: enabled === true };
-  }
-
   async upgradeManagedRuntime() {
     this.assertProductionProfile("Managed Codex runtime upgrade");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);

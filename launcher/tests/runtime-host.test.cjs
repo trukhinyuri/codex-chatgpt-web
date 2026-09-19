@@ -211,42 +211,6 @@ test("Bigger Context updates the isolated DEV config without installing a Codex 
   });
 });
 
-test("Zero Risk Pro transaction installs or removes only its explicit model profile", async () => {
-  const config = {
-    mode: "full",
-    browserHost: "launcher",
-    browserInteractionMode: "manual",
-    appName: "Codex Zero Risk",
-    automaticAppName: "Codex Native2",
-  };
-  const enabled = hostFor(config, "manual");
-  const result = await enabled.host.setZeroRiskPro(true);
-  assert.equal(result.enabled, true);
-  assert.deepEqual(enabled.invocation(), {
-    name: "zero-risk-pro",
-    args: [
-      "setup",
-      "--full",
-      "--browser-host-descriptor",
-      "/runtime/launcher-browser.json",
-      "--zero-risk-browser-interaction",
-      "--acknowledge-unofficial",
-      "--standard-context",
-      "--zero-risk-pro",
-      "--replace-codex-route",
-      "--restart-service",
-    ],
-  });
-
-  const disabled = hostFor(config, "manual");
-  await disabled.host.setZeroRiskPro(false);
-  assert.equal(disabled.invocation().args.includes("--zero-risk-default"), true);
-  await assert.rejects(
-    hostFor({ ...config, browserInteractionMode: "automatic" }).host.setZeroRiskPro(true),
-    /only while the Full Zero Risk harness is active/,
-  );
-});
-
 test("DEV setup child environment removes launcher-rebound production aliases", async () => {
   const fixture = devHostFor(null);
   assert.deepEqual(fixture.host.devSetupEnvironment({
@@ -370,7 +334,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     appName: "Codex Native2",
     releaseVersion: "1.1.1",
     solAvailable: true,
-    extraHighAvailable: false, proAvailable: false,
+    extraHighAvailable: false,
   });
   fixture.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
 

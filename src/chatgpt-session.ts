@@ -227,7 +227,7 @@ export async function detectChatGptAccountCapabilities(
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
       if (Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
+        return { solAvailable: false, extraHighAvailable: false };
       }
     } else {
       absenceSince = undefined;
@@ -258,7 +258,7 @@ export async function detectChatGptAccountCapabilities(
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
     }
-    return { solAvailable: true, extraHighAvailable: state.max - state.min + 1 >= 4, proAvailable: state.max - state.min + 1 >= 5 };
+    return { solAvailable: true, extraHighAvailable: state.max - state.min + 1 >= 4 };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

@@ -358,7 +358,7 @@ test("browser turns run concurrently up to the five-tab limit, and a sixth waits
   const browserTurn = (traceId: string) => ({
     traceId,
     modelId: "chatgpt-web/high",
-    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
     prepare: async () => ({ text: traceId, images: [], release() {} }),
     onTextDelta() {},
   });
@@ -667,8 +667,7 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
     chatgptWeb: {
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      storageStatePath: `/tmp/issue-285-${Date.now()}-${Math.random()}.json`,
+      extraHighAvailable: true, storageStatePath: `/tmp/issue-285-${Date.now()}-${Math.random()}.json`,
     },
   };
   type Baseline = {
@@ -810,8 +809,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     chatgptWeb: {
       localToolsEnabled: true,
       solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      storageStatePath: `/tmp/multipart-send-budget-${Date.now()}-${Math.random()}.json`,
+      extraHighAvailable: true, storageStatePath: `/tmp/multipart-send-budget-${Date.now()}-${Math.random()}.json`,
     },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
@@ -883,7 +881,7 @@ function sendHarness(options: {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://send-harness-${Date.now()}-${Math.random()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
     runStage<T>(
@@ -1187,7 +1185,7 @@ test("every Stop press names its reason and whether it landed in the log", async
  */
 async function runMultipartSendTurn(pressOutcome: (press: number) => "ok" | "throws_accepted" | "throws_unseen") {
   const diagnostics = mkdtempSync(join(tmpdir(), "multipart-send-"));
-  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true };
   const reachedAnswer = new Error("fixture reached the final answer observation");
   const counts = { sendPresses: 0, stopPresses: 0, sendActivations: 0, submissions: 0 };
   const stages: string[] = [];
@@ -1306,7 +1304,7 @@ test("submission observation recovery resumes with rebound locators and is stric
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://submission-recovery-${Date.now()}-${Math.random()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
   };
   type Evidence = "user_turn" | "assistant_turn" | "generation_running" | "mcp_tool_call";
   type Recovery = { page: Page; baseline: unknown };
@@ -1381,7 +1379,7 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://assistant-recovery-${Date.now()}-${Math.random()}`,
-    chatgptWeb: { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
   };
   type Baseline = {
     initialTurnIdentities: string[];
@@ -1485,7 +1483,7 @@ test("aborting before an assistant turn is bound presses Stop so the server-side
   const worker = ChatGptBrowserWorker.forProvider({
     adapter: "chatgpt-web",
     baseUrl: `browser://pre-binding-abort-${Date.now()}-${Math.random()}`,
-    chatgptWeb: { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true },
   }) as unknown as {
     waitForNewAssistantTurn(
       page: Page,
@@ -1541,7 +1539,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
       const worker = ChatGptBrowserWorker.forProvider({
         adapter: "chatgpt-web",
         baseUrl: `browser://assistant-expiry-${scenario}-${Math.random()}`,
-        chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+        chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
       }) as unknown as {
         waitForNewAssistantTurn(page: Page, baseline: Baseline, deadline: number | undefined): Promise<{
           identity: string; locator: unknown;
@@ -2906,7 +2904,7 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
       page: unknown,
       modelId: string,
       reasoning: string,
-      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean },
+      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean },
       captureDiagnostic: (checkpoint: string) => Promise<void>,
     ): Promise<{ displayLabel: string; uiEffortIndex: number | null }>;
   }).selectModelAndEffort;
@@ -2918,8 +2916,7 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
   }, "gpt-5.6-luna", "low", {
     localToolsEnabled: true,
     solAvailable: false,
-    extraHighAvailable: false, proAvailable: false,
-  }, async checkpoint => { checkpoints.push(checkpoint); });
+    extraHighAvailable: false, }, async checkpoint => { checkpoints.push(checkpoint); });
 
   expect(mode).toMatchObject({ displayLabel: "Luna", uiEffortIndex: null });
   expect(checkpoints).toEqual(["luna-default-confirmed"]);
@@ -3350,7 +3347,7 @@ test("effort selection stops as soon as ChatGPT reports an expired session", asy
       page: unknown,
       modelId: string,
       reasoning: string,
-      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean },
+      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean },
     ): Promise<unknown>;
   }).selectModelAndEffort;
 
@@ -3361,8 +3358,7 @@ test("effort selection stops as soon as ChatGPT reports an expired session", asy
   }, "gpt-5.6-sol", "high", {
     localToolsEnabled: true,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
-  });
+    extraHighAvailable: true, });
   const result = await Promise.race([
     selection.catch(error => error),
     new Promise(resolve => setTimeout(() => resolve("still waiting"), 100)),
@@ -3416,7 +3412,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
       page: unknown,
       modelId: string,
       reasoning: string,
-      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean; proAvailable: boolean },
+      capabilities: { localToolsEnabled: boolean; solAvailable: boolean; extraHighAvailable: boolean },
     ): Promise<unknown>;
   }).selectModelAndEffort;
 
@@ -3433,8 +3429,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   }, "gpt-5.6-sol", "high", {
     localToolsEnabled: true,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
-  });
+    extraHighAvailable: true, });
   const result = await Promise.race([
     selection.catch(error => error),
     new Promise(resolve => setTimeout(() => resolve("still waiting"), 400)),
@@ -3624,9 +3619,9 @@ test("auto-approval recognizes the observed non-dialog approval card", async () 
 });
 
 test("browser preflight separates model context from one-message transport limits", () => {
-  const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
-  const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
-  const luna = { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false };
+  const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false };
+  const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true };
+  const luna = { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false };
 
   try {
     assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "medium", plus);
@@ -3651,8 +3646,10 @@ test("browser preflight separates model context from one-message transport limit
   expect(() => assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "high", plus)).toThrow(
     "90,000-token context window",
   );
-  expect(() => assertChatGptWebInputWithinLimits(100_000, 100_000, "gpt-5.6-sol", "xhigh", pro)).not.toThrow();
-  expect(() => assertChatGptWebInputWithinLimits(100_000, 100_000, "gpt-5.6-sol", "max", pro)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "xhigh", pro)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(90_000, 81_808, "gpt-5.6-sol", "xhigh", pro)).toThrow(
+    "90,000-token context window",
+  );
   expect(() => assertChatGptWebInputWithinLimits(28_000, 19_808, "gpt-5.6-luna", "low", luna)).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(28_001, 19_809, "gpt-5.6-luna", "low", luna)).toThrow(
     "ChatGPT Free browser transport budget",
@@ -3693,42 +3690,10 @@ test("browser preflight separates model context from one-message transport limit
     )).toThrow("1,048,572-character ChatGPT composer boundary");
   }
 
-  expect(() => assertChatGptWebInputWithinLimits(
-    111_192,
-    103_000,
-    "gpt-5.6-sol",
-    "medium",
-    pro,
-    515_000,
-  )).not.toThrow();
-  expect(() => assertChatGptWebInputWithinLimits(
-    111_193,
-    103_001,
-    "gpt-5.6-sol",
-    "medium",
-    pro,
-    515_001,
-  )).toThrow("103,000-token ChatGPT browser message boundary");
-  expect(() => assertChatGptWebInputWithinLimits(
-    112_192,
-    104_000,
-    "gpt-5.6-sol",
-    "max",
-    pro,
-    520_000,
-  )).not.toThrow();
-  expect(() => assertChatGptWebInputWithinLimits(
-    112_193,
-    104_001,
-    "gpt-5.6-sol",
-    "max",
-    pro,
-    520_001,
-  )).toThrow("104,000-token ChatGPT browser message boundary");
 });
 
 test("Bigger Context fits mixed-density whole records within both token and composer limits", () => {
-  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false, experimentalBiggerContext: true };
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, experimentalBiggerContext: true };
   const dense = "a!b@c#d$e%f^g&h*".repeat(3_750);
   const sparse = "x".repeat(dense.length);
   const whitespace = " ".repeat(450_000);
@@ -3781,51 +3746,32 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
   const plus = {
     localToolsEnabled: false,
     solAvailable: true,
-    extraHighAvailable: false, proAvailable: false,
-    experimentalBiggerContext: true,
+    extraHighAvailable: false, experimentalBiggerContext: true,
   };
   const pro = {
     localToolsEnabled: false,
     solAvailable: true,
-    extraHighAvailable: true, proAvailable: true,
-    experimentalBiggerContext: true,
+    extraHighAvailable: true, experimentalBiggerContext: true,
   };
+  // Extra High is the top mode and carries exactly the Plus ceilings asserted below.
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    333_578,
-    95_000,
+    269_999,
+    80_000,
     "gpt-5.6-sol",
-    "high",
+    "xhigh",
     pro,
     900_000,
     3,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    333_579,
-    95_000,
+    270_000,
+    80_000,
     "gpt-5.6-sol",
-    "high",
+    "xhigh",
     pro,
     900_000,
     3,
   )).toThrow("three-part ceiling");
-  expect(() => assertChatGptWebMultipartInputWithinLimits(
-    222_385,
-    95_000,
-    "gpt-5.6-sol",
-    "high",
-    pro,
-    900_000,
-    2,
-  )).not.toThrow();
-  expect(() => assertChatGptWebMultipartInputWithinLimits(
-    222_386,
-    95_000,
-    "gpt-5.6-sol",
-    "high",
-    pro,
-    900_000,
-    2,
-  )).toThrow("two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     269_999,
     80_000,
@@ -3854,28 +3800,19 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     2,
   )).toThrow("180,000-token two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    280_000,
-    103_001,
-    "gpt-5.6-sol",
-    "high",
-    pro,
-    900_000,
-    3,
-  )).toThrow("ChatGPT message boundary");
-  expect(() => assertChatGptWebMultipartInputWithinLimits(
     20_000,
     10_000,
     "gpt-5.6-luna",
     "low",
-    { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
+    { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false },
     40_000,
     2,
   )).toThrow("unavailable for Luna");
 });
 
 test("Bigger Context stages run in the selected mode and fail closed when it cannot carry them", () => {
-  const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
-  const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false };
+  const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true };
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "low", 30_000, 200_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 80_000, 300_000).effort).toBe("medium");
   // The same text must have the same available input budget inline, staged or in the final part.
@@ -3898,18 +3835,12 @@ test("Bigger Context stages run in the selected mode and fail closed when it can
     .toThrow("The selected ChatGPT Instant mode cannot carry a Bigger Context stage");
   expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 81_808, 300_000))
     .toThrow("The selected ChatGPT High mode cannot carry a Bigger Context stage");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 100_000, 500_000).effort).toBe("max");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "high", 100_000, 600_000).effort).toBe("high");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_000, 1_200_000).effort).toBe("max");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "high", 80_169, 276_680).effort).toBe("high");
   expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "low", 100_000, 600_000))
     .toThrow("The selected ChatGPT Instant mode cannot carry a Bigger Context stage");
-  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_001, 1_000))
-    .toThrow("The selected ChatGPT Pro mode cannot carry a Bigger Context stage");
-  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "max", 1_000, 1_000))
-    .toThrow("ChatGPT Pro effort is not available for this account");
   expect(() => resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
-    { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
+    { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false },
     "low",
     10_000,
     20_000,
@@ -3934,7 +3865,7 @@ test("Bigger Context stages run in the selected mode and fail closed when it can
 
 test("a stage acknowledged by a reasoning mode gets more time than an Instant stage", () => {
   expect(chatGptMultipartAcknowledgementTimeoutMs("low")).toBe(browserStageTimeouts.multipartStageAcknowledgement);
-  for (const effort of ["medium", "high", "xhigh", "max"] as const) {
+  for (const effort of ["medium", "high", "xhigh"] as const) {
     expect(chatGptMultipartAcknowledgementTimeoutMs(effort)).toBe(CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS);
   }
   expect(CHATGPT_MULTIPART_REASONING_ACKNOWLEDGEMENT_MS).toBeGreaterThan(browserStageTimeouts.multipartStageAcknowledgement);
@@ -4827,7 +4758,7 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://suspension-stage-${Date.now()}`,
-    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true },
   };
   const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
     runStage<T>(

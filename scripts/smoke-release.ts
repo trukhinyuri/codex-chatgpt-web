@@ -75,7 +75,6 @@ const config = {
   storageStatePath: join(appHome, "browser", "storage-state.json"),
   brokerSocketPath: defaultBrokerEndpoint(appHome),
   headed: true,
-  proAvailable: true,
   autoApproveToolCalls: false,
   controlToken: "release-smoke-control-token-0123456789abcdef",
   runtimeCommand,
