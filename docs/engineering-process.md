@@ -99,7 +99,7 @@ The practices the project follows, and the ones still to adopt. An agent applies
 | Testing | Real end-to-end tests on CI runners for lifecycle (launchd, Dock, crash restart, update, rollback) | In progress |
 | Testing | Fuzzing of everything parsed from outside (catalog rows, SSE, ChatGPT DOM snapshots, problem-report fields); property-based tests for the admission gate and schedulers | Planned |
 | Release | CI-gated automatic updates, full tests on the user's Mac, health check, automatic rollback, private build home | In place |
-| Release | Staged rollout: a new commit reaches a small, stable share of installations first and widens over time; a kill switch in the repository halts a release everywhere; automatic halt when problem reports rise | Planned (first priority) |
+| Release | Staged rollout: a new commit reaches a small, stable share of installations first and widens over time; a kill switch in the repository halts a release everywhere; automatic halt when problem reports rise | In progress ([plan](plans/2026-09-19-staged-rollout.md); the automatic halt on rising problem reports is still open) |
 | Reliability | Self-healing before reporting; pacing and queues instead of refusals; no automatic action interrupts a running turn | In progress |
 | Reliability | Service objectives per route (turn success rate, latency percentiles) measured from structural logs; a release that worsens them is halted | Planned |
 | Observability | Structural logs and diagnostics without user content; consent-based problem reports with closed allowlists | In place |

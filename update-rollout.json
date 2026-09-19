@@ -1,0 +1,9 @@
+{
+  "haltAll": false,
+  "haltedCommits": [],
+  "stages": [
+    { "ageHours": 0, "percent": 10 },
+    { "ageHours": 6, "percent": 50 },
+    { "ageHours": 24, "percent": 100 }
+  ]
+}

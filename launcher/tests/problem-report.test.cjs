@@ -192,7 +192,10 @@ test("the updater reports build failures where they happen and worker outcomes o
     ...base,
     dependencies: {
       stagingParent: logs,
-      fetchLatestCommit: async () => COMMIT, fetchComparison: async () => ({ status: "ahead" }), fetchCheckRuns: async () => ({ check_runs: [] }),
+      fetchLatestCommit: async () => ({ sha: COMMIT, committedAt: null }),
+      fetchComparison: async () => ({ status: "ahead" }), fetchCheckRuns: async () => ({ check_runs: [] }),
+      // The rollout gate would otherwise reach the network from this test.
+      fetchRolloutPolicy: async () => { throw new Error("offline"); },
       readLoginShellPath: async () => "", acquireLock: lockPath => lockPath, releaseLock: () => {}, appendLog: () => {},
       prepareCheckout: async () => {}, run: async (_command, args) => { if (args.join(" ") === "run verify") throw new Error("exited with code 1"); },
       // Never the real home: an update build empties its private build home there.
