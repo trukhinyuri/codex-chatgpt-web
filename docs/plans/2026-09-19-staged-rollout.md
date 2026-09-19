@@ -45,7 +45,11 @@ Three pieces:
    update installs by itself when `bucket < share`. Stages may be listed in any order.
 3. **The kill switch.** `haltAll: true`, or the target commit's full sha in `haltedCommits`, sets
    `automatic: false, blocked: "rollout-halted"` on every installation that reads the file — within
-   one check interval. To stop a release: edit `update-rollout.json` on `main` (a one-line commit);
+   one check interval, and also at the moment of the swap: `launchInstall` re-reads the policy
+   before starting the worker, so a halt published while a verified build was already waiting for
+   an idle Codex still stops the unattended installation (the staged build stays ready for when
+   the halt lifts). An install the user asked for by hand proceeds regardless — that is a person's
+   explicit choice. To stop a release: edit `update-rollout.json` on `main` (a one-line commit);
    nothing else. A bucket outside the current stage yields `blocked: "rollout-staging"`.
 
 Both rollout blockers behave exactly like the existing ones (`ci-pending`, `failed-before`,

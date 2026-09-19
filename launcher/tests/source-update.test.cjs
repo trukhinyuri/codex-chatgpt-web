@@ -42,6 +42,7 @@ const {
   recordFailedCommit,
   releaseLock,
   rolloutShare,
+  WORKER_STARTED_MARKER,
   rolloutUpdateBlocker,
   sourceBuildPath,
   sourceBuildSteps,
@@ -1004,6 +1005,58 @@ test("a commit that failed here before is offered only for a manual install", as
   const prepared = await instance.beginInstall();
   assert.equal(prepared.commit, MAIN, "the user can still install it by hand");
   instance.cancelInstall(prepared);
+});
+
+test("a halt published while the build waited for idle stops the unattended swap, not the staged build", async () => {
+  let policy = { haltAll: false, haltedCommits: [], stages: ROLLOUT_STAGES };
+  const made = controller({}, {
+    fetchRolloutPolicy: async () => policy,
+    spawnWorker: () => { throw new Error("the worker must not start for a halted rollout"); },
+  });
+  seedRolloutBucket(made.logs, 0);
+  await made.instance.checkOnce();
+  const prepared = await made.instance.beginInstall();
+  // The kill switch is flipped while the verified build waits for Codex to be idle.
+  policy = { haltAll: true, haltedCommits: [], stages: ROLLOUT_STAGES };
+  await assert.rejects(made.instance.launchInstall(prepared), /rollout was halted/);
+  assert.ok(fs.existsSync(prepared.workerPath), "the staged build stays ready for when the halt lifts");
+  const last = made.published[made.published.length - 1];
+  assert.equal(last.blocked, "rollout-halted");
+  // A halted commit listed by sha stops the swap the same way, and the fetch failing must not.
+  const listed = controller({}, {
+    fetchRolloutPolicy: async () => ({ haltAll: false, haltedCommits: [MAIN], stages: ROLLOUT_STAGES }),
+    spawnWorker: () => { throw new Error("the worker must not start for a halted commit"); },
+  });
+  seedRolloutBucket(listed.logs, 0);
+  await listed.instance.checkOnce();
+  await assert.rejects(listed.instance.launchInstall(await listed.instance.beginInstall()), /rollout was halted/);
+});
+
+test("an install the user asked for by hand, and a policy that cannot be read, both proceed at launch", async () => {
+  // A hand-installed update is a person's explicit choice: even haltAll does not override it.
+  const manual = controller({}, {
+    fetchRolloutPolicy: async () => ({ haltAll: true, haltedCommits: [], stages: ROLLOUT_STAGES }),
+    sleep: async () => {},
+    spawnWorker: (command, workerPath) => {
+      fs.writeFileSync(path.join(path.dirname(workerPath), WORKER_STARTED_MARKER), "");
+      return { pid: 6201, exitCode: null, unref() {}, kill() {} };
+    },
+  });
+  await manual.instance.checkOnce();
+  const launch = await manual.instance.launchInstall(await manual.instance.beginInstall(), { requested: true });
+  assert.equal(launch.child.pid, 6201);
+  // A policy fetch that fails at launch time must not strand a verified build (R4.3).
+  const offline = controller({}, {
+    fetchRolloutPolicy: async () => { throw new Error("offline"); },
+    sleep: async () => {},
+    spawnWorker: (command, workerPath) => {
+      fs.writeFileSync(path.join(path.dirname(workerPath), WORKER_STARTED_MARKER), "");
+      return { pid: 6202, exitCode: null, unref() {}, kill() {} };
+    },
+  });
+  await offline.instance.checkOnce();
+  const offlineLaunch = await offline.instance.launchInstall(await offline.instance.beginInstall());
+  assert.equal(offlineLaunch.child.pid, 6202);
 });
 
 test("the failed-commit memory is bounded and keeps the newest entries", () => {
