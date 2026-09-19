@@ -13,6 +13,7 @@ const {
   parseTunnelContactMetrics,
   tunnelContactStatus,
   tunnelRuntimeIdentity,
+  validateConfig,
 } = require("../electron/runtime-supervisor.cjs");
 
 const TUNNEL_ID = "tunnel_0123456789abcdef0123456789abcdef";
@@ -30,7 +31,19 @@ async function freePort() {
   });
 }
 
-function fullConfig(root, descriptorPath, overrides = {}) {
+/**
+ * The turn broker listens on a Unix socket everywhere except Windows, where it is a named pipe
+ * (the product's defaultBrokerEndpoint in src/config.ts). A fixture config that carries a Unix
+ * socket path on Windows is rejected by validateConfig ("invalid Windows broker pipe"), so every
+ * supervisor start reports needs-setup instead of ready.
+ */
+function brokerEndpoint(root, platform = process.platform) {
+  return platform === "win32"
+    ? "\\\\.\\pipe\\codex-chatgpt-web-tunnel-connector-test"
+    : path.join(root, "turn-broker.sock");
+}
+
+function fullConfig(root, descriptorPath, overrides = {}, platform = process.platform) {
   return {
     version: 3,
     releaseVersion: "0.2.0",
@@ -43,7 +56,7 @@ function fullConfig(root, descriptorPath, overrides = {}) {
     browserHostDescriptorPath: descriptorPath,
     chromeExecutablePath: process.execPath,
     storageStatePath: path.join(root, "storage-state.json"),
-    brokerSocketPath: path.join(root, "turn-broker.sock"),
+    brokerSocketPath: brokerEndpoint(root, platform),
     headed: true,
     solAvailable: true,
     extraHighAvailable: true,
@@ -444,6 +457,34 @@ test("an upgraded tunnel-client binary is a different tunnel even with the same 
     tunnelRuntimeIdentity(config, "a".repeat(64)),
   );
   assert.equal(tunnelRuntimeIdentity({ ...config, mode: "browser-only" }), null);
+});
+
+test("the fixture configuration stays valid on Windows named pipes and Unix sockets", () => {
+  // verify(windows-latest) once failed every supervisor-start test with needs-setup because this
+  // fixture wrote a Unix socket path that validateConfig rejects on win32. Validating the fixture
+  // for platform "win32" makes that regression visible on macOS and Linux too.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cwg-tunnel-platform-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  try {
+    for (const platform of ["win32", process.platform]) {
+      const config = fullConfig(root, descriptorPath, {}, platform);
+      assert.equal(config.brokerSocketPath, brokerEndpoint(root, platform));
+      assert.doesNotThrow(() => validateConfig(config, descriptorPath, platform));
+    }
+    assert.throws(
+      () => validateConfig(
+        {
+          ...fullConfig(root, descriptorPath, {}, "win32"),
+          brokerSocketPath: path.join(root, "turn-broker.sock"),
+        },
+        descriptorPath,
+        "win32",
+      ),
+      /invalid Windows broker pipe/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a failed setup stop keeps supervising the tunnel that is still running", async () => {

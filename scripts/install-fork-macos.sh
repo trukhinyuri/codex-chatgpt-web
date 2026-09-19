@@ -138,7 +138,13 @@ fi
 
 # Install exactly like the official installer: never replace a running launcher, and never cancel
 # work to do it.
-launcher_running() { pgrep -f "$APP_PROC" >/dev/null 2>&1; }
+# The launcher's update worker runs from the app's own executable (launcher/electron/source-update.cjs
+# starts it so that macOS sees the bundle replace itself, not a foreign program). Its command line
+# begins with the same path, so every check below ignores it: it is not a running launcher.
+launcher_pids() {
+  pgrep -af "$APP_PROC" 2>/dev/null | grep -v source-update-worker.cjs | awk '{print $1}'
+}
+launcher_running() { [ -n "$(launcher_pids)" ]; }
 active_turns() {
   local health http browser
   health="$(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null)" || { echo 0; return; }
@@ -190,7 +196,7 @@ restore_previous() {
   say "Restoring the previous app: $1"
   osascript -e 'tell application id "dev.codexwebgpt.launcher" to quit' >/dev/null 2>&1 || true
   for _ in $(seq 1 30); do launcher_running || break; sleep 1; done
-  pkill -f "$APP_PROC" >/dev/null 2>&1 || true
+  launcher_pids | while IFS= read -r pid; do kill "$pid" >/dev/null 2>&1 || true; done
   if [ -n "$SAVED" ] && [ -d "$SAVED/Codex Web GPT.app" ]; then
     rm -rf "$APP"
     mv "$SAVED/Codex Web GPT.app" "$APP"

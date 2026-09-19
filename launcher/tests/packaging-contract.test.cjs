@@ -204,6 +204,23 @@ test("the fork's install and rollback scripts quit the launcher by bundle id, ne
   }
 });
 
+// The update worker now runs from the app's own executable, so its command line starts with the same
+// path as a running launcher. A script that mistook it for one would refuse to install, or kill the
+// worker in the middle of replacing the app.
+test("the fork's scripts do not mistake the update worker for a running launcher", () => {
+  for (const script of ["install-fork-macos.sh", "rollback-fork-macos.sh"]) {
+    const file = path.join(repositoryRoot, "scripts", script);
+    const source = fs.readFileSync(file, "utf8");
+    assert.match(source, /launcher_pids\(\) \{\n  pgrep -af "\$APP_PROC" 2>\/dev\/null \| grep -v source-update-worker\.cjs/, script);
+    assert.doesNotMatch(source, /pkill[^\n]*APP_PROC/, `${script} never signals every process under the app's executable`);
+    // Windows runners have no /bin/bash; the text checks above already run everywhere.
+    if (process.platform !== "win32") {
+      const parsed = spawnSync("/bin/bash", ["-n", file], { encoding: "utf8" });
+      assert.equal(parsed.status, 0, `${script} parses: ${parsed.stderr}`);
+    }
+  }
+});
+
 const { publishArtifacts } = require("../scripts/publish-artifacts.cjs");
 const PUBLISH_COMMIT = "c".repeat(40);
 const PUBLISH_ARCH = process.arch === "x64" ? "x64" : "arm64";
