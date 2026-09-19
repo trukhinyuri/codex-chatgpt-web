@@ -962,14 +962,34 @@ function createSourceUpdateController({
     }
   }
 
-  /** Start the detached worker that replaces the app after this launcher exits. */
   /**
-   * Start the worker and wait until it confirms that it read its job and found the staged app. Only
-   * then may the launcher quit; otherwise the worker is stopped and the launcher keeps running.
+   * Start the detached worker that replaces the app after this launcher exits.
+   * An unattended install re-reads the rollout policy here, at the moment of swapping the bundle:
+   * a halt published while the build waited for an idle Codex stops it, keeping the staged build
+   * for whenever the halt lifts. An install the user asked for by hand proceeds regardless — that
+   * is a person's explicit choice, not the rollout speaking.
    */
-  async function launchInstall(prepared) {
+  async function launchInstall(prepared, { requested = false } = {}) {
     for (const file of [prepared.workerPath, prepared.jobPath]) {
       if (!fs.existsSync(file)) throw new Error(`The staged update is incomplete: ${path.basename(file)} is missing`);
+    }
+    if (!requested) {
+      let haltActive = false;
+      try {
+        const policy = normalizeRolloutPolicy(await deps.fetchRolloutPolicy());
+        haltActive = policy !== null && (policy.haltAll === true || policy.haltedCommits.includes(prepared.commit));
+      } catch {
+        // A policy that cannot be read now must not strand a verified build (R4.3); the
+        // health-check rollback still guards the swap itself.
+      }
+      if (haltActive) {
+        logger?.warn("launcher.update_halted_before_install", { commit: prepared.commit, channel: "source" });
+        transition(availableState({ commit: prepared.commit, version: prepared.version, automatic: false, blocked: "rollout-halted" }));
+        throw Object.assign(
+          new Error(`The rollout was halted while the update to ${prepared.version} waited; the staged build stays ready and nothing was interrupted`),
+          { keepStaged: true },
+        );
+      }
     }
     const marker = path.join(prepared.tempRoot, WORKER_STARTED_MARKER);
     fs.rmSync(marker, { force: true });
@@ -1075,6 +1095,7 @@ module.exports = {
   prepareBuildHome,
   sourceBuildEnvironment,
   sourceBuildHome,
+  WORKER_STARTED_MARKER,
   defaultSourceRoot,
   lowPriorityCommand,
   prepareCheckout,
